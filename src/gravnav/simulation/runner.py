@@ -63,8 +63,10 @@ from ..estimators.error_state_ins import (
 )
 from ..estimators.fusion import (
     apply_depth_sensor_measurement,
+    apply_depth_sensor_measurement_height_only,
     apply_geodetic_position_measurement,
     apply_velocity_aid_measurement,
+    apply_velocity_aid_measurement_velocity_only,
     diagonal_covariance_from_std,
     summarize_update_result,
 )
@@ -81,7 +83,12 @@ from ..sensors.gravimeter import (
     GravimeterSpec,
     ScalarGravimeterSensor,
 )
-from ..sensors.imu import IMUSensor, IMUSpec, build_imu_truth_kinematics
+from ..sensors.imu import (
+    IMUSensor,
+    IMUSpec,
+    build_imu_truth_kinematics,
+    build_interval_imu_truth_kinematics,
+)
 from ..sensors.velocity_aid import (
     VelocityAidMeasurement,
     VelocityAidSensor,
@@ -141,6 +148,16 @@ def _positive_scalar(x: float, *, name: str) -> float:
     if value <= 0.0:
         raise ValueError(f"{name} must be positive, got {value}.")
     return value
+
+
+def _should_use_sensor_turn_on_bias(
+    configured_std: ArrayLike | float,
+) -> bool:
+    """
+    Return True when a bias-uncertainty config is effectively all zeros.
+    """
+    arr = _axis3(configured_std, name="configured_std")
+    return bool(np.all(arr == 0.0))
 
 
 # -----------------------------------------------------------------------------
@@ -249,6 +266,11 @@ class VelocityAidFusionConfig:
         Which velocity-aid measurement interface to use.
     nis_threshold : float, optional
         Optional innovation gate threshold.
+    velocity_only_update : bool, default=True
+        When True, constrain the velocity-aid correction to the velocity state
+        instead of allowing the update to move attitude and bias states through
+        the full covariance structure. This is the safer default for the
+        repository's current compact INS model.
     """
 
     enabled: bool = True
@@ -256,6 +278,7 @@ class VelocityAidFusionConfig:
     measurement_std_mps: ArrayLike | float = (0.05, 0.05, 0.05)
     measurement_frame: str = "ned"
     nis_threshold: Optional[float] = None
+    velocity_only_update: bool = True
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -266,6 +289,7 @@ class VelocityAidFusionConfig:
         self.measurement_frame = str(self.measurement_frame).strip().lower()
         if self.measurement_frame not in {"ned", "body"}:
             raise ValueError("measurement_frame must be 'ned' or 'body'.")
+        self.velocity_only_update = bool(self.velocity_only_update)
         if self.nis_threshold is not None and float(self.nis_threshold) < 0.0:
             raise ValueError("nis_threshold must be nonnegative when provided.")
 
@@ -274,12 +298,29 @@ class VelocityAidFusionConfig:
 class DepthFusionConfig:
     """
     Configuration for scalar depth aiding into the INS.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Whether depth aiding is fused.
+    schedule : PeriodicUpdateSchedule
+        Triggering policy for depth samples.
+    measurement_std_m : float, default=0.5
+        Depth-measurement standard deviation [m].
+    nis_threshold : float, optional
+        Optional innovation gate threshold.
+    height_only_update : bool, default=True
+        When True, constrain the depth correction to the height state instead of
+        feeding a scalar depth residual through the full cross-covariance
+        structure. This is the safer default for the repository's current
+        compact INS model.
     """
 
     enabled: bool = True
     schedule: PeriodicUpdateSchedule = field(default_factory=PeriodicUpdateSchedule)
     measurement_std_m: float = 0.5
     nis_threshold: Optional[float] = None
+    height_only_update: bool = True
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -287,6 +328,7 @@ class DepthFusionConfig:
             self.measurement_std_m,
             name="measurement_std_m",
         )
+        self.height_only_update = bool(self.height_only_update)
         if self.nis_threshold is not None and float(self.nis_threshold) < 0.0:
             raise ValueError("nis_threshold must be nonnegative when provided.")
 
@@ -313,7 +355,7 @@ class MapMatchFeedbackConfig:
         sampled on the current step.
     depth_meas_std_m : float, optional
         Optional depth measurement standard deviation override for the PF.
-    inject_position_to_ins : bool, default=True
+    inject_position_to_ins : bool, default=False
         Whether PF mean/covariance are converted into a geodetic pseudo-measurement
         and fused back into the INS.
     feedback_covariance_inflation : float, default=1.0
@@ -331,7 +373,7 @@ class MapMatchFeedbackConfig:
     use_depth_measurement: bool = True
     use_last_depth_measurement: bool = True
     depth_meas_std_m: Optional[float] = None
-    inject_position_to_ins: bool = True
+    inject_position_to_ins: bool = False
     feedback_covariance_inflation: float = 1.0
     feedback_min_std_geodetic: ArrayLike | float = (0.0, 0.0, 0.0)
     feedback_nis_threshold: Optional[float] = None
@@ -700,14 +742,28 @@ class ScenarioSimulationRunner:
             else cfg.process_noise
         )
 
+        # If the caller leaves the initial bias uncertainty at zero, use the
+        # sensor's own turn-on bias uncertainty as the prior instead of
+        # artificially locking the bias states to exactly zero.
+        gyro_bias_std = (
+            imu_sensor.spec.gyro_turn_on_bias_std_radps
+            if _should_use_sensor_turn_on_bias(cfg.initial_gyro_bias_std_radps)
+            else cfg.initial_gyro_bias_std_radps
+        )
+        accel_bias_std = (
+            imu_sensor.spec.accel_turn_on_bias_std_mps2
+            if _should_use_sensor_turn_on_bias(cfg.initial_accel_bias_std_mps2)
+            else cfg.initial_accel_bias_std_mps2
+        )
+
         P0 = build_initial_covariance_geodetic(
             lat_ref_rad=float(truth.lat_rad[0]),
             height_ref_m=float(truth.height_m[0]),
             position_std_m=cfg.initial_position_std_m,
             velocity_std_mps=cfg.initial_velocity_std_mps,
             attitude_std_rad=cfg.initial_attitude_std_rad,
-            gyro_bias_std_radps=cfg.initial_gyro_bias_std_radps,
-            accel_bias_std_mps2=cfg.initial_accel_bias_std_mps2,
+            gyro_bias_std_radps=gyro_bias_std,
+            accel_bias_std_mps2=accel_bias_std,
         )
 
         return ErrorStateINS.from_truth_trajectory_start(
@@ -807,7 +863,18 @@ class ScenarioSimulationRunner:
             # ----------------------------------------------------------
             # Truth -> ideal inertial quantities
             # ----------------------------------------------------------
-            kin = build_imu_truth_kinematics(
+            kin_imu = build_interval_imu_truth_kinematics(
+                v_ned_prev_mps=truth.v_ned_mps[k - 1],
+                v_ned_next_mps=truth.v_ned_mps[k],
+                C_n_b_prev=truth.C_n_b[k - 1],
+                C_n_b_next=truth.C_n_b[k],
+                lat_prev_rad=float(truth.lat_rad[k - 1]),
+                height_prev_m=float(truth.height_m[k - 1]),
+                dt_s=dt,
+                gravity_override_mps2=cfg.gravity_override_mps2,
+            )
+
+            kin_point = build_imu_truth_kinematics(
                 v_dot_ned_mps2=truth.v_dot_ned_mps2[k],
                 v_ned_mps=truth.v_ned_mps[k],
                 C_n_b=truth.C_n_b[k],
@@ -821,8 +888,8 @@ class ScenarioSimulationRunner:
             # IMU propagation
             # ----------------------------------------------------------
             imu_meas = imu_sensor.measure_from_ideal(
-                ideal_omega_ib_b_radps=kin.omega_ib_b_radps,
-                ideal_f_ib_b_mps2=kin.f_b_mps2,
+                ideal_omega_ib_b_radps=kin_imu.omega_ib_b_radps,
+                ideal_f_ib_b_mps2=kin_imu.f_b_mps2,
                 dt_s=dt,
                 time_s=t_now,
             )
@@ -860,14 +927,24 @@ class ScenarioSimulationRunner:
                     last_depth_sample_time_s = t_now
                     last_depth_measurement = current_depth_measurement
 
-                    depth_update = apply_depth_sensor_measurement(
-                        ins,
-                        current_depth_measurement,
-                        depth_variance_m2=depth_variance_m2,
-                        reference_surface_height_m=cfg.reference_surface_height_m,
-                        nis_threshold=cfg.depth_aid.nis_threshold,
-                        label="depth",
-                    )
+                    if cfg.depth_aid.height_only_update:
+                        depth_update = apply_depth_sensor_measurement_height_only(
+                            ins,
+                            current_depth_measurement,
+                            depth_variance_m2=depth_variance_m2,
+                            reference_surface_height_m=cfg.reference_surface_height_m,
+                            nis_threshold=cfg.depth_aid.nis_threshold,
+                            label="depth_height_only",
+                        )
+                    else:
+                        depth_update = apply_depth_sensor_measurement(
+                            ins,
+                            current_depth_measurement,
+                            depth_variance_m2=depth_variance_m2,
+                            reference_surface_height_m=cfg.reference_surface_height_m,
+                            nis_threshold=cfg.depth_aid.nis_threshold,
+                            label="depth",
+                        )
                     estimators.add_custom_sample(
                         "depth_updates",
                         summarize_update_result(depth_update),
@@ -901,13 +978,22 @@ class ScenarioSimulationRunner:
                     sensors.velocity_aid_samples.append(vel_meas)
                     last_velocity_sample_time_s = t_now
 
-                    vel_update = apply_velocity_aid_measurement(
-                        ins,
-                        vel_meas,
-                        velocity_R,
-                        nis_threshold=cfg.velocity_aid.nis_threshold,
-                        label=f"velocity_{vel_meas.frame}",
-                    )
+                    if cfg.velocity_aid.velocity_only_update:
+                        vel_update = apply_velocity_aid_measurement_velocity_only(
+                            ins,
+                            vel_meas,
+                            velocity_R,
+                            nis_threshold=cfg.velocity_aid.nis_threshold,
+                            label=f"velocity_{vel_meas.frame}_velocity_only",
+                        )
+                    else:
+                        vel_update = apply_velocity_aid_measurement(
+                            ins,
+                            vel_meas,
+                            velocity_R,
+                            nis_threshold=cfg.velocity_aid.nis_threshold,
+                            label=f"velocity_{vel_meas.frame}",
+                        )
                     estimators.add_custom_sample(
                         "velocity_updates",
                         summarize_update_result(vel_update),
@@ -919,7 +1005,7 @@ class ScenarioSimulationRunner:
             gravimeter_meas: Optional[GravimeterMeasurement] = None
             if gravimeter_sensor is not None:
                 gravimeter_meas = gravimeter_sensor.measure_disturbance_from_specific_force_body(
-                    specific_force_body_mps2=kin.f_b_mps2,
+                    specific_force_body_mps2=kin_point.f_b_mps2,
                     C_n_b=truth.C_n_b[k],
                     v_dot_ned_mps2=truth.v_dot_ned_mps2[k],
                     v_ned_mps=truth.v_ned_mps[k],
@@ -958,20 +1044,43 @@ class ScenarioSimulationRunner:
                             min_std_geodetic=cfg.map_match.feedback_min_std_geodetic,
                             covariance_inflation=cfg.map_match.feedback_covariance_inflation,
                         )
-                        pf_feedback = apply_geodetic_position_measurement(
-                            ins,
-                            measured_lat_rad=float(z_pf[0]),
-                            measured_lon_rad=float(z_pf[1]),
-                            measured_height_m=float(z_pf[2]),
-                            R=R_pf,
-                            nis_threshold=cfg.map_match.feedback_nis_threshold,
-                            label="pf_position",
-                            time_s=t_now,
+                        z_pf = np.asarray(z_pf, dtype=np.float64).reshape(3)
+                        R_pf = np.asarray(R_pf, dtype=np.float64)
+
+                        valid_feedback = (
+                            np.all(np.isfinite(z_pf))
+                            and np.all(np.isfinite(R_pf))
+                            and R_pf.shape == (3, 3)
+                            and abs(float(z_pf[0])) <= 0.5 * np.pi
                         )
-                        estimators.add_custom_sample(
-                            "pf_feedback_updates",
-                            summarize_update_result(pf_feedback),
-                        )
+
+                        if valid_feedback:
+                            pf_feedback = apply_geodetic_position_measurement(
+                                ins,
+                                measured_lat_rad=float(z_pf[0]),
+                                measured_lon_rad=float(z_pf[1]),
+                                measured_height_m=float(z_pf[2]),
+                                R=R_pf,
+                                nis_threshold=cfg.map_match.feedback_nis_threshold,
+                                label="pf_position",
+                                time_s=t_now,
+                            )
+                            estimators.add_custom_sample(
+                                "pf_feedback_updates",
+                                summarize_update_result(pf_feedback),
+                            )
+                        else:
+                            estimators.add_custom_sample(
+                                "pf_feedback_updates",
+                                {
+                                    "label": "pf_position",
+                                    "time_s": t_now,
+                                    "accepted": False,
+                                    "reason": "invalid_pseudo_measurement",
+                                    "z": z_pf.copy(),
+                                    "R": R_pf.copy(),
+                                },
+                            )
 
             # ----------------------------------------------------------
             # Log estimator state after all current-step updates

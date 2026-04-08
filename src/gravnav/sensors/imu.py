@@ -133,6 +133,7 @@ from ..physics.frames import (
     rotvec_from_dcm,
     transport_rate_ned,
 )
+from ..physics.kinematics import body_rate_from_consecutive_dcms
 
 FloatArray = NDArray[np.float64]
 
@@ -836,6 +837,97 @@ def build_imu_truth_kinematics(
     )
 
 
+def build_interval_imu_truth_kinematics(
+    v_ned_prev_mps: ArrayLike,
+    v_ned_next_mps: ArrayLike,
+    C_n_b_prev: ArrayLike,
+    C_n_b_next: ArrayLike,
+    lat_prev_rad: float,
+    height_prev_m: float,
+    dt_s: float,
+    gravity_override_mps2: Optional[float] = None,
+) -> IMUTruthKinematics:
+    r"""
+    Build ideal IMU quantities over one propagation interval.
+
+    Why this exists
+    ---------------
+    `build_imu_truth_kinematics(...)` is a pointwise helper: it assumes sampled
+    truth kinematics are already known at one instant. The INS runner, however,
+    performs *interval* propagation from sample `k-1` to sample `k`. For that
+    use case, an interval-consistent IMU construction is numerically much more
+    stable because it derives:
+
+    - body rate from the consecutive attitudes over the interval
+    - velocity derivative from the consecutive velocities over the interval
+    - Earth-rate / transport / gravity terms from the interval start state
+
+    This makes the synthetic IMU stream consistent with the repository's
+    discrete prediction step.
+
+    Parameters
+    ----------
+    v_ned_prev_mps, v_ned_next_mps : array-like, shape (3,)
+        Consecutive NED velocities at the start and end of the interval [m/s].
+    C_n_b_prev, C_n_b_next : array-like, shape (3, 3)
+        Consecutive body->NED DCMs.
+    lat_prev_rad : float
+        Geodetic latitude at the interval start [rad].
+    height_prev_m : float
+        Ellipsoidal height at the interval start [m].
+    dt_s : float
+        Interval duration [s].
+    gravity_override_mps2 : float, optional
+        Optional scalar gravity magnitude override.
+
+    Returns
+    -------
+    IMUTruthKinematics
+        Interval-consistent ideal IMU quantities resolved at the interval start.
+    """
+    dt = float(dt_s)
+    if dt <= 0.0:
+        raise ValueError(f"dt_s must be positive, got {dt}.")
+
+    v_prev = _vec3(v_ned_prev_mps, name="v_ned_prev_mps")
+    v_next = _vec3(v_ned_next_mps, name="v_ned_next_mps")
+    C_prev = project_to_so3(_mat3(C_n_b_prev, name="C_n_b_prev"))
+    C_next = project_to_so3(_mat3(C_n_b_next, name="C_n_b_next"))
+
+    omega_ie_n = earth_rate_ned(lat_prev_rad)
+    omega_en_n = transport_rate_ned(lat_prev_rad, height_prev_m, v_prev)
+    omega_in_n = omega_ie_n + omega_en_n
+
+    omega_nb_b = body_rate_from_consecutive_dcms(
+        C_n_b_prev=C_prev,
+        C_n_b_next=C_next,
+        dt_s=dt,
+    )
+    gravity_n = gravity_vector_ned(
+        lat_prev_rad,
+        height_prev_m,
+        gravity_override_mps2,
+    )
+    coriolis_transport_n = np.cross(2.0 * omega_ie_n + omega_en_n, v_prev)
+    v_dot_n = (v_next - v_prev) / dt
+
+    f_n = v_dot_n + coriolis_transport_n - gravity_n
+    f_b = C_prev.T @ f_n
+    omega_ib_b = omega_nb_b + C_prev.T @ omega_in_n
+
+    return IMUTruthKinematics(
+        f_n_mps2=f_n.astype(np.float64),
+        f_b_mps2=f_b.astype(np.float64),
+        omega_ie_n_radps=omega_ie_n.astype(np.float64),
+        omega_en_n_radps=omega_en_n.astype(np.float64),
+        omega_in_n_radps=omega_in_n.astype(np.float64),
+        omega_nb_b_radps=omega_nb_b.astype(np.float64),
+        omega_ib_b_radps=omega_ib_b.astype(np.float64),
+        gravity_ned_mps2=gravity_n.astype(np.float64),
+        coriolis_transport_ned_mps2=coriolis_transport_n.astype(np.float64),
+    )
+
+
 @dataclass
 class IMUSpec:
     """
@@ -1397,6 +1489,7 @@ __all__ = [
     "IMUSpec",
     "IMUTruthKinematics",
     "body_rate_from_consecutive_attitudes",
+    "build_interval_imu_truth_kinematics",
     "build_imu_truth_kinematics",
     "coriolis_transport_acceleration_ned",
     "discrete_random_walk_step_std",

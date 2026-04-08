@@ -96,7 +96,7 @@ These conventions are already reflected in the implemented modules:
   Local-level closed-loop error-state INS propagation, process-noise handling, and direct linearized aiding models for velocity, position, and depth.
 
 - `src/gravnav/estimators/fusion.py`
-  Measurement packaging, innovation gating, stacked linear updates, and convenience wrappers for velocity, position, depth, and later custom aiding measurements.
+  Measurement packaging, innovation gating, stacked linear updates, and convenience wrappers for velocity, position, depth, constrained height-only depth aiding, and later custom aiding measurements.
 
 - `src/gravnav/estimators/map_match_pf.py`
   Position-only particle-filter gravity map matching with gravity/depth likelihoods, INS-prior coupling, resampling, and geodetic/NED particle-cloud utilities.
@@ -129,7 +129,10 @@ These conventions are already reflected in the implemented modules:
 ### Scripts
 
 - `scripts/run_single_scenario.py`
-  Minimal CLI entry point that loads baseline configs, builds or loads a gravity map, runs one full scenario, and writes result, summary, metrics, map, and effective-config artifacts.
+  Minimal CLI entry point that loads baseline configs, builds or loads a gravity map, runs one full scenario, and writes result, summary, metrics, map, and effective-config artifacts. PF position feedback is opt-in in the CLI baseline path.
+
+- `scripts/generate_validation_report.py`
+  Reproducible validation entry point that generates the aided baseline run bundle, an IMU-only comparison run, key figures, and a markdown conclusion report under `data/outputs/`.
 
 ### Configs
 
@@ -148,8 +151,9 @@ These conventions are already reflected in the implemented modules:
 - `tests/test_frames.py`
 - `tests/test_truth_models.py`
 - `tests/test_config.py`
+- `tests/test_error_state_ins.py`
 - `tests/test_cli_smoke.py`
-  Initial regression coverage for scalar geodesy/frame helpers, scenario degree-rate parsing, scenario-config fallback behavior, and the single-run CLI smoke path.
+  Initial regression coverage for scalar geodesy/frame helpers, scenario degree-rate parsing, scenario-config fallback behavior, constrained depth-aiding behavior, initial INS bias-prior behavior, and the single-run CLI smoke path.
 
 ### Utilities
 
@@ -174,9 +178,11 @@ Implemented now:
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - truth trajectories, vehicle profiles, and named scenarios
 - initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
+- safer default depth-aid and PF-feedback policies for the runnable single-scenario path
 - end-to-end scenario runner, simulation result/logging containers, persistence helpers, performance metrics, and Monte Carlo orchestration
 - navigation and Monte Carlo plotting helpers
 - runnable single-scenario script and baseline JSON configs
+- reproducible validation-report generation with saved figures and run bundles
 - initial regression tests for the core run path and known bug fixes
 - RNG, units, and config utilities
 
@@ -186,7 +192,7 @@ Still scaffold-only:
 - `scripts/run_monte_carlo.py`
 - `scripts/make_synthetic_map.py`
 - `scripts/benchmark_filters.py`
-- empty tests such as `tests/test_imu.py`, `tests/test_gravimeter.py`, `tests/test_error_state_ins.py`, and `tests/test_map_match_pf.py`
+- empty tests such as `tests/test_imu.py`, `tests/test_gravimeter.py`, and `tests/test_map_match_pf.py`
 - `configs/monte_carlo/*`
 - empty YAML config stubs under `configs/scenarios/*.yaml` and `configs/sensors/*.yaml`
 - `notebooks/*`
@@ -215,4 +221,5 @@ The next meaningful layers to implement are:
 
 - YAML config support in `src/gravnav/utils/config.py` requires `PyYAML`.
 - The default runnable path uses the new JSON configs so it works without PyYAML.
+- The default single-run CLI keeps PF map matching enabled for logging, but PF-to-INS position feedback is disabled unless explicitly enabled.
 - The repository is still in a foundation-building phase; packaging and test wiring are not finished yet.

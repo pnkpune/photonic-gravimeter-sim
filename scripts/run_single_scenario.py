@@ -288,7 +288,7 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         ),
         gravity_meas_std_mps2=args.pf_gravity_std_mps2,
         depth_meas_std_m=args.pf_depth_std_m,
-        inject_position_to_ins=not args.disable_pf_feedback,
+        inject_position_to_ins=bool(args.enable_pf_feedback),
         feedback_covariance_inflation=args.pf_feedback_covariance_inflation,
     )
     integrity = IntegrityMonitorConfig(
@@ -456,10 +456,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable PF gravity map matching entirely.",
     )
-    parser.add_argument(
+    pf_feedback_group = parser.add_mutually_exclusive_group()
+    pf_feedback_group.add_argument(
+        "--enable-pf-feedback",
+        action="store_true",
+        help=(
+            "Enable PF pseudo-position feedback into the INS. Disabled by "
+            "default because the current PF feedback path is still tuning-"
+            "sensitive."
+        ),
+    )
+    pf_feedback_group.add_argument(
         "--disable-pf-feedback",
         action="store_true",
-        help="Disable PF pseudo-position feedback into the INS.",
+        help="Deprecated alias. PF pseudo-position feedback is disabled by default.",
     )
     parser.add_argument(
         "--disable-depth-aid",
@@ -497,9 +507,11 @@ def _metrics_summary_lines(metrics: ScenarioMetricsSummary) -> list[str]:
         )
 
     if metrics.integrity is not None:
-        lines.append(
-            f"Integrity NIS pass fraction: {metrics.integrity.fraction_nis_passed:.3f}"
-        )
+        nis_fraction = float(metrics.integrity.fraction_nis_passed)
+        if np.isfinite(nis_fraction):
+            lines.append(
+                f"Integrity NIS pass fraction: {nis_fraction:.3f}"
+            )
 
     return lines
 
@@ -577,11 +589,13 @@ def main() -> int:
                 "every_steps": int(args.velocity_update_every_steps),
                 "measurement_std_mps": list(args.velocity_measurement_std_mps),
                 "measurement_frame": args.velocity_measurement_frame,
+                "velocity_only_update": True,
             },
             "depth_aid": {
                 "enabled": not args.disable_depth_aid,
                 "every_steps": int(args.depth_update_every_steps),
                 "measurement_std_m": float(args.depth_measurement_std_m),
+                "height_only_update": True,
             },
             "map_match": {
                 "enabled": not args.disable_map_match,
@@ -589,7 +603,7 @@ def main() -> int:
                 "num_particles": int(args.pf_particles),
                 "gravity_std_mps2": float(args.pf_gravity_std_mps2),
                 "depth_std_m": float(args.pf_depth_std_m),
-                "inject_position_to_ins": not args.disable_pf_feedback,
+                "inject_position_to_ins": bool(args.enable_pf_feedback),
                 "feedback_covariance_inflation": float(
                     args.pf_feedback_covariance_inflation
                 ),

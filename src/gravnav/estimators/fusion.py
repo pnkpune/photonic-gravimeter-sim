@@ -962,6 +962,78 @@ def apply_velocity_ned_measurement(
     return apply_linear_measurement(ins, meas, nis_threshold=nis_threshold)
 
 
+def apply_velocity_ned_measurement_velocity_only(
+    ins: ErrorStateINS,
+    measured_velocity_ned_mps: ArrayLike,
+    R_mps2: ArrayLike,
+    *,
+    nis_threshold: Optional[float] = None,
+    label: str = "velocity_ned_velocity_only",
+    time_s: Optional[float] = None,
+) -> FusionUpdateResult:
+    """
+    Apply a direct NED velocity update while only correcting the velocity state.
+
+    This is a conservative stabilization path for the current repository: it
+    prevents velocity measurements from forcing large bias/attitude corrections
+    through imperfect cross-covariances in the early-stage INS error model.
+    """
+    meas = make_velocity_ned_measurement(
+        ins,
+        measured_velocity_ned_mps,
+        R_mps2,
+        label=label,
+        time_s=time_s,
+    )
+    gate = gate_measurement(
+        meas,
+        ins.covariance,
+        nis_threshold=nis_threshold,
+    )
+
+    if not gate.accepted:
+        return FusionUpdateResult(
+            label=meas.label,
+            time_s=meas.time_s,
+            accepted=False,
+            gate=gate,
+            update=None,
+        )
+
+    P = ins.state.P
+    R = np.asarray(meas.R, dtype=np.float64)
+    residual = np.asarray(meas.residual, dtype=np.float64)
+
+    P_vv = P[ERR_VEL, ERR_VEL]
+    S = _symmetrize(P_vv + R)
+    K_vv = P_vv @ np.linalg.inv(S)
+
+    K = np.zeros((ERROR_STATE_SIZE, 3), dtype=np.float64)
+    K[ERR_VEL, :] = K_vv
+
+    delta_x = np.zeros(ERROR_STATE_SIZE, dtype=np.float64)
+    delta_x[ERR_VEL] = K_vv @ residual
+    ins.inject_error_state(delta_x)
+
+    I = np.eye(ERROR_STATE_SIZE, dtype=np.float64)
+    KH = K @ meas.H
+    P_new = (I - KH) @ P @ (I - KH).T + K @ R @ K.T
+    ins.state.P = _symmetrize(P_new)
+
+    return FusionUpdateResult(
+        label=meas.label,
+        time_s=meas.time_s,
+        accepted=True,
+        gate=gate,
+        update=LinearizedMeasurementUpdate(
+            residual=residual,
+            innovation_covariance=S,
+            kalman_gain=K,
+            delta_x=delta_x,
+        ),
+    )
+
+
 def apply_velocity_body_measurement(
     ins: ErrorStateINS,
     measured_velocity_body_mps: ArrayLike,
@@ -982,6 +1054,33 @@ def apply_velocity_body_measurement(
         time_s=time_s,
     )
     return apply_linear_measurement(ins, meas, nis_threshold=nis_threshold)
+
+
+def apply_velocity_body_measurement_velocity_only(
+    ins: ErrorStateINS,
+    measured_velocity_body_mps: ArrayLike,
+    R_mps2: ArrayLike,
+    *,
+    nis_threshold: Optional[float] = None,
+    label: str = "velocity_body_velocity_only",
+    time_s: Optional[float] = None,
+) -> FusionUpdateResult:
+    """
+    Conservative body-frame velocity aid variant.
+
+    The measured body-frame velocity is rotated into NED using the current
+    nominal attitude, then fused as a velocity-only NED update.
+    """
+    z_body = _vec3(measured_velocity_body_mps, name="measured_velocity_body_mps")
+    z_ned = ins.nominal.C_n_b @ z_body
+    return apply_velocity_ned_measurement_velocity_only(
+        ins,
+        z_ned,
+        R_mps2,
+        nis_threshold=nis_threshold,
+        label=label,
+        time_s=time_s,
+    )
 
 
 def apply_velocity_aid_measurement(
@@ -1028,6 +1127,45 @@ def apply_velocity_aid_measurement(
 
     if measurement.frame == "body":
         return apply_velocity_body_measurement(
+            ins,
+            measurement.value_mps,
+            R_mps2,
+            nis_threshold=nis_threshold,
+            label=resolved_label,
+            time_s=measurement.time_s,
+        )
+
+    raise ValueError(
+        f"Unsupported VelocityAidMeasurement.frame={measurement.frame!r}. "
+        "Expected 'ned' or 'body'."
+    )
+
+
+def apply_velocity_aid_measurement_velocity_only(
+    ins: ErrorStateINS,
+    measurement: VelocityAidMeasurement,
+    R_mps2: ArrayLike,
+    *,
+    nis_threshold: Optional[float] = None,
+    label: Optional[str] = None,
+) -> FusionUpdateResult:
+    """
+    Velocity-only constrained variant of :func:`apply_velocity_aid_measurement`.
+    """
+    resolved_label = measurement.frame if label is None else str(label)
+
+    if measurement.frame == "ned":
+        return apply_velocity_ned_measurement_velocity_only(
+            ins,
+            measurement.value_mps,
+            R_mps2,
+            nis_threshold=nis_threshold,
+            label=resolved_label,
+            time_s=measurement.time_s,
+        )
+
+    if measurement.frame == "body":
+        return apply_velocity_body_measurement_velocity_only(
             ins,
             measurement.value_mps,
             R_mps2,
@@ -1092,6 +1230,86 @@ def apply_depth_measurement(
     return apply_linear_measurement(ins, meas, nis_threshold=nis_threshold)
 
 
+def apply_depth_measurement_height_only(
+    ins: ErrorStateINS,
+    measured_depth_m: float,
+    depth_variance_m2: float,
+    *,
+    reference_surface_height_m: float = 0.0,
+    nis_threshold: Optional[float] = None,
+    label: str = "depth_height_only",
+    time_s: Optional[float] = None,
+) -> FusionUpdateResult:
+    """
+    Apply a scalar depth update while only correcting the height channel.
+
+    This is a pragmatic safeguard for the current early-stage INS model. Depth
+    is a vertical aid; constraining the correction to the height state prevents
+    a single scalar depth residual from pulling the horizontal states around via
+    imperfect cross-covariances.
+    """
+    if depth_variance_m2 < 0.0:
+        raise ValueError("depth_variance_m2 must be nonnegative.")
+
+    meas = make_depth_measurement(
+        ins,
+        measured_depth_m,
+        depth_variance_m2,
+        reference_surface_height_m=reference_surface_height_m,
+        label=label,
+        time_s=time_s,
+    )
+    gate = gate_measurement(
+        meas,
+        ins.covariance,
+        nis_threshold=nis_threshold,
+    )
+
+    if not gate.accepted:
+        return FusionUpdateResult(
+            label=meas.label,
+            time_s=meas.time_s,
+            accepted=False,
+            gate=gate,
+            update=None,
+        )
+
+    P = ins.state.P
+    residual = float(meas.residual[0])
+    R = float(meas.R[0, 0])
+
+    # Signed depth uses d = h_ref - h, so the measurement Jacobian with respect
+    # to the height error state is H_h = -1.
+    p_hh = float(P[2, 2])
+    S = float(p_hh + R)
+    k_h = -p_hh / S
+
+    K = np.zeros((ERROR_STATE_SIZE, 1), dtype=np.float64)
+    K[2, 0] = k_h
+
+    delta_x = np.zeros(ERROR_STATE_SIZE, dtype=np.float64)
+    delta_x[2] = k_h * residual
+    ins.inject_error_state(delta_x)
+
+    I = np.eye(ERROR_STATE_SIZE, dtype=np.float64)
+    KH = K @ meas.H
+    P_new = (I - KH) @ P @ (I - KH).T + K @ meas.R @ K.T
+    ins.state.P = 0.5 * (P_new + P_new.T)
+
+    return FusionUpdateResult(
+        label=meas.label,
+        time_s=meas.time_s,
+        accepted=True,
+        gate=gate,
+        update=LinearizedMeasurementUpdate(
+            residual=meas.residual.copy(),
+            innovation_covariance=np.array([[S]], dtype=np.float64),
+            kalman_gain=K,
+            delta_x=delta_x,
+        ),
+    )
+
+
 def apply_depth_sensor_measurement(
     ins: ErrorStateINS,
     measurement: DepthMeasurement,
@@ -1110,6 +1328,34 @@ def apply_depth_sensor_measurement(
         else float(reference_surface_height_m)
     )
     return apply_depth_measurement(
+        ins,
+        measured_depth_m=measurement.value_m,
+        depth_variance_m2=depth_variance_m2,
+        reference_surface_height_m=href,
+        nis_threshold=nis_threshold,
+        label=label,
+        time_s=measurement.time_s,
+    )
+
+
+def apply_depth_sensor_measurement_height_only(
+    ins: ErrorStateINS,
+    measurement: DepthMeasurement,
+    depth_variance_m2: float,
+    *,
+    reference_surface_height_m: Optional[float] = None,
+    nis_threshold: Optional[float] = None,
+    label: str = "depth_height_only",
+) -> FusionUpdateResult:
+    """
+    Height-only variant of :func:`apply_depth_sensor_measurement`.
+    """
+    href = (
+        measurement.reference_surface_height_m
+        if reference_surface_height_m is None
+        else float(reference_surface_height_m)
+    )
+    return apply_depth_measurement_height_only(
         ins,
         measured_depth_m=measurement.value_m,
         depth_variance_m2=depth_variance_m2,
@@ -1181,12 +1427,17 @@ __all__ = [
     "LinearMeasurement",
     "apply_custom_linear_measurement",
     "apply_depth_measurement",
+    "apply_depth_measurement_height_only",
     "apply_depth_sensor_measurement",
+    "apply_depth_sensor_measurement_height_only",
     "apply_geodetic_position_measurement",
     "apply_linear_measurement",
     "apply_velocity_aid_measurement",
+    "apply_velocity_aid_measurement_velocity_only",
     "apply_velocity_body_measurement",
+    "apply_velocity_body_measurement_velocity_only",
     "apply_velocity_ned_measurement",
+    "apply_velocity_ned_measurement_velocity_only",
     "block_diag",
     "diagonal_covariance_from_std",
     "diagonal_covariance_from_variance",

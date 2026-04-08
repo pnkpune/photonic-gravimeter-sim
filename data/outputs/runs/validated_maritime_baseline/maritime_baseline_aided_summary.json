@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "scenario_name": "maritime_baseline",
+    "run_id": null,
+    "description": null,
+    "config": {},
+    "rng_state": {
+      "seed": 123
+    },
+    "extra": {
+      "report_mode": "validated_baseline"
+    }
+  },
+  "summary": {
+    "scenario_name": "maritime_baseline",
+    "run_id": null,
+    "duration_s": 2040.0,
+    "num_truth_samples": 1021,
+    "num_imu_samples": 1020,
+    "num_gravimeter_samples": 1020,
+    "num_depth_samples": 1020,
+    "num_velocity_aid_samples": 1020,
+    "num_ins_states": 1021,
+    "num_pf_updates": 1020,
+    "num_integrity_snapshots": 1021
+  },
+  "sensor_counts": {
+    "imu": 1020,
+    "gravimeter": 1020,
+    "depth": 1020,
+    "velocity_aid": 1020
+  },
+  "estimator_counts": {
+    "ins_states": 1021,
+    "pf_updates": 1020,
+    "integrity_snapshots": 1021,
+    "custom:depth_updates": 1020,
+    "custom:velocity_updates": 1020
+  }
+}
