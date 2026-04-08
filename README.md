@@ -7,7 +7,7 @@ The current codebase starts from:
 - a WGS84 normal-gravity and geodesy layer
 - a consistent ECEF/NED frame and rotation layer
 - truth-trajectory and vehicle-motion builders
-- sensor models for IMU, scalar gravimeter, and depth aiding
+- sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -63,6 +63,9 @@ These conventions are already reflected in the implemented modules:
 - `src/gravnav/sensors/depth.py`
   Signed-depth helpers, simple hydrostatic conversions, and a stateful scalar depth-aiding sensor model.
 
+- `src/gravnav/sensors/velocity_aid.py`
+  Generic NED/body-frame velocity-aid helpers plus a stateful vector velocity-aiding sensor model.
+
 ### Truth
 
 - `src/gravnav/truth/trajectory.py`
@@ -92,7 +95,7 @@ Implemented now:
 - Earth/geodesy foundation
 - frames/rotations/local-level math
 - kinematics helpers
-- IMU, gravimeter, and depth sensor models
+- IMU, gravimeter, depth, and velocity-aid sensor models
 - truth trajectories, vehicle profiles, and named scenarios
 - RNG, units, and config utilities
 
@@ -100,7 +103,6 @@ Still scaffold-only:
 
 - `src/gravnav/physics/gravity_map.py`
 - `src/gravnav/physics/corrections.py`
-- `src/gravnav/sensors/velocity_aid.py`
 - `src/gravnav/estimators/*`
 - `src/gravnav/simulation/*`
 - `src/gravnav/plots/*`
@@ -127,11 +129,10 @@ These are intended as baseline motion libraries for later simulation and estimat
 The next meaningful layers to implement are:
 
 1. gravity map representation and synthetic-map generation
-2. velocity-aid sensor model
-3. INS / error-state propagation layer
-4. gravity map matching and fusion
-5. simulation runner, metrics, and plots
-6. tests and real config files
+2. INS / error-state propagation layer
+3. gravity map matching and fusion
+4. simulation runner, metrics, and plots
+5. tests and real config files
 
 ## Notes
 
