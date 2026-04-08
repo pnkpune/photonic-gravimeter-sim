@@ -11,7 +11,7 @@ The current codebase starts from:
 - truth-trajectory and vehicle-motion builders
 - sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
 - an initial local-level error-state INS, fusion, map-matching, and integrity layer
-- an initial simulation-results, persistence, and metrics layer
+- an initial end-to-end simulation, persistence, metrics, and Monte Carlo layer
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -103,11 +103,17 @@ These conventions are already reflected in the implemented modules:
 
 ### Simulation
 
+- `src/gravnav/simulation/runner.py`
+  End-to-end single-scenario orchestration including runner config, aiding schedules, initial covariance setup, truth-to-sensor-to-estimator execution, and logging into scenario results.
+
 - `src/gravnav/simulation/results.py`
   Typed run-result containers, sensor/estimator log containers, extraction helpers, and lightweight JSON/NPZ persistence for later plotting, benchmarking, and Monte Carlo analysis.
 
 - `src/gravnav/simulation/metrics.py`
   Simulation performance metrics and summaries including scalar/vector error metrics, NED position-error summaries, integrity summaries, and top-level scenario metrics derived from run results.
+
+- `src/gravnav/simulation/monte_carlo.py`
+  Monte Carlo study orchestration, per-run RNG provenance, aggregate metric summaries, optional parallel execution, config resolution, and study/result archive handling.
 
 ### Utilities
 
@@ -132,13 +138,11 @@ Implemented now:
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - truth trajectories, vehicle profiles, and named scenarios
 - initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
-- simulation result/logging containers, persistence helpers, and performance metrics
+- end-to-end scenario runner, simulation result/logging containers, persistence helpers, performance metrics, and Monte Carlo orchestration
 - RNG, units, and config utilities
 
 Still scaffold-only:
 
-- `src/gravnav/simulation/runner.py`
-- `src/gravnav/simulation/monte_carlo.py`
 - `src/gravnav/plots/*`
 - `scripts/*`
 - `tests/*`
@@ -146,7 +150,7 @@ Still scaffold-only:
 - `notebooks/*`
 - `pyproject.toml`
 
-So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, and simulation-evaluation layers, but not yet the runnable end-to-end simulation and reporting package.
+So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, and simulation-execution layers, but not yet the plotting, script, test, and packaged reporting layer.
 
 ## Built-In Truth Scenarios
 
@@ -162,9 +166,8 @@ These are intended as baseline motion libraries for later simulation and estimat
 
 The next meaningful layers to implement are:
 
-1. map-match-to-INS injection policies and end-to-end estimator orchestration
-2. simulation runner and Monte Carlo orchestration
-3. plots, tests, and real config files
+1. polishing the map-match-to-INS feedback policies and scenario/config wiring
+2. plots, scripts, tests, and real config files
 
 ## Notes
 
