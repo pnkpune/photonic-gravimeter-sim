@@ -8,6 +8,7 @@ The current codebase starts from:
 - a consistent ECEF/NED frame and rotation layer
 - truth-trajectory and vehicle-motion builders
 - sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
+- an initial local-level error-state INS, fusion, map-matching, and integrity layer
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -77,6 +78,20 @@ These conventions are already reflected in the implemented modules:
 - `src/gravnav/truth/scenarios.py`
   Declarative scenario specifications, segment schemas, named built-in scenarios, and scenario-to-trajectory orchestration.
 
+### Estimators
+
+- `src/gravnav/estimators/error_state_ins.py`
+  Local-level closed-loop error-state INS propagation, process-noise handling, and direct linearized aiding models for velocity, position, and depth.
+
+- `src/gravnav/estimators/fusion.py`
+  Measurement packaging, innovation gating, stacked linear updates, and convenience wrappers for velocity, position, depth, and later custom aiding measurements.
+
+- `src/gravnav/estimators/map_match_pf.py`
+  Position-only particle-filter gravity map matching with gravity/depth likelihoods, INS-prior coupling, resampling, and geodetic/NED particle-cloud utilities.
+
+- `src/gravnav/estimators/integrity.py`
+  Integrity and consistency tooling including NIS/NEES checks, chi-square bounds, protection-level calculations, alert-limit evaluation, and time-history monitoring.
+
 ### Utilities
 
 - `src/gravnav/utils/rng.py`
@@ -97,13 +112,13 @@ Implemented now:
 - kinematics helpers
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - truth trajectories, vehicle profiles, and named scenarios
+- initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
 - RNG, units, and config utilities
 
 Still scaffold-only:
 
 - `src/gravnav/physics/gravity_map.py`
 - `src/gravnav/physics/corrections.py`
-- `src/gravnav/estimators/*`
 - `src/gravnav/simulation/*`
 - `src/gravnav/plots/*`
 - `scripts/*`
@@ -112,7 +127,7 @@ Still scaffold-only:
 - `notebooks/*`
 - `pyproject.toml`
 
-So the repository currently contains the foundational physics/truth/sensor layers, but not yet the runnable end-to-end estimator/simulation package.
+So the repository currently contains the foundational physics/truth/sensor layers plus the first full estimator stack, but not yet the runnable end-to-end simulation and reporting package.
 
 ## Built-In Truth Scenarios
 
@@ -129,8 +144,8 @@ These are intended as baseline motion libraries for later simulation and estimat
 The next meaningful layers to implement are:
 
 1. gravity map representation and synthetic-map generation
-2. INS / error-state propagation layer
-3. gravity map matching and fusion
+2. concrete gravity-map backends and correction models
+3. map-match-to-INS injection policies and end-to-end estimator orchestration
 4. simulation runner, metrics, and plots
 5. tests and real config files
 
