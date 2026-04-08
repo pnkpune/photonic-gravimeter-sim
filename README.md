@@ -12,6 +12,7 @@ The current codebase starts from:
 - sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
 - an initial local-level error-state INS, fusion, map-matching, and integrity layer
 - an initial end-to-end simulation, persistence, metrics, and Monte Carlo layer
+- an initial navigation and Monte Carlo plotting layer
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -115,6 +116,14 @@ These conventions are already reflected in the implemented modules:
 - `src/gravnav/simulation/monte_carlo.py`
   Monte Carlo study orchestration, per-run RNG provenance, aggregate metric summaries, optional parallel execution, config resolution, and study/result archive handling.
 
+### Plots
+
+- `src/gravnav/plots/nav_plots.py`
+  Navigation-result plotting helpers for ground track, altitude/depth, NED velocity, yaw-pitch-roll, position error, PF diagnostics, integrity history, and overview figures.
+
+- `src/gravnav/plots/monte_carlo_plots.py`
+  Monte Carlo plotting helpers for metric histograms, ECDFs, distribution panels, aggregate comparisons, failure summaries, and study-to-study metric comparisons.
+
 ### Utilities
 
 - `src/gravnav/utils/rng.py`
@@ -139,18 +148,19 @@ Implemented now:
 - truth trajectories, vehicle profiles, and named scenarios
 - initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
 - end-to-end scenario runner, simulation result/logging containers, persistence helpers, performance metrics, and Monte Carlo orchestration
+- navigation and Monte Carlo plotting helpers
 - RNG, units, and config utilities
 
 Still scaffold-only:
 
-- `src/gravnav/plots/*`
+- `src/gravnav/plots/sensor_plots.py`
 - `scripts/*`
 - `tests/*`
 - `configs/*`
 - `notebooks/*`
 - `pyproject.toml`
 
-So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, and simulation-execution layers, but not yet the plotting, script, test, and packaged reporting layer.
+So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, simulation-execution, and core plotting layers, but not yet the sensor-specific plotting, script, test, and packaged reporting layer.
 
 ## Built-In Truth Scenarios
 
@@ -167,7 +177,7 @@ These are intended as baseline motion libraries for later simulation and estimat
 The next meaningful layers to implement are:
 
 1. polishing the map-match-to-INS feedback policies and scenario/config wiring
-2. plots, scripts, tests, and real config files
+2. sensor-specific plots, scripts, tests, and real config files
 
 ## Notes
 
