@@ -6,9 +6,12 @@ The current codebase starts from:
 
 - a WGS84 normal-gravity and geodesy layer
 - a consistent ECEF/NED frame and rotation layer
+- a concrete gravity-disturbance map and synthetic-map layer
+- a gravity-reduction and correction layer for disturbance/anomaly products
 - truth-trajectory and vehicle-motion builders
 - sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
 - an initial local-level error-state INS, fusion, map-matching, and integrity layer
+- an initial simulation-results, persistence, and metrics layer
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -49,6 +52,12 @@ These conventions are already reflected in the implemented modules:
 
 - `src/gravnav/physics/kinematics.py`
   Numerical derivatives/integration, velocity-derived navigation scalars, and DCM/quaternion propagation from body rates.
+
+- `src/gravnav/physics/gravity_map.py`
+  Regular-grid scalar gravity-disturbance maps, bilinear/nearest interpolation, optional reference-height handling, synthetic anomaly-map generation, and lightweight NPZ persistence helpers.
+
+- `src/gravnav/physics/corrections.py`
+  Gravity reduction/correction helpers including atmospheric, free-air, Bouguer, Eotvos, and stationary/moving-base disturbance-recovery workflows.
 
 ### Sensors
 
@@ -92,6 +101,14 @@ These conventions are already reflected in the implemented modules:
 - `src/gravnav/estimators/integrity.py`
   Integrity and consistency tooling including NIS/NEES checks, chi-square bounds, protection-level calculations, alert-limit evaluation, and time-history monitoring.
 
+### Simulation
+
+- `src/gravnav/simulation/results.py`
+  Typed run-result containers, sensor/estimator log containers, extraction helpers, and lightweight JSON/NPZ persistence for later plotting, benchmarking, and Monte Carlo analysis.
+
+- `src/gravnav/simulation/metrics.py`
+  Simulation performance metrics and summaries including scalar/vector error metrics, NED position-error summaries, integrity summaries, and top-level scenario metrics derived from run results.
+
 ### Utilities
 
 - `src/gravnav/utils/rng.py`
@@ -109,17 +126,19 @@ Implemented now:
 
 - Earth/geodesy foundation
 - frames/rotations/local-level math
+- concrete gravity-map representation and synthetic-map generation
+- gravity reduction and correction workflows
 - kinematics helpers
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - truth trajectories, vehicle profiles, and named scenarios
 - initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
+- simulation result/logging containers, persistence helpers, and performance metrics
 - RNG, units, and config utilities
 
 Still scaffold-only:
 
-- `src/gravnav/physics/gravity_map.py`
-- `src/gravnav/physics/corrections.py`
-- `src/gravnav/simulation/*`
+- `src/gravnav/simulation/runner.py`
+- `src/gravnav/simulation/monte_carlo.py`
 - `src/gravnav/plots/*`
 - `scripts/*`
 - `tests/*`
@@ -127,7 +146,7 @@ Still scaffold-only:
 - `notebooks/*`
 - `pyproject.toml`
 
-So the repository currently contains the foundational physics/truth/sensor layers plus the first full estimator stack, but not yet the runnable end-to-end simulation and reporting package.
+So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, and simulation-evaluation layers, but not yet the runnable end-to-end simulation and reporting package.
 
 ## Built-In Truth Scenarios
 
@@ -143,11 +162,9 @@ These are intended as baseline motion libraries for later simulation and estimat
 
 The next meaningful layers to implement are:
 
-1. gravity map representation and synthetic-map generation
-2. concrete gravity-map backends and correction models
-3. map-match-to-INS injection policies and end-to-end estimator orchestration
-4. simulation runner, metrics, and plots
-5. tests and real config files
+1. map-match-to-INS injection policies and end-to-end estimator orchestration
+2. simulation runner and Monte Carlo orchestration
+3. plots, tests, and real config files
 
 ## Notes
 
