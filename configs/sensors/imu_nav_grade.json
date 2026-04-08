@@ -1,0 +1,33 @@
+{
+  "name": "imu_nav_grade",
+  "gyro_noise_density_radps_per_sqrt_hz": [
+    8.0e-05,
+    8.0e-05,
+    8.0e-05
+  ],
+  "accel_noise_density_mps2_per_sqrt_hz": [
+    2.5e-04,
+    2.5e-04,
+    2.5e-04
+  ],
+  "gyro_bias_random_walk_radps_per_sqrt_s": [
+    5.0e-07,
+    5.0e-07,
+    5.0e-07
+  ],
+  "accel_bias_random_walk_mps2_per_sqrt_s": [
+    2.5e-06,
+    2.5e-06,
+    2.5e-06
+  ],
+  "gyro_turn_on_bias_std_radps": [
+    2.0e-05,
+    2.0e-05,
+    2.0e-05
+  ],
+  "accel_turn_on_bias_std_mps2": [
+    1.5e-04,
+    1.5e-04,
+    1.5e-04
+  ]
+}

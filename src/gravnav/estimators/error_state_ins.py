@@ -305,6 +305,8 @@ class ErrorStateINSNominalState:
 
     Attributes
     ----------
+    time_s : float or None
+        Timestamp [s]. Optional but useful for logging and truth alignment.
     lat_rad : float
         Geodetic latitude [rad].
     lon_rad : float
@@ -321,6 +323,7 @@ class ErrorStateINSNominalState:
         Accelerometer bias resolved in body coordinates [m/s^2].
     """
 
+    time_s: Optional[float]
     lat_rad: float
     lon_rad: float
     height_m: float
@@ -330,6 +333,7 @@ class ErrorStateINSNominalState:
     accel_bias_mps2: FloatArray
 
     def __post_init__(self) -> None:
+        self.time_s = None if self.time_s is None else float(self.time_s)
         self.lat_rad = _check_latitude(self.lat_rad)
         self.lon_rad = float(wrap_angle_pi(self.lon_rad))
         self.height_m = float(self.height_m)
@@ -341,6 +345,7 @@ class ErrorStateINSNominalState:
     def copy(self) -> "ErrorStateINSNominalState":
         """Deep copy of the nominal state."""
         return ErrorStateINSNominalState(
+            time_s=None if self.time_s is None else float(self.time_s),
             lat_rad=float(self.lat_rad),
             lon_rad=float(self.lon_rad),
             height_m=float(self.height_m),
@@ -364,6 +369,7 @@ class ErrorStateINSNominalState:
         if len(truth) < 1:
             raise ValueError("truth trajectory must contain at least one sample.")
         return cls(
+            time_s=float(truth.time_s[0]),
             lat_rad=float(truth.lat_rad[0]),
             lon_rad=float(truth.lon_rad[0]),
             height_m=float(truth.height_m[0]),
@@ -736,6 +742,7 @@ def propagate_nominal_state(
     )
 
     return ErrorStateINSNominalState(
+        time_s=None if state.time_s is None else float(state.time_s + dt),
         lat_rad=float(lat_new),
         lon_rad=float(lon_new),
         height_m=float(h_new),

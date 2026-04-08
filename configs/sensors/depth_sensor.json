@@ -1,0 +1,13 @@
+{
+  "name": "depth_sensor",
+  "noise_density_m_per_sqrt_hz": 0.02,
+  "bias_random_walk_m_per_sqrt_s": 0.001,
+  "turn_on_bias_std_m": 0.05,
+  "fixed_bias_m": 0.0,
+  "scale_factor_error_ppm": 0.0,
+  "bandwidth_hz": 2.0,
+  "reference_surface_height_m": 0.0,
+  "fluid_density_kgpm3": 1025.0,
+  "reference_pressure_pa": 101325.0,
+  "gravity_mps2": 9.80665
+}

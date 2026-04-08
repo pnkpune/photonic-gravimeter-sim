@@ -1,0 +1,61 @@
+{
+  "name": "maritime_baseline",
+  "initial_lat_deg": 18.25,
+  "initial_lon_deg": 72.75,
+  "initial_height_m": 0.0,
+  "initial_heading_deg": 90.0,
+  "default_dt_s": 1.0,
+  "description": "Baseline surface-vessel survey pattern: repeated straight mapping legs with shallow smooth turns.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "coverage_survey"
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 600.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "survey_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 600.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "survey_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 600.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "survey_leg_3"
+    }
+  ]
+}

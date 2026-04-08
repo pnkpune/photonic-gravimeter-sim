@@ -1,0 +1,29 @@
+{
+  "name": "velocity_aid",
+  "noise_density_mps_per_sqrt_hz": [
+    0.03,
+    0.03,
+    0.03
+  ],
+  "bias_random_walk_mps_per_sqrt_s": [
+    0.002,
+    0.002,
+    0.002
+  ],
+  "turn_on_bias_std_mps": [
+    0.02,
+    0.02,
+    0.02
+  ],
+  "fixed_bias_mps": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "scale_factor_error_ppm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "bandwidth_hz": 2.0
+}

@@ -675,11 +675,18 @@ class ReferenceEllipsoid:
         Clynch (2002), "Geodetic Coordinate Conversions", section:
         "ECEF xyz to Latitude, Longitude, Height".
         """
-        x, y, z = np.broadcast_arrays(
+        x_b, y_b, z_b = np.broadcast_arrays(
             _as_float_array(x_m),
             _as_float_array(y_m),
             _as_float_array(z_m),
         )
+        shape = x_b.shape
+
+        # Flatten for uniform masked assignment. This avoids 0-D scalar arrays,
+        # which do not support boolean item assignment.
+        x = np.asarray(x_b, dtype=np.float64).reshape(-1)
+        y = np.asarray(y_b, dtype=np.float64).reshape(-1)
+        z = np.asarray(z_b, dtype=np.float64).reshape(-1)
 
         lon = np.arctan2(y, x)
         p = np.hypot(x, y)
@@ -720,7 +727,16 @@ class ReferenceEllipsoid:
             h[pole_mask] = np.abs(z[pole_mask]) - self.b
             lon[pole_mask] = 0.0
 
-        return _maybe_scalar_tuple((lat, lon, h), x_m, y_m, z_m)
+        return _maybe_scalar_tuple(
+            (
+                lat.reshape(shape),
+                lon.reshape(shape),
+                h.reshape(shape),
+            ),
+            x_m,
+            y_m,
+            z_m,
+        )
 
 
 WGS84 = ReferenceEllipsoid(

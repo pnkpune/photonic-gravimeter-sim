@@ -1,0 +1,10 @@
+{
+  "name": "gravimeter_proto",
+  "noise_density_mps2_per_sqrt_hz": 1.0e-05,
+  "bias_random_walk_mps2_per_sqrt_s": 2.5e-07,
+  "turn_on_bias_std_mps2": 5.0e-06,
+  "fixed_bias_mps2": 0.0,
+  "scale_factor_error_ppm": 0.0,
+  "bandwidth_hz": 0.5,
+  "supports_absolute_mode": false
+}

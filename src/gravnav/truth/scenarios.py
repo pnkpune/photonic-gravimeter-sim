@@ -456,6 +456,17 @@ def _segment_from_mapping(mapping: Mapping[str, Any]) -> SegmentSpec:
             return float(default)
         raise KeyError(f"Missing {rad_key} or {deg_key} for segment type {seg_type!r}.")
 
+    def read_angle_rate_radps(key_base: str) -> float:
+        radps_key = f"{key_base}_radps"
+        degps_key = f"{key_base}_degps"
+        if radps_key in mapping:
+            return float(mapping[radps_key])
+        if degps_key in mapping:
+            return float(np.deg2rad(float(mapping[degps_key])))
+        raise KeyError(
+            f"Missing {radps_key} or {degps_key} for segment type {seg_type!r}."
+        )
+
     common = {
         "duration_s": float(mapping["duration_s"]),
         "speed_mps": float(mapping["speed_mps"]),
@@ -478,7 +489,7 @@ def _segment_from_mapping(mapping: Mapping[str, Any]) -> SegmentSpec:
 
         return ConstantRateTurnSegmentSpec(
             **common,
-            heading_rate_radps=float(mapping["heading_rate_radps"]),
+            heading_rate_radps=read_angle_rate_radps("heading_rate"),
             roll_rad=roll_val,
         )
 

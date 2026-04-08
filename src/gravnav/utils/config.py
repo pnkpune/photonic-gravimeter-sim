@@ -280,6 +280,27 @@ def is_supported_config_path(path: str | Path) -> bool:
     return _normalized_suffix(Path(path)) in supported_config_suffixes()
 
 
+def _is_explicit_path_reference(path_or_name: str | Path) -> bool:
+    """
+    Return True when the caller appears to be naming a concrete path rather than
+    a bare config stem.
+
+    Examples treated as explicit:
+    - `/abs/path/file.yaml`
+    - `configs/scenarios/foo.json`
+    - `./foo.yaml`
+    - `foo.json`
+    """
+    raw = Path(path_or_name).expanduser()
+    text = str(path_or_name)
+    return (
+        raw.is_absolute()
+        or raw.suffix != ""
+        or len(raw.parts) > 1
+        or text.startswith((".", "~"))
+    )
+
+
 def resolve_config_path(
     path_or_name: str | Path,
     *,
@@ -649,11 +670,12 @@ def load_scenario_spec(
     ConfigError
         If neither a file-based nor a built-in scenario can be resolved.
     """
+    explicit_ref = _is_explicit_path_reference(path_or_name)
+
     try:
         mapping = load_scenario_mapping(path_or_name, project_root=project_root)
-        return ScenarioSpec.from_mapping(mapping)
     except ConfigPathError as file_exc:
-        if allow_named_builtin_fallback:
+        if allow_named_builtin_fallback and not explicit_ref:
             try:
                 return get_named_scenario(str(path_or_name))
             except KeyError as builtin_exc:
@@ -662,6 +684,29 @@ def load_scenario_spec(
                     f"{scenario_config_dir(project_root)!s} or as a built-in name. "
                     f"Available built-ins: {available_scenario_names()}."
                 ) from builtin_exc
+        raise file_exc
+    except OptionalDependencyError as file_exc:
+        if allow_named_builtin_fallback and not explicit_ref:
+            try:
+                return get_named_scenario(str(path_or_name))
+            except KeyError:
+                pass
+        raise file_exc
+
+    if allow_named_builtin_fallback and not explicit_ref and mapping == {}:
+        try:
+            return get_named_scenario(str(path_or_name))
+        except KeyError:
+            pass
+
+    try:
+        return ScenarioSpec.from_mapping(mapping)
+    except ConfigPathError as file_exc:
+        if allow_named_builtin_fallback and not explicit_ref:
+            try:
+                return get_named_scenario(str(path_or_name))
+            except KeyError:
+                pass
         raise file_exc
 
 

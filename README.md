@@ -13,6 +13,8 @@ The current codebase starts from:
 - an initial local-level error-state INS, fusion, map-matching, and integrity layer
 - an initial end-to-end simulation, persistence, metrics, and Monte Carlo layer
 - an initial navigation and Monte Carlo plotting layer
+- one runnable single-scenario script plus baseline JSON configs
+- an initial regression-test layer for core geodesy/config/CLI paths
 - shared utilities for RNG, units, and config loading
 
 The Python package lives under `src/gravnav`.
@@ -124,6 +126,31 @@ These conventions are already reflected in the implemented modules:
 - `src/gravnav/plots/monte_carlo_plots.py`
   Monte Carlo plotting helpers for metric histograms, ECDFs, distribution panels, aggregate comparisons, failure summaries, and study-to-study metric comparisons.
 
+### Scripts
+
+- `scripts/run_single_scenario.py`
+  Minimal CLI entry point that loads baseline configs, builds or loads a gravity map, runs one full scenario, and writes result, summary, metrics, map, and effective-config artifacts.
+
+### Configs
+
+- `configs/scenarios/maritime_baseline.json`
+  Runnable baseline scenario config mirroring the built-in maritime survey profile.
+
+- `configs/sensors/imu_nav_grade.json`
+- `configs/sensors/gravimeter_proto.json`
+- `configs/sensors/depth_sensor.json`
+- `configs/sensors/velocity_aid.json`
+  Baseline JSON sensor configs consumed directly by `scripts/run_single_scenario.py` without requiring PyYAML.
+
+### Tests
+
+- `tests/test_earth.py`
+- `tests/test_frames.py`
+- `tests/test_truth_models.py`
+- `tests/test_config.py`
+- `tests/test_cli_smoke.py`
+  Initial regression coverage for scalar geodesy/frame helpers, scenario degree-rate parsing, scenario-config fallback behavior, and the single-run CLI smoke path.
+
 ### Utilities
 
 - `src/gravnav/utils/rng.py`
@@ -149,18 +176,23 @@ Implemented now:
 - initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
 - end-to-end scenario runner, simulation result/logging containers, persistence helpers, performance metrics, and Monte Carlo orchestration
 - navigation and Monte Carlo plotting helpers
+- runnable single-scenario script and baseline JSON configs
+- initial regression tests for the core run path and known bug fixes
 - RNG, units, and config utilities
 
 Still scaffold-only:
 
 - `src/gravnav/plots/sensor_plots.py`
-- `scripts/*`
-- `tests/*`
-- `configs/*`
+- `scripts/run_monte_carlo.py`
+- `scripts/make_synthetic_map.py`
+- `scripts/benchmark_filters.py`
+- empty tests such as `tests/test_imu.py`, `tests/test_gravimeter.py`, `tests/test_error_state_ins.py`, and `tests/test_map_match_pf.py`
+- `configs/monte_carlo/*`
+- empty YAML config stubs under `configs/scenarios/*.yaml` and `configs/sensors/*.yaml`
 - `notebooks/*`
 - `pyproject.toml`
 
-So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, simulation-execution, and core plotting layers, but not yet the sensor-specific plotting, script, test, and packaged reporting layer.
+So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, simulation-execution, core plotting layers, a practical single-run entry point, and a first regression-test layer, but not yet the sensor-specific plotting, broader script surface, or full test/reporting layer.
 
 ## Built-In Truth Scenarios
 
@@ -177,9 +209,10 @@ These are intended as baseline motion libraries for later simulation and estimat
 The next meaningful layers to implement are:
 
 1. polishing the map-match-to-INS feedback policies and scenario/config wiring
-2. sensor-specific plots, scripts, tests, and real config files
+2. sensor-specific plots, Monte Carlo/helper scripts, broader test coverage, and broader config coverage
 
 ## Notes
 
 - YAML config support in `src/gravnav/utils/config.py` requires `PyYAML`.
+- The default runnable path uses the new JSON configs so it works without PyYAML.
 - The repository is still in a foundation-building phase; packaging and test wiring are not finished yet.
