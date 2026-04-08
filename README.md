@@ -1,225 +1,244 @@
 # photonic-gravimeter-sim
 
-`photonic-gravimeter-sim` is a gravity-aided navigation simulation repository built around a real geodesy/navigation foundation instead of a toy Earth model.
+`photonic-gravimeter-sim` is a gravity-aided navigation simulation repository for GPS-denied missions. It is organized as a real navigation stack, not a notebook demo: WGS84 geodesy and normal gravity at the bottom, truth and sensor models on top, then INS/fusion/map-matching/integrity, then simulation runners, metrics, plots, and reproducible output artifacts.
 
-The current codebase starts from:
+The repository is currently maritime/UUV-first. Gravity is treated as an aiding source inside an inertial navigation stack, not as a standalone navigation sensor.
 
-- a WGS84 normal-gravity and geodesy layer
-- a consistent ECEF/NED frame and rotation layer
-- a concrete gravity-disturbance map and synthetic-map layer
-- a gravity-reduction and correction layer for disturbance/anomaly products
-- truth-trajectory and vehicle-motion builders
-- sensor models for IMU, scalar gravimeter, depth aiding, and velocity aiding
-- an initial local-level error-state INS, fusion, map-matching, and integrity layer
-- an initial end-to-end simulation, persistence, metrics, and Monte Carlo layer
-- an initial navigation and Monte Carlo plotting layer
-- one runnable single-scenario script plus baseline JSON configs
-- an initial regression-test layer for core geodesy/config/CLI paths
-- shared utilities for RNG, units, and config loading
+## What The Repo Does
 
-The Python package lives under `src/gravnav`.
+The current code path supports this end-to-end flow:
 
-## Scope
+1. build a truth trajectory in geodetic/ECEF/NED-consistent coordinates
+2. sample a synthetic or grid-based gravity-disturbance map along that trajectory
+3. simulate IMU, scalar gravimeter, depth, and velocity-aid measurements
+4. propagate a local-level error-state INS
+5. apply constrained aiding updates and particle-filter gravity map matching
+6. compute navigation and integrity metrics
+7. save run archives, JSON summaries, figures, and a markdown report
 
-The repository is being built as a full simulation stack for gravity-aided navigation in GPS-denied settings, with a maritime/UUV-first bias and room for higher-dynamic UAV stress cases.
+The main validated runnable entry points are:
 
-The guiding idea is:
+- [scripts/run_single_scenario.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_single_scenario.py)
+- [scripts/generate_validation_report.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/generate_validation_report.py)
 
-1. Build the Earth, frame, and unit conventions first.
-2. Build truth motion and sensor models on top of those conventions.
-3. Add estimators, simulation runners, metrics, and plotting only after the physics base is stable.
+## Current Validated Baseline
 
-## Repository Conventions
+The repo has a validated single-scenario maritime baseline saved under `data/outputs/`.
 
-These conventions are already reflected in the implemented modules:
+Baseline setup:
+
+- scenario: `maritime_baseline`
+- duration: `2040.0 s`
+- sample interval: `2.0 s`
+- truth samples: `1021`
+- sensor stack: nav-grade IMU + scalar gravimeter + depth aid + velocity aid
+- map matching: particle filter enabled for diagnostics
+- PF-to-INS feedback: disabled in the validated baseline
+
+Key metrics from the saved validation bundle:
+
+| Metric | IMU-only | Aided baseline |
+| --- | ---: | ---: |
+| INS horizontal RMSE [m] | 13750.213 | 90.318 |
+| INS CEP95 [m] | 21579.851 | 169.129 |
+| INS vertical RMSE [m] | 2058.759 | 0.387 |
+| PF horizontal RMSE [m] | n/a | 128.574 |
+| PF CEP95 [m] | n/a | 228.032 |
+| Gravimeter RMSE [m/s^2] | n/a | 9.423829e-06 |
+
+Important conclusions from the validated run:
+
+- the aided baseline reduces INS horizontal RMSE by about `152.2x` relative to IMU-only
+- the aided baseline reduces INS CEP95 by about `127.6x`
+- the default single-run simulation is now numerically stable and no longer diverges to kilometer-scale error
+- the validated production path uses conservative constrained fusion for velocity and depth aiding
+- PF map matching is useful today as a diagnostic/observe-only layer, but closed-loop PF position feedback is not yet part of the validated baseline
+
+The full saved report is:
+
+- [validated_maritime_baseline_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/validated_maritime_baseline_report.md)
+
+## Saved Artifacts
+
+Validation figures:
+
+- [aided_navigation_overview.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_navigation_overview.png)
+- [aided_ground_track_local_ned.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_ground_track_local_ned.png)
+- [aided_position_error_ned.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_position_error_ned.png)
+- [aided_gravimeter_history.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_gravimeter_history.png)
+- [aided_pf_diagnostics.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_pf_diagnostics.png)
+- [imu_only_vs_aided_horizontal_error.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/imu_only_vs_aided_horizontal_error.png)
+
+Saved run bundles:
+
+- [maritime_baseline_aided.npz](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_aided.npz)
+- [maritime_baseline_aided_summary.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_aided_summary.json)
+- [maritime_baseline_aided_metrics.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_aided_metrics.json)
+- [maritime_baseline_imu_only.npz](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only.npz)
+- [maritime_baseline_imu_only_summary.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only_summary.json)
+- [maritime_baseline_imu_only_metrics.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only_metrics.json)
+
+## Conventions
+
+These conventions are used across the physics and navigation layers:
 
 - angles: radians internally
 - distances: meters
 - velocity: m/s
 - acceleration and gravity: m/s^2
-- gravity anomaly display/reporting: mGal
+- gravity anomaly display: mGal
 - Earth-fixed Cartesian frame: ECEF
 - local navigation frame: NED
 - latitude/longitude inputs to physics functions: geodetic latitude, east-positive longitude
 - timestamps: seconds since scenario start
 
-## Implemented Modules
+## Implemented Code
 
 ### Physics
 
-- `src/gravnav/physics/earth.py`
-  WGS84 reference ellipsoid, normal gravity, gravity gradients, and geodetic <-> ECEF conversion helpers.
-
-- `src/gravnav/physics/frames.py`
-  ECEF/ENU/NED frame transforms, Earth-rate and transport-rate helpers, DCM/quaternion utilities, and local-level frame helpers.
-
-- `src/gravnav/physics/kinematics.py`
-  Numerical derivatives/integration, velocity-derived navigation scalars, and DCM/quaternion propagation from body rates.
-
-- `src/gravnav/physics/gravity_map.py`
-  Regular-grid scalar gravity-disturbance maps, bilinear/nearest interpolation, optional reference-height handling, synthetic anomaly-map generation, and lightweight NPZ persistence helpers.
-
-- `src/gravnav/physics/corrections.py`
-  Gravity reduction/correction helpers including atmospheric, free-air, Bouguer, Eotvos, and stationary/moving-base disturbance-recovery workflows.
+- [earth.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/earth.py)
+  WGS84 reference ellipsoid, normal gravity, gravity gradients, and geodetic <-> ECEF conversion.
+- [frames.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/frames.py)
+  ECEF/ENU/NED transforms, Earth-rate and transport-rate helpers, DCM/quaternion utilities, and local-level frame helpers.
+- [kinematics.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/kinematics.py)
+  Numerical derivatives/integration, navigation scalars, and DCM/quaternion propagation from body rates.
+- [gravity_map.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/gravity_map.py)
+  Scalar gravity-disturbance maps, interpolation, synthetic anomaly generation, and NPZ persistence.
+- [corrections.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/corrections.py)
+  Free-air, Bouguer, atmospheric, Eotvos, and moving-base disturbance-recovery helpers.
 
 ### Sensors
 
-- `src/gravnav/sensors/base.py`
-  Shared sensor abstractions: validation helpers, clipping, stochastic scaling, first-order low-pass helpers, and stateful sensor base classes.
-
-- `src/gravnav/sensors/imu.py`
-  IMU truth helpers plus a stateful IMU sensor model with bias, white noise, saturation, and body-frame measurement generation.
-
-- `src/gravnav/sensors/gravimeter.py`
-  Scalar gravimeter helpers for disturbance/normal-gravity handling, moving-base reduction, Eotvos terms, and a stateful scalar gravimeter model.
-
-- `src/gravnav/sensors/depth.py`
-  Signed-depth helpers, simple hydrostatic conversions, and a stateful scalar depth-aiding sensor model.
-
-- `src/gravnav/sensors/velocity_aid.py`
-  Generic NED/body-frame velocity-aid helpers plus a stateful vector velocity-aiding sensor model.
+- [base.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/base.py)
+  Shared sensor abstractions, validation, clipping, stochastic scaling, and low-pass helpers.
+- [imu.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/imu.py)
+  IMU truth generation and a stateful IMU model with bias, white noise, and saturation.
+- [gravimeter.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/gravimeter.py)
+  Scalar gravimeter physics, moving-base reduction, disturbance handling, and a stateful sensor model.
+- [depth.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/depth.py)
+  Depth/height helpers, hydrostatic conversions, and a depth-aiding sensor model.
+- [velocity_aid.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/velocity_aid.py)
+  NED/body-frame velocity aiding helpers and a stateful velocity-aid model.
 
 ### Truth
 
-- `src/gravnav/truth/trajectory.py`
-  Canonical truth-trajectory containers plus builders from position, velocity, and attitude histories.
-
-- `src/gravnav/truth/vehicle_models.py`
-  Kinematic motion primitives such as straight legs, coordinated turns, smooth bank-in/bank-out turns, and profile-to-trajectory conversion.
-
-- `src/gravnav/truth/scenarios.py`
-  Declarative scenario specifications, segment schemas, named built-in scenarios, and scenario-to-trajectory orchestration.
+- [trajectory.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/truth/trajectory.py)
+  Truth trajectory containers and builders from position, velocity, and attitude histories.
+- [vehicle_models.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/truth/vehicle_models.py)
+  Straight legs, coordinated turns, smooth turns, and profile-to-trajectory conversion.
+- [scenarios.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/truth/scenarios.py)
+  Declarative scenario specifications, built-in scenarios, and scenario-to-trajectory orchestration.
 
 ### Estimators
 
-- `src/gravnav/estimators/error_state_ins.py`
-  Local-level closed-loop error-state INS propagation, process-noise handling, and direct linearized aiding models for velocity, position, and depth.
+- [error_state_ins.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/error_state_ins.py)
+  Local-level closed-loop error-state INS propagation and linearized aiding models.
+- [fusion.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/fusion.py)
+  Innovation gating, stacked linear updates, constrained depth fusion, and constrained velocity aiding.
+- [map_match_pf.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/map_match_pf.py)
+  Particle-filter gravity map matching with INS-prior coupling and geodetic/NED particle-cloud utilities.
+- [integrity.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/integrity.py)
+  NIS/NEES checks, protection-level calculations, alert-limit evaluation, and history monitoring.
 
-- `src/gravnav/estimators/fusion.py`
-  Measurement packaging, innovation gating, stacked linear updates, and convenience wrappers for velocity, position, depth, constrained height-only depth aiding, and later custom aiding measurements.
+### Simulation And Plots
 
-- `src/gravnav/estimators/map_match_pf.py`
-  Position-only particle-filter gravity map matching with gravity/depth likelihoods, INS-prior coupling, resampling, and geodetic/NED particle-cloud utilities.
-
-- `src/gravnav/estimators/integrity.py`
-  Integrity and consistency tooling including NIS/NEES checks, chi-square bounds, protection-level calculations, alert-limit evaluation, and time-history monitoring.
-
-### Simulation
-
-- `src/gravnav/simulation/runner.py`
-  End-to-end single-scenario orchestration including runner config, aiding schedules, initial covariance setup, truth-to-sensor-to-estimator execution, and logging into scenario results.
-
-- `src/gravnav/simulation/results.py`
-  Typed run-result containers, sensor/estimator log containers, extraction helpers, and lightweight JSON/NPZ persistence for later plotting, benchmarking, and Monte Carlo analysis.
-
-- `src/gravnav/simulation/metrics.py`
-  Simulation performance metrics and summaries including scalar/vector error metrics, NED position-error summaries, integrity summaries, and top-level scenario metrics derived from run results.
-
-- `src/gravnav/simulation/monte_carlo.py`
-  Monte Carlo study orchestration, per-run RNG provenance, aggregate metric summaries, optional parallel execution, config resolution, and study/result archive handling.
-
-### Plots
-
-- `src/gravnav/plots/nav_plots.py`
-  Navigation-result plotting helpers for ground track, altitude/depth, NED velocity, yaw-pitch-roll, position error, PF diagnostics, integrity history, and overview figures.
-
-- `src/gravnav/plots/monte_carlo_plots.py`
-  Monte Carlo plotting helpers for metric histograms, ECDFs, distribution panels, aggregate comparisons, failure summaries, and study-to-study metric comparisons.
-
-### Scripts
-
-- `scripts/run_single_scenario.py`
-  Minimal CLI entry point that loads baseline configs, builds or loads a gravity map, runs one full scenario, and writes result, summary, metrics, map, and effective-config artifacts. PF position feedback is opt-in in the CLI baseline path.
-
-- `scripts/generate_validation_report.py`
-  Reproducible validation entry point that generates the aided baseline run bundle, an IMU-only comparison run, key figures, and a markdown conclusion report under `data/outputs/`.
-
-### Configs
-
-- `configs/scenarios/maritime_baseline.json`
-  Runnable baseline scenario config mirroring the built-in maritime survey profile.
-
-- `configs/sensors/imu_nav_grade.json`
-- `configs/sensors/gravimeter_proto.json`
-- `configs/sensors/depth_sensor.json`
-- `configs/sensors/velocity_aid.json`
-  Baseline JSON sensor configs consumed directly by `scripts/run_single_scenario.py` without requiring PyYAML.
-
-### Tests
-
-- `tests/test_earth.py`
-- `tests/test_frames.py`
-- `tests/test_truth_models.py`
-- `tests/test_config.py`
-- `tests/test_error_state_ins.py`
-- `tests/test_cli_smoke.py`
-  Initial regression coverage for scalar geodesy/frame helpers, scenario degree-rate parsing, scenario-config fallback behavior, constrained depth-aiding behavior, initial INS bias-prior behavior, and the single-run CLI smoke path.
+- [runner.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/runner.py)
+  End-to-end single-scenario orchestration.
+- [results.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/results.py)
+  Typed result/log containers and JSON/NPZ persistence.
+- [metrics.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/metrics.py)
+  Navigation, sensor, and integrity metrics.
+- [monte_carlo.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/monte_carlo.py)
+  Monte Carlo study orchestration and aggregate summaries.
+- [nav_plots.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/plots/nav_plots.py)
+  Navigation result plotting helpers.
+- [monte_carlo_plots.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/plots/monte_carlo_plots.py)
+  Monte Carlo plotting helpers.
 
 ### Utilities
 
-- `src/gravnav/utils/rng.py`
-  RNG creation, seed/state capture, reproducible generator spawning, and Monte Carlo stream helpers.
+- [config.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/utils/config.py)
+  Config-path resolution, YAML/JSON/TOML loading, scenario loading/export, and recursive config merge.
+- [rng.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/utils/rng.py)
+  Reproducible RNG creation and spawned stream helpers.
+- [units.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/utils/units.py)
+  Shared unit conversions for gravimetry, IMU datasheet units, angles, and speed.
 
-- `src/gravnav/utils/units.py`
-  Shared unit conversions for angles, gravimetry, IMU-style datasheet units, speed, and ppm/ppb/ppt-style scale factors.
+## Built-In Scenarios
 
-- `src/gravnav/utils/config.py`
-  Project-root discovery, config-path resolution, YAML/JSON/TOML loading, scenario loading/export, and recursive config merging.
-
-## Current Status
-
-Implemented now:
-
-- Earth/geodesy foundation
-- frames/rotations/local-level math
-- concrete gravity-map representation and synthetic-map generation
-- gravity reduction and correction workflows
-- kinematics helpers
-- IMU, gravimeter, depth, and velocity-aid sensor models
-- truth trajectories, vehicle profiles, and named scenarios
-- initial local-level INS propagation, linearized measurement fusion, PF-based gravity map matching, and integrity monitoring
-- safer default depth-aid and PF-feedback policies for the runnable single-scenario path
-- end-to-end scenario runner, simulation result/logging containers, persistence helpers, performance metrics, and Monte Carlo orchestration
-- navigation and Monte Carlo plotting helpers
-- runnable single-scenario script and baseline JSON configs
-- reproducible validation-report generation with saved figures and run bundles
-- initial regression tests for the core run path and known bug fixes
-- RNG, units, and config utilities
-
-Still scaffold-only:
-
-- `src/gravnav/plots/sensor_plots.py`
-- `scripts/run_monte_carlo.py`
-- `scripts/make_synthetic_map.py`
-- `scripts/benchmark_filters.py`
-- empty tests such as `tests/test_imu.py`, `tests/test_gravimeter.py`, and `tests/test_map_match_pf.py`
-- `configs/monte_carlo/*`
-- empty YAML config stubs under `configs/scenarios/*.yaml` and `configs/sensors/*.yaml`
-- `notebooks/*`
-- `pyproject.toml`
-
-So the repository currently contains the foundational physics, map, correction, truth, sensor, estimator, simulation-execution, core plotting layers, a practical single-run entry point, and a first regression-test layer, but not yet the sensor-specific plotting, broader script surface, or full test/reporting layer.
-
-## Built-In Truth Scenarios
-
-The current truth layer includes named scenario presets in `src/gravnav/truth/scenarios.py`:
+Built into [scenarios.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/truth/scenarios.py):
 
 - `maritime_baseline`
 - `uuv_long_endurance`
 - `uav_stress_case`
 
-These are intended as baseline motion libraries for later simulation and estimator work.
+## How To Run
 
-## Near-Term Next Steps
+Generate a single baseline run bundle:
 
-The next meaningful layers to implement are:
+```bash
+python3 scripts/run_single_scenario.py \
+  --output-dir /tmp/gravnav_single_run \
+  --run-id baseline \
+  --seed 123 \
+  --dt-s 2.0 \
+  --pf-particles 64 \
+  --map-grid-size 101
+```
 
-1. polishing the map-match-to-INS feedback policies and scenario/config wiring
-2. sensor-specific plots, Monte Carlo/helper scripts, broader test coverage, and broader config coverage
+Generate the saved validation figures and report:
 
-## Notes
+```bash
+python3 scripts/generate_validation_report.py
+```
 
-- YAML config support in `src/gravnav/utils/config.py` requires `PyYAML`.
-- The default runnable path uses the new JSON configs so it works without PyYAML.
-- The default single-run CLI keeps PF map matching enabled for logging, but PF-to-INS position feedback is disabled unless explicitly enabled.
-- The repository is still in a foundation-building phase; packaging and test wiring are not finished yet.
+The default CLI path uses JSON configs under `configs/` and does not require PyYAML.
+
+## Tests
+
+The current non-empty regression tests are:
+
+- [conftest.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/conftest.py)
+- [test_earth.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_earth.py)
+- [test_frames.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_frames.py)
+- [test_truth_models.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_truth_models.py)
+- [test_config.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_config.py)
+- [test_error_state_ins.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_error_state_ins.py)
+- [test_imu.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_imu.py)
+- [test_cli_smoke.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_cli_smoke.py)
+
+The latest stabilization pass completed with `14 passed` on the core regression suite.
+
+## Current Limits
+
+What is implemented:
+
+- the WGS84/geodesy/frame foundation
+- truth trajectories and motion profiles
+- IMU, gravimeter, depth, and velocity-aid sensor models
+- local-level INS propagation and constrained aiding fusion
+- particle-filter gravity map matching
+- integrity monitoring, run logging, metrics, plots, and a reproducible validation report
+- a stable single-scenario maritime baseline
+
+What is not yet validated or still scaffold-only:
+
+- closed-loop PF-to-INS position feedback as part of the production baseline
+- [sensor_plots.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/plots/sensor_plots.py)
+- [run_monte_carlo.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_monte_carlo.py)
+- [make_synthetic_map.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/make_synthetic_map.py)
+- [benchmark_filters.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/benchmark_filters.py)
+- broad sensor-specific and estimator-specific test coverage such as `test_gravimeter.py` and `test_map_match_pf.py`
+- YAML config population and the notebook layer
+- `pyproject.toml` packaging/setup wiring
+
+## Practical Interpretation
+
+Today this repo is best understood as a validated gravity-aided navigation simulation baseline for maritime-style motion, with a strong physics foundation and a stable end-to-end run path. It is already useful for:
+
+- testing inertial-plus-gravity aiding behavior against a controlled truth model
+- benchmarking IMU-only versus aided navigation
+- generating reproducible figures, metrics, and report artifacts
+- serving as the base for later Monte Carlo studies and gravity-feedback tuning
+
+It is not yet a finished research product for arbitrary scenarios or a fully validated closed-loop gravity-feedback system.
