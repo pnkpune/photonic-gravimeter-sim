@@ -32,6 +32,7 @@ if str(SRC_DIR) not in sys.path:
 
 import numpy as np
 
+from gravnav.datasets.gravity_loader import ensure_regional_gravity_map
 from gravnav.estimators.map_match_pf import MapMatchPFSpec
 from gravnav.physics.gravity_map import (
     GaussianAnomalySource,
@@ -438,6 +439,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--map-path",
         default=None,
         help="Optional NPZ gravity map path. If omitted, a synthetic map is generated.",
+    )
+    parser.add_argument(
+        "--regional-map",
+        choices=("norwegian_margin",),
+        default=None,
+        help=(
+            "Use a processed regional gravity map cache resolved through the dataset "
+            "layer. This is explicit and separate from the synthetic-map path."
+        ),
+    )
+    parser.add_argument(
+        "--regional-map-raw-path",
+        default=None,
+        help=(
+            "Optional raw regular-grid CSV override used when building the processed "
+            "regional map cache."
+        ),
+    )
+    parser.add_argument(
+        "--regional-map-force-reprocess",
+        action="store_true",
+        help="Rebuild the processed regional gravity-map cache from the raw product.",
     )
     parser.add_argument(
         "--dt-s",
@@ -849,6 +872,8 @@ def _metrics_summary_lines(metrics: ScenarioMetricsSummary) -> list[str]:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    if args.map_path is not None and args.regional_map is not None:
+        parser.error("--map-path and --regional-map are mutually exclusive.")
 
     scenario, scenario_source = _load_scenario(args.scenario)
 
@@ -885,9 +910,21 @@ def main() -> int:
     truth = build_truth_trajectory_from_scenario(scenario, dt_s=args.dt_s)
 
     map_source: str
+    map_manifest_source: str | None = None
+    regional_map_info: dict[str, Any] | None = None
     if args.disable_map_match:
         map_model: GravityGridMap | None = None
         map_source = "disabled"
+    elif args.regional_map is not None:
+        map_model, manifest, processed_map_path, manifest_path = ensure_regional_gravity_map(
+            args.regional_map,
+            project_root=PROJECT_ROOT,
+            raw_path=args.regional_map_raw_path,
+            force_reprocess=bool(args.regional_map_force_reprocess),
+        )
+        map_source = _relative_to_root(processed_map_path)
+        map_manifest_source = _relative_to_root(manifest_path)
+        regional_map_info = manifest.to_mapping()
     elif args.map_path is not None:
         map_path = _resolve_path(args.map_path)
         map_model = GravityGridMap.from_npz(map_path)
@@ -924,7 +961,9 @@ def main() -> int:
             "dt_s": float(scenario.default_dt_s if args.dt_s is None else args.dt_s),
             "seed": int(args.seed),
             "map_source": map_source,
+            "map_manifest_source": map_manifest_source,
             "output_dir": _relative_to_root(_resolve_path(args.output_dir)),
+            "regional_map": regional_map_info,
             "velocity_aid": {
                 "enabled": not args.disable_velocity_aid,
                 "every_steps": int(args.velocity_update_every_steps),
@@ -1010,7 +1049,7 @@ def main() -> int:
                 "vertical_alert_limit_m": float(args.vertical_alert_limit_m),
             },
             "synthetic_map": None
-            if map_model is None or args.map_path is not None
+            if map_model is None or args.map_path is not None or args.regional_map is not None
             else {
                 "grid_size": int(args.map_grid_size),
                 "margin_deg": float(args.map_margin_deg),
@@ -1072,6 +1111,8 @@ def main() -> int:
     print(f"Saved effective config: {_relative_to_root(config_path)}")
     if map_path is not None:
         print(f"Saved map: {_relative_to_root(map_path)}")
+    if map_manifest_source is not None:
+        print(f"Regional map manifest: {map_manifest_source}")
 
     return 0
 

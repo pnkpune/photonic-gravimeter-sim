@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Benchmark PF and sequence-based map-matching modes."""
+"""Benchmark PF, sequence, and lag-smoothed map-matching modes."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
+
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 RUNNER = PROJECT_ROOT / "scripts" / "run_single_scenario.py"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "outputs" / "reports" / "priority3_benchmark"
 
 
 def _run_one(
@@ -21,15 +24,21 @@ def _run_one(
     output_dir: Path,
     seed: int,
     scenario: str,
+    base_flags: list[str],
     extra_flags: list[str] | None = None,
 ) -> dict[str, Any]:
     cmd = [
         PYTHON,
         str(RUNNER),
-        "--scenario", scenario,
-        "--seed", str(seed),
-        "--run-id", label,
-        "--output-dir", str(output_dir),
+        "--scenario",
+        scenario,
+        "--seed",
+        str(seed),
+        "--run-id",
+        label,
+        "--output-dir",
+        str(output_dir),
+        *base_flags,
     ]
     if extra_flags:
         cmd.extend(extra_flags)
@@ -88,101 +97,228 @@ def _run_one(
     }
 
 
+def _profile_configs(profile: str) -> list[dict[str, Any]]:
+    if profile == "priority3_full":
+        return [
+            {"label": "observe_only", "extra_flags": []},
+            {"label": "observe_plus_gradient", "extra_flags": ["--use-gradiometer"]},
+            {
+                "label": "directional_plus_gradient",
+                "extra_flags": ["--use-gradiometer", "--use-directional-feedback"],
+            },
+            {
+                "label": "sequence_only",
+                "extra_flags": ["--map-matcher", "sequence"],
+            },
+            {
+                "label": "sequence_plus_gradient",
+                "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
+            },
+            {
+                "label": "sequence_plus_gradient_lag_smoothed",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-lag-smoother",
+                ],
+            },
+            {
+                "label": "sequence_plus_gradient_replay_feedback",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                ],
+            },
+            {
+                "label": "sequence_plus_gradient_replay_feedback_relaxed",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "full_horizontal",
+                    "--sequence-feedback-min-peak-prob",
+                    "0.03",
+                    "--sequence-feedback-max-horizontal-std-m",
+                    "120",
+                    "--sequence-feedback-max-correction-m",
+                    "50",
+                    "--sequence-feedback-inflation",
+                    "10.0",
+                ],
+            },
+            {
+                "label": "sequence_plus_gradient_replay_directional_safe",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                    "--sequence-feedback-min-eigenvalue-ratio",
+                    "1.15",
+                    "--sequence-feedback-min-peak-prob",
+                    "0.03",
+                    "--sequence-feedback-max-horizontal-std-m",
+                    "120",
+                    "--sequence-feedback-max-correction-m",
+                    "30",
+                    "--sequence-feedback-inflation",
+                    "10.0",
+                ],
+            },
+            {
+                "label": "sequence_plus_gradient_transfer_feedback",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "bias_transfer",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                ],
+            },
+        ]
+    if profile == "regional_core":
+        return [
+            {"label": "ins_only", "extra_flags": ["--disable-map-match"]},
+            {"label": "observe_only", "extra_flags": []},
+            {"label": "observe_plus_gradient", "extra_flags": ["--use-gradiometer"]},
+            {
+                "label": "sequence_plus_gradient",
+                "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
+            },
+            {
+                "label": "sequence_plus_gradient_lag_smoothed",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-lag-smoother",
+                ],
+            },
+        ]
+    raise ValueError(f"Unsupported benchmark profile {profile!r}.")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run benchmark comparisons across map-matching modes.")
+    parser.add_argument(
+        "--profile",
+        choices=("priority3_full", "regional_core"),
+        default="priority3_full",
+        help="Named benchmark configuration set.",
+    )
+    parser.add_argument(
+        "--scenario",
+        default="maritime_baseline",
+        help="Scenario name or explicit scenario config path passed through to run_single_scenario.py.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Root RNG seed.")
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Directory where per-run artifacts and the benchmark summary are written.",
+    )
+    parser.add_argument(
+        "--map-path",
+        default=None,
+        help="Optional processed NPZ map passed through to the single-run CLI.",
+    )
+    parser.add_argument(
+        "--regional-map",
+        choices=("norwegian_margin",),
+        default=None,
+        help="Optional regional map name resolved through the dataset layer.",
+    )
+    parser.add_argument(
+        "--regional-map-raw-path",
+        default=None,
+        help="Optional raw CSV override used when building the regional map cache.",
+    )
+    parser.add_argument(
+        "--regional-map-force-reprocess",
+        action="store_true",
+        help="Rebuild the processed regional map cache before running the benchmark.",
+    )
+    parser.add_argument(
+        "--dt-s",
+        type=float,
+        default=None,
+        help="Optional truth sample interval override passed through to the single-run CLI.",
+    )
+    parser.add_argument(
+        "--pf-particles",
+        type=int,
+        default=None,
+        help="Optional PF particle-count override passed through to the single-run CLI.",
+    )
+    return parser
+
+
 def main() -> int:
-    output_dir = PROJECT_ROOT / "data" / "outputs" / "reports" / "priority3_benchmark"
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.map_path is not None and args.regional_map is not None:
+        parser.error("--map-path and --regional-map are mutually exclusive.")
+
+    output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenario = "maritime_baseline"
-    seed = 42
-    configs = [
-        {"label": "observe_only", "extra_flags": []},
-        {"label": "observe_plus_gradient", "extra_flags": ["--use-gradiometer"]},
-        {
-            "label": "directional_plus_gradient",
-            "extra_flags": ["--use-gradiometer", "--use-directional-feedback"],
-        },
-        {
-            "label": "sequence_only",
-            "extra_flags": ["--map-matcher", "sequence"],
-        },
-        {
-            "label": "sequence_plus_gradient",
-            "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
-        },
-        {
-            "label": "sequence_plus_gradient_lag_smoothed",
-            "extra_flags": [
-                "--map-matcher", "sequence",
-                "--use-gradiometer",
-                "--use-sequence-lag-smoother",
-            ],
-        },
-        {
-            "label": "sequence_plus_gradient_replay_feedback",
-            "extra_flags": [
-                "--map-matcher", "sequence",
-                "--use-gradiometer",
-                "--use-sequence-feedback",
-                "--sequence-feedback-mode", "lag_replay",
-                "--sequence-feedback-geometry", "directional_horizontal",
-            ],
-        },
-        {
-            "label": "sequence_plus_gradient_replay_feedback_relaxed",
-            "extra_flags": [
-                "--map-matcher", "sequence",
-                "--use-gradiometer",
-                "--use-sequence-feedback",
-                "--sequence-feedback-mode", "lag_replay",
-                "--sequence-feedback-geometry", "full_horizontal",
-                "--sequence-feedback-min-peak-prob", "0.03",
-                "--sequence-feedback-max-horizontal-std-m", "120",
-                "--sequence-feedback-max-correction-m", "50",
-                "--sequence-feedback-inflation", "10.0",
-            ],
-        },
-        {
-            "label": "sequence_plus_gradient_replay_directional_safe",
-            "extra_flags": [
-                "--map-matcher", "sequence",
-                "--use-gradiometer",
-                "--use-sequence-feedback",
-                "--sequence-feedback-mode", "lag_replay",
-                "--sequence-feedback-geometry", "directional_horizontal",
-                "--sequence-feedback-min-eigenvalue-ratio", "1.15",
-                "--sequence-feedback-min-peak-prob", "0.03",
-                "--sequence-feedback-max-horizontal-std-m", "120",
-                "--sequence-feedback-max-correction-m", "30",
-                "--sequence-feedback-inflation", "10.0",
-            ],
-        },
-        {
-            "label": "sequence_plus_gradient_transfer_feedback",
-            "extra_flags": [
-                "--map-matcher", "sequence",
-                "--use-gradiometer",
-                "--use-sequence-feedback",
-                "--sequence-feedback-mode", "bias_transfer",
-                "--sequence-feedback-geometry", "directional_horizontal",
-            ],
-        },
-    ]
+    base_flags: list[str] = []
+    if args.map_path is not None:
+        base_flags.extend(["--map-path", args.map_path])
+    if args.regional_map is not None:
+        base_flags.extend(["--regional-map", args.regional_map])
+    if args.regional_map_raw_path is not None:
+        base_flags.extend(["--regional-map-raw-path", args.regional_map_raw_path])
+    if args.regional_map_force_reprocess:
+        base_flags.append("--regional-map-force-reprocess")
+    if args.dt_s is not None:
+        base_flags.extend(["--dt-s", str(args.dt_s)])
+    if args.pf_particles is not None:
+        base_flags.extend(["--pf-particles", str(args.pf_particles)])
 
     rows: list[dict[str, Any]] = []
+    configs = _profile_configs(args.profile)
     for cfg in configs:
         print(f"\n=== {cfg['label']} ===", flush=True)
         row = _run_one(
             cfg["label"],
             output_dir=output_dir,
-            seed=seed,
-            scenario=scenario,
+            seed=int(args.seed),
+            scenario=args.scenario,
+            base_flags=base_flags,
             extra_flags=cfg["extra_flags"],
         )
         rows.append(row)
         print(json.dumps(row, indent=2), flush=True)
 
-    summary_path = output_dir / f"{scenario}_summary.json"
-    summary_path.write_text(json.dumps(rows, indent=2) + "\n")
+    summary_payload = {
+        "profile": args.profile,
+        "scenario": args.scenario,
+        "seed": int(args.seed),
+        "regional_map": args.regional_map,
+        "map_path": args.map_path,
+        "runs": rows,
+    }
+    summary_path = output_dir / f"{Path(str(args.scenario)).stem}_summary.json"
+    summary_path.write_text(json.dumps(summary_payload, indent=2) + "\n")
 
     print("\n=== SUMMARY ===")
     print(
@@ -192,9 +328,9 @@ def main() -> int:
     )
     for row in rows:
         hmi = row["hmi_horizontal"]
-        hmi_pct = float('nan') if hmi is None else 100.0 * float(hmi)
+        hmi_pct = float("nan") if hmi is None else 100.0 * float(hmi)
         lag_hmi = row["lag_hmi_horizontal"]
-        lag_hmi_pct = float('nan') if lag_hmi is None else 100.0 * float(lag_hmi)
+        lag_hmi_pct = float("nan") if lag_hmi is None else 100.0 * float(lag_hmi)
         lag_rmse = float("nan") if row["lag_smoothed_horizontal_rmse_m"] is None else float(row["lag_smoothed_horizontal_rmse_m"])
         lag_cep95 = float("nan") if row["lag_smoothed_cep95_m"] is None else float(row["lag_smoothed_cep95_m"])
         pf_rmse = float("nan") if row["pf_horizontal_rmse_m"] is None else float(row["pf_horizontal_rmse_m"])

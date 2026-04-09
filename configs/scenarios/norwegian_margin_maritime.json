@@ -1,0 +1,62 @@
+{
+  "name": "norwegian_margin_maritime",
+  "initial_lat_deg": 63.690,
+  "initial_lon_deg": 4.160,
+  "initial_height_m": 0.0,
+  "initial_heading_deg": 72.0,
+  "default_dt_s": 1.0,
+  "description": "Norwegian-margin maritime survey analogue sized to stay inside the regional fixture grid while preserving the baseline survey-leg motion character.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "regional_gravity_benchmark",
+    "region_name": "norwegian_margin"
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_3"
+    }
+  ]
+}

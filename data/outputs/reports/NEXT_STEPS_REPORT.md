@@ -1,8 +1,8 @@
 # Next-Steps Report: From Gravity-Aided INS to Earth-Signature Navigator
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
-**Date: 2026-04-09**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, PF feedback disabled, 30 tests passing**
+**Date: 2026-04-10**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, PF feedback disabled, 35 tests passing**
 
 ---
 
@@ -23,6 +23,36 @@ The stack includes: WGS84 geodesy, nav-grade IMU model, scalar gravimeter with m
 PF feedback is intentionally disabled. Naive PF-to-INS pseudo-position injection destroys the INS (19 km RMSE). Covariance inflation makes it non-destructive but never better than observe-only. This is the central bottleneck.
 
 New status beyond that baseline: the repo now also has a **separate bounded-lag smoothed navigation output** driven by `sequence_plus_gradient`. Unlike the closed-loop feedback experiments, this path leaves the live INS untouched and publishes a delayed navigation track. On `maritime_baseline`, seed `42`, it improves the live INS from **103.5 m** horizontal RMSE to **98.3 m** with **0.0%** horizontal HMI. That makes it the first delayed navigation path in the repo that improves navigation metrics without breaking the validated real-time solution.
+
+---
+
+## Regional benchmark update (2026-04-10)
+
+The repo now has a **gravity-first Norwegian-margin regional benchmark path** that keeps the estimator stack unchanged and swaps only the map source:
+
+- new `gravnav.datasets` layer that ingests a regular-grid CSV and produces a `GravityGridMap` cache plus manifest
+- tracked in-repo Norwegian-margin fixture under `data/gravity_maps/raw/norwegian_margin/`
+- processed cache and manifest under `data/gravity_maps/processed/`
+- regional scenario `norwegian_margin_maritime`
+- regional benchmark/report path comparing live INS, PF observe-only, sequence observe-only, and the bounded-lag smoother
+
+Current result on `norwegian_margin_maritime`, seed `42`, `dt = 2.0 s`:
+
+| Path | Horizontal RMSE [m] | CEP95 [m] | HMI horiz |
+| --- | ---: | ---: | ---: |
+| Live INS | 111.474 | 196.457 | 0.0 % |
+| Best PF observe-only (`observe_plus_gradient`) | 131.762 | 253.578 | 0.0 % |
+| Best sequence observe-only (`sequence_plus_gradient`) | 110.219 | 195.754 | 0.0 % |
+| Bounded-lag smoother (`sequence_plus_gradient_lag_smoothed`) | 110.763 | 196.082 | 0.0 % |
+
+What this means:
+
+- the **ranking survives** on the regional benchmark: sequence matching still beats PF
+- the bounded-lag smoother still beats the live INS, but only modestly
+- the gains shrink sharply relative to the synthetic maritime benchmark, which means the earlier synthetic map materially overstated regional gravity distinctiveness
+- the current regional path is a realism check, not yet a benchmark on a full public Norwegian-margin survey product
+
+**Decision:** before adding more estimator complexity, the next highest-impact step is to replace the in-repo fixture with a full public regional product and rerun the exact same benchmark stack. The algorithm question is no longer “can sequence beat PF on synthetic maps?” It already can. The real question is how much of that survives once the map realism improves further.
 
 ---
 
@@ -469,4 +499,4 @@ Multiple vehicles share gravity-signature-correlated relative constraints (not a
 
 ## One-sentence summary
 
-**Build observability-aware directional PF feedback first, add gradient and sequence matching next, bring in real Earth data regionally, then layer ML on top — always inside a Bayesian framework where physics is the backbone and ML makes each component sharper.**
+**The immediate next move is to swap the Norwegian fixture for a real public regional gravity product and rerun the same benchmark stack before adding more estimator complexity; physics realism is now the bottleneck, not missing filter variants.**

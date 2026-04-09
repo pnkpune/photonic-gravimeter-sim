@@ -9,6 +9,7 @@ The project is currently maritime/UUV-first. Gravity is treated as an aiding sou
 The repo is past the scaffold stage. It now has:
 
 - a working WGS84 / ECEF / NED physics foundation
+- a regional gravity dataset/cache layer that feeds the existing `GravityGridMap` runtime interface
 - truth trajectory generation for maritime/UUV/UAV-style motion
 - IMU, scalar gravimeter, depth, velocity-aid, and gravity-gradiometer simulation
 - a closed-loop local-level error-state INS with constrained aiding
@@ -18,14 +19,16 @@ The repo is past the scaffold stage. It now has:
 - observability analysis for gravity-information content along a route
 - benchmark and reporting scripts
 - a validated maritime baseline with saved outputs and comparison against IMU-only
+- a Norwegian-margin regional benchmark path with a tracked in-repo fixture and processed manifest
 
 What is validated today:
 
 - the single-scenario maritime baseline run path
+- the Norwegian-margin ingest/cache path and regional benchmark smoke path
 - the core INS plus depth and velocity aiding path
 - observe-only PF and sequence map-matching diagnostics
 - the bounded-lag sequence smoother as a delayed navigation output
-- the generated validation report and benchmark artifacts
+- the generated validation report, regional benchmark report, and benchmark artifacts
 
 What is implemented but not yet part of the validated production path:
 
@@ -38,7 +41,7 @@ What is implemented but not yet part of the validated production path:
 The current end-to-end flow is:
 
 1. generate a truth trajectory in geodetic, ECEF, and NED-consistent coordinates
-2. sample a synthetic or grid-based gravity disturbance field along that trajectory
+2. build or load a synthetic or regional grid-based gravity disturbance field
 3. simulate IMU, scalar gravity, depth, velocity, and optional gradient measurements
 4. propagate a local-level error-state INS
 5. apply constrained aiding updates
@@ -52,6 +55,7 @@ The main runnable entry points are:
 - [run_single_scenario.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_single_scenario.py)
 - [benchmark_filters.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/benchmark_filters.py)
 - [generate_validation_report.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/generate_validation_report.py)
+- [generate_regional_benchmark_report.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/generate_regional_benchmark_report.py)
 
 ## Validated Baseline
 
@@ -95,6 +99,39 @@ Primary saved figures:
 - [aided_position_error_ned.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_position_error_ned.png)
 - [aided_pf_diagnostics.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/aided_pf_diagnostics.png)
 - [imu_only_vs_aided_horizontal_error.png](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/figures/validated_maritime_baseline/imu_only_vs_aided_horizontal_error.png)
+
+## Regional Benchmark
+
+The repo now also has a gravity-first Norwegian-margin regional benchmark path.
+
+What this path adds:
+
+- a thin `gravnav.datasets` layer that ingests a regular-grid CSV product and converts it into the existing `GravityGridMap` cache format
+- a processed cache plus manifest under `data/gravity_maps/processed/`
+- a regional maritime scenario that stays inside the Norwegian-margin map bounds
+- a benchmark/report path that compares live INS, observe-only PF, observe-only sequence matching, and the bounded-lag smoother without enabling any closed-loop gravity feedback
+
+Current in-repo regional input:
+
+- raw CSV: `data/gravity_maps/raw/norwegian_margin/norwegian_margin_fixture.csv`
+- processed manifest: `data/gravity_maps/processed/norwegian_margin_gravity_map_manifest.json`
+- report: [norwegian_margin_regional_benchmark_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/norwegian_margin_regional_benchmark_report.md)
+
+Current benchmark on `norwegian_margin_maritime`, seed `42`, `dt = 2.0 s`:
+
+| Path | Horizontal RMSE [m] | CEP95 [m] |
+| --- | ---: | ---: |
+| Live INS | 111.474 | 196.457 |
+| Best PF observe-only (`observe_plus_gradient`) | 131.762 | 253.578 |
+| Best sequence observe-only (`sequence_plus_gradient`) | 110.219 | 195.754 |
+| Bounded-lag smoother (`sequence_plus_gradient_lag_smoothed`) | 110.763 | 196.082 |
+
+Interpretation:
+
+- the estimator ranking survives: sequence matching still beats PF on the regional benchmark
+- the bounded-lag smoother still beats the live INS with `0.0%` lag-output horizontal HMI
+- the gains shrink sharply versus the synthetic maritime benchmark, so the synthetic map materially overstated gravity distinctiveness relative to the current Norwegian fixture
+- this path is now useful as a realism check, but the current in-repo input is still a tracked fixture, not yet a full public survey product
 
 ## Current Estimator Findings
 
@@ -210,6 +247,7 @@ Conclusion:
 The codebase currently covers these areas:
 
 - Physics: WGS84 ellipsoid, normal gravity, ECEF/NED/ENU frames, kinematics, gravity maps, and gravity-reduction helpers
+- Datasets: regional gravity-grid ingestion, processed-cache generation, and manifest sidecars
 - Sensors: IMU, scalar gravimeter, gradiometer, depth aid, and velocity aid
 - Truth: trajectory generation, motion profiles, and built-in scenarios
 - Estimation: error-state INS, constrained fusion, PF map matching, sequence matching, integrity, and experimental feedback policies
@@ -222,6 +260,10 @@ Built-in scenarios:
 - `maritime_baseline`
 - `uuv_long_endurance`
 - `uav_stress_case`
+
+Config-defined regional scenario:
+
+- `norwegian_margin_maritime`
 
 ## Conventions
 
@@ -276,6 +318,25 @@ Run the estimator comparison benchmark:
 python3 scripts/benchmark_filters.py
 ```
 
+Run the Norwegian-margin regional benchmark:
+
+```bash
+python3 scripts/benchmark_filters.py \
+  --profile regional_core \
+  --scenario norwegian_margin_maritime \
+  --regional-map norwegian_margin \
+  --output-dir data/outputs/reports/norwegian_margin_benchmark \
+  --seed 42 \
+  --dt-s 2.0 \
+  --pf-particles 32
+```
+
+Generate the Norwegian regional benchmark report:
+
+```bash
+python3 scripts/generate_regional_benchmark_report.py
+```
+
 The default CLI path uses JSON configs under `configs/` and does not require PyYAML.
 
 ## Tests
@@ -283,8 +344,10 @@ The default CLI path uses JSON configs under `configs/` and does not require PyY
 The current automated regression suite covers:
 
 - Earth/geodesy and frame math
+- regional gravity-map ingestion and manifest generation
 - truth/scenario building
 - config loading and CLI smoke execution
+- regional benchmark smoke execution
 - INS propagation and constrained fusion
 - IMU truth generation
 - gradiometer modeling
@@ -295,7 +358,7 @@ The current automated regression suite covers:
 Current status:
 
 - `python3 -m pytest -q`
-- `30 passed`
+- `35 passed`
 
 ## Reports And Artifacts
 
@@ -303,6 +366,7 @@ Important in-repo documentation and generated outputs:
 
 - [NEXT_STEPS_REPORT.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/NEXT_STEPS_REPORT.md)
 - [validated_maritime_baseline_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/validated_maritime_baseline_report.md)
+- [norwegian_margin_regional_benchmark_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/norwegian_margin_regional_benchmark_report.md)
 
 The repo also contains generated run bundles, figures, and comparison reports under:
 
@@ -319,6 +383,7 @@ What is not yet validated or still incomplete:
 - closed-loop PF-to-INS feedback as part of the production baseline
 - closed-loop delayed sequence-to-INS feedback as part of the production baseline
 - proof that any current gravity-feedback policy improves INS metrics beyond the validated observe-only baseline
+- the same Norwegian-margin benchmark on a full public regional gravity product instead of the tracked in-repo fixture
 - broader Monte Carlo and scenario sweeps as a standard documented workflow
 - fuller plotting coverage for sensor-only diagnostics
 - broader estimator and sensor test coverage beyond the current core suite
@@ -331,11 +396,13 @@ Today this repo should be understood as:
 
 - a serious gravity-aided navigation simulator, not a toy notebook
 - a validated maritime-style aided INS baseline with strong geodesy and frame conventions
-- a useful benchmark platform for comparing scalar gravity, gradient likelihood, PF matching, and sequence matching
+- a useful benchmark platform for comparing scalar gravity, gradient likelihood, PF matching, sequence matching, and delayed lag-smoothed outputs
+- a regional-benchmark-ready stack that can ingest a Norwegian-margin product into the existing map interface
 - a place where negative results are preserved explicitly instead of being hidden behind retuning
 
 It should not yet be described as:
 
 - a fully validated closed-loop gravity-feedback navigation system
 - a finished product for arbitrary routes or platforms
+- a benchmarked result on a full public Norwegian-margin survey product
 - a proof that the current PF or delayed sequence feedback policies are ready for production use
