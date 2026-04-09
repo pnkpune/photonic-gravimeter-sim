@@ -13,8 +13,9 @@ The current code path supports this end-to-end flow:
 3. simulate IMU, scalar gravimeter, depth, and velocity-aid measurements
 4. propagate a local-level error-state INS
 5. apply constrained aiding updates and particle-filter gravity map matching
-6. compute navigation and integrity metrics
-7. save run archives, JSON summaries, figures, and a markdown report
+6. optionally analyze local gravity observability and apply directional PF feedback policies
+7. compute navigation and integrity metrics
+8. save run archives, JSON summaries, figures, and a markdown report
 
 The main validated runnable entry points are:
 
@@ -54,6 +55,13 @@ Important conclusions from the validated run:
 - the validated production path uses conservative constrained fusion for velocity and depth aiding
 - PF map matching is useful today as a diagnostic/observe-only layer, but closed-loop PF position feedback is not yet part of the validated baseline
 
+Latest repo state beyond the validated baseline:
+
+- the repo now includes an observability analysis layer for gravity-information scoring along a trajectory
+- the PF now exports posterior NED eigenvalues/eigenvectors to support geometry-aware feedback decisions
+- the runner now supports an observability-aware directional PF-to-INS feedback path
+- this directional feedback machinery is implemented, but it is not yet claimed as part of the validated baseline
+
 The full saved report is:
 
 - [validated_maritime_baseline_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/validated_maritime_baseline_report.md)
@@ -77,6 +85,10 @@ Saved run bundles:
 - [maritime_baseline_imu_only.npz](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only.npz)
 - [maritime_baseline_imu_only_summary.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only_summary.json)
 - [maritime_baseline_imu_only_metrics.json](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/runs/validated_maritime_baseline/maritime_baseline_imu_only_metrics.json)
+
+Supporting roadmap/report artifact:
+
+- [NEXT_STEPS_REPORT.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/NEXT_STEPS_REPORT.md)
 
 ## Conventions
 
@@ -134,16 +146,21 @@ These conventions are used across the physics and navigation layers:
 - [error_state_ins.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/error_state_ins.py)
   Local-level closed-loop error-state INS propagation and linearized aiding models.
 - [fusion.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/fusion.py)
-  Innovation gating, stacked linear updates, constrained depth fusion, and constrained velocity aiding.
+  Innovation gating, stacked linear updates, constrained depth fusion, constrained velocity aiding, and directional PF pseudo-measurement construction.
 - [map_match_pf.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/map_match_pf.py)
-  Particle-filter gravity map matching with INS-prior coupling and geodetic/NED particle-cloud utilities.
+  Particle-filter gravity map matching with INS-prior coupling, geodetic/NED particle-cloud utilities, and posterior eigenstructure extraction for directional feedback.
+- [feedback_policy.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/feedback_policy.py)
+  Observability-aware directional PF-to-INS feedback gating, covariance inflation, persistence logic, and feedback diagnostics.
 - [integrity.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/integrity.py)
   NIS/NEES checks, protection-level calculations, alert-limit evaluation, and history monitoring.
 
-### Simulation And Plots
+### Analysis, Simulation And Plots
+
+- [observability.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/analysis/observability.py)
+  Local gravity-gradient estimation, sliding-window observability Gramian tracking, eigenvalue analysis, information-density scoring, and feedback-recommendation diagnostics.
 
 - [runner.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/runner.py)
-  End-to-end single-scenario orchestration.
+  End-to-end single-scenario orchestration, including observe-only PF mode, legacy full-3D PF feedback, and the new directional-feedback hook.
 - [results.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/results.py)
   Typed result/log containers and JSON/NPZ persistence.
 - [metrics.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/metrics.py)
@@ -218,12 +235,14 @@ What is implemented:
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - local-level INS propagation and constrained aiding fusion
 - particle-filter gravity map matching
+- observability analysis and directional-feedback policy infrastructure
 - integrity monitoring, run logging, metrics, plots, and a reproducible validation report
 - a stable single-scenario maritime baseline
 
 What is not yet validated or still scaffold-only:
 
 - closed-loop PF-to-INS position feedback as part of the production baseline
+- the new observability-aware directional PF feedback path as a proven improvement over the observe-only baseline
 - [sensor_plots.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/plots/sensor_plots.py)
 - [run_monte_carlo.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_monte_carlo.py)
 - [make_synthetic_map.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/make_synthetic_map.py)
@@ -239,6 +258,7 @@ Today this repo is best understood as a validated gravity-aided navigation simul
 - testing inertial-plus-gravity aiding behavior against a controlled truth model
 - benchmarking IMU-only versus aided navigation
 - generating reproducible figures, metrics, and report artifacts
+- experimenting with observability-aware PF feedback policies without changing the validated observe-only baseline
 - serving as the base for later Monte Carlo studies and gravity-feedback tuning
 
 It is not yet a finished research product for arbitrary scenarios or a fully validated closed-loop gravity-feedback system.
