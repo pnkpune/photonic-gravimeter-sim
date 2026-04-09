@@ -69,6 +69,21 @@ Feeding this posterior back as a pseudo-position measurement treats a ridge as i
 
 **Success criterion:** Closed-loop PF feedback that beats the observe-only baseline (currently 90.3 m RMSE) without ever making it worse. Even a 5-10% improvement with guaranteed stability is a breakthrough relative to the current state.
 
+**Outcome (2026-04-09 benchmark, seed 42):** Implemented as `DirectionalFeedbackController` in `src/gravnav/estimators/feedback_policy.py` with the full rank-1 + acceptance-gate machinery. Ran head-to-head against observe-only on `maritime_baseline`. Two failure modes found and fixed:
+
+| Iteration | Horizontal RMSE | CEP95 | HMI horiz | Finding |
+| --- | ---: | ---: | ---: | --- |
+| Observe-only baseline | 103.5 m | 190.0 m | 0.0 % | — |
+| Directional FB (full 3D eigendecomp) | 113.8 m | 220.5 m | 39.5 % | Smallest-eigenvalue direction was almost always `(0, 0, 1)` — the controller fires along vertical because depth aiding already makes that axis tight. Vertical bias accumulates, cross-couples through EKF into east. |
+| Directional FB (`horizontal_only=True`) | 120.0 m | 248.6 m | — | Fires 20/1020 updates along real horizontal eigenvectors, but the PF mean is *biased relative to truth* (NE of INS when truth is SW of INS), so even small, inflated corrections pull INS the wrong way. |
+| Gate sweep (4 configs) | 103.5–104.6 m | 190.0–192.0 m | 0.0–24.0 % | Any config that actually applies feedback ties or hurts RMSE and degrades integrity. Strict gates (`min_eigenvalue_ratio≥8`, `persistence_count≥3`, `max_correction_norm_m=2`, `base_inflation=15`) tie the baseline exactly at **103.5 m / 0 % HMI** because feedback never fires — a safe no-op. |
+
+**Root cause:** The PF posterior itself is miscalibrated. The reported σ along the constrained direction is ~5 m but the true PF-to-truth distance is tens of metres — the scalar gravity likelihood collapses into a sharp but *biased* mode along a ridge. This is a **structural observability limit of scalar gravity on a smooth map**, not a gate-tuning problem. No re-weighting of a biased estimator recovers the lost information.
+
+**Lock-in:** Defaults in `DirectionalFeedbackSpec` set to the conservative "safe no-op" config. Directional feedback code path is verified, tested, and ready to be re-enabled as soon as a second, orthogonal measurement channel makes the posterior honest.
+
+**Decision:** Priority 1 is effectively complete in the *machinery* sense (code + gates + tests), but the *performance* success criterion is blocked on Priority 3. Proceed directly to Priority 3.
+
 ---
 
 ### Priority 2 — Observability analysis module (weeks 1-2, parallel with Priority 1)

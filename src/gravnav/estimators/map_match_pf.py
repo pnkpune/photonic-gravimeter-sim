@@ -437,6 +437,71 @@ def evaluate_gravity_map_disturbance(
     ) from last_exception
 
 
+def evaluate_gravity_map_horizontal_gradient(
+    map_model: Any,
+    lat_rad: ArrayLike,
+    lon_rad: ArrayLike,
+    height_m: ArrayLike,
+    *,
+    delta_north_m: float = 50.0,
+    delta_east_m: float = 50.0,
+) -> FloatArray:
+    """
+    Evaluate horizontal gravity-disturbance gradient at one or many positions.
+
+    Returns a (2, N) array ``[Gamma_N, Gamma_E]`` per position, computed by
+    central finite differences of the map's scalar disturbance evaluator in
+    the local-NED tangent plane at each query point.
+
+    Parameters
+    ----------
+    map_model : object
+        Same interface as :func:`evaluate_gravity_map_disturbance`.
+    lat_rad, lon_rad, height_m : array-like
+        Position coordinates, broadcast-compatible.
+    delta_north_m, delta_east_m : float
+        Finite-difference step sizes in metres.
+
+    Returns
+    -------
+    np.ndarray, shape (2, N)
+        ``[d(delta_g)/dN, d(delta_g)/dE]`` in units of 1/s^2.
+
+    Notes
+    -----
+    The vertical gradient ``d(delta_g)/dh`` is intentionally excluded: the
+    map itself already carries a separate vertical-gradient field that
+    handles altitude dependence, and horizontal-only matches the 2-axis
+    gradiometer sensor model used by the simulator.
+    """
+    lat = _as_float_array(lat_rad).reshape(-1)
+    lon = _as_float_array(lon_rad).reshape(-1)
+    h = _as_float_array(height_m).reshape(-1)
+
+    if not (lat.shape == lon.shape == h.shape):
+        raise ValueError(
+            f"lat_rad, lon_rad, and height_m must share one shape, got "
+            f"{lat.shape}, {lon.shape}, {h.shape}."
+        )
+
+    M = _meridian_radius_array(lat)
+    N_pv = _prime_vertical_radius_array(lat)
+    cos_phi = np.maximum(np.abs(np.cos(lat)), 1.0e-8)
+
+    dlat = float(delta_north_m) / (M + h)
+    dlon = float(delta_east_m) / ((N_pv + h) * cos_phi)
+
+    g_n_plus = evaluate_gravity_map_disturbance(map_model, lat + dlat, lon, h)
+    g_n_minus = evaluate_gravity_map_disturbance(map_model, lat - dlat, lon, h)
+    g_e_plus = evaluate_gravity_map_disturbance(map_model, lat, lon + dlon, h)
+    g_e_minus = evaluate_gravity_map_disturbance(map_model, lat, lon - dlon, h)
+
+    gamma_n = (g_n_plus - g_n_minus) / (2.0 * float(delta_north_m))
+    gamma_e = (g_e_plus - g_e_minus) / (2.0 * float(delta_east_m))
+
+    return np.vstack([gamma_n, gamma_e]).astype(np.float64)
+
+
 # -----------------------------------------------------------------------------
 # Local geodetic/NED geometry helpers
 # -----------------------------------------------------------------------------
@@ -836,6 +901,7 @@ class MapMatchPFSpec:
     rejuvenation_std_m: ArrayLike | float = (20.0, 20.0, 1.0)
     gravity_meas_std_mps2: float = 1.0e-5
     depth_meas_std_m: Optional[float] = None
+    gradient_meas_std_per_s2: Optional[float] = None
     ins_position_prior_std_m: ArrayLike | float = (150.0, 150.0, 15.0)
     use_ins_position_prior: bool = True
     resample_effective_fraction: float = 0.5

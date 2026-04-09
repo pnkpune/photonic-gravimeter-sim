@@ -290,6 +290,7 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         depth_meas_std_m=args.pf_depth_std_m,
         inject_position_to_ins=bool(args.enable_pf_feedback),
         feedback_covariance_inflation=args.pf_feedback_covariance_inflation,
+        use_directional_feedback=bool(getattr(args, "use_directional_feedback", False)),
     )
     integrity = IntegrityMonitorConfig(
         enabled=not args.disable_integrity,
@@ -470,6 +471,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--disable-pf-feedback",
         action="store_true",
         help="Deprecated alias. PF pseudo-position feedback is disabled by default.",
+    )
+    pf_feedback_group.add_argument(
+        "--use-directional-feedback",
+        action="store_true",
+        help=(
+            "Enable observability-aware directional (rank-1) PF feedback. "
+            "Mutually exclusive with --enable-pf-feedback (legacy full-3D path)."
+        ),
     )
     parser.add_argument(
         "--disable-depth-aid",

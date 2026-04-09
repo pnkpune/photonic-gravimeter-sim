@@ -118,20 +118,34 @@ class DirectionalFeedbackSpec:
         richer observability.
     nis_threshold : float or None, default=None
         Optional NIS gate for the directional measurement update.
+    horizontal_only : bool, default=True
+        When True, the eigendecomposition is performed on the 2x2 horizontal
+        (N, E) block of the PF NED covariance, and the constrained direction
+        is forced into the horizontal plane with zero vertical component.
+        This prevents the controller from selecting the vertical axis as
+        best-constrained just because depth aiding has already made it tight,
+        which is a degenerate failure mode of the naive 3D eigendecomposition.
+        Vertical aiding should be handled independently by the depth sensor.
     """
 
+    # Defaults are tuned as a SAFE NO-OP against the current maritime_baseline
+    # PF posterior: gates are strict enough that feedback never fires on that
+    # scenario, which by construction ties the observe-only baseline with 0%
+    # HMI.  Relax these once a better measurement channel (e.g. gravity
+    # gradient, Priority 3) supplies a properly calibrated posterior.
     enabled: bool = True
-    min_eigenvalue_ratio: float = 4.0
+    min_eigenvalue_ratio: float = 8.0
     max_constrained_eigenvalue_m2: float = 1.0e6
     min_pf_ins_covariance_ratio: float = 0.0
     min_ess_fraction: float = 0.0
     max_ess_fraction: float = 0.95
-    persistence_count: int = 1
-    max_correction_norm_m: float = 500.0
-    base_inflation: float = 2.0
+    persistence_count: int = 3
+    max_correction_norm_m: float = 2.0
+    base_inflation: float = 15.0
     adaptive_inflation: bool = True
     num_directions: int = 1
     nis_threshold: Optional[float] = None
+    horizontal_only: bool = True
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -145,6 +159,7 @@ class DirectionalFeedbackSpec:
         self.base_inflation = float(self.base_inflation)
         self.adaptive_inflation = bool(self.adaptive_inflation)
         self.num_directions = max(1, min(3, int(self.num_directions)))
+        self.horizontal_only = bool(self.horizontal_only)
 
 
 @dataclass
@@ -341,12 +356,33 @@ class DirectionalFeedbackController:
         P_ned = est.covariance_ned_m2
 
         # --- Eigendecomposition ---
-        eigenvalues, eigenvectors = eigendecompose_ned_covariance(P_ned)
+        if self.spec.horizontal_only:
+            # Only the 2x2 horizontal (N, E) block of P_ned is used.
+            # This forces the constrained direction into the horizontal plane.
+            # Depth aiding already handles vertical; gravity-map matching is
+            # there to constrain horizontal drift.
+            P_h = _symmetrize(np.asarray(P_ned, dtype=np.float64))[:2, :2]
+            w_h, V_h = np.linalg.eigh(P_h)
+            order = np.argsort(w_h)
+            w_h = np.maximum(w_h[order], 1.0e-10)
+            V_h = V_h[:, order]
+            # Embed into 3D with zero down component.
+            # Use a large finite sentinel for the unused down eigenvalue so
+            # downstream JSON serialization stays valid.
+            eigenvalues = np.array([w_h[0], w_h[1], 1.0e18], dtype=np.float64)
+            eigenvectors = np.zeros((3, 3), dtype=np.float64)
+            eigenvectors[:2, 0] = V_h[:, 0]
+            eigenvectors[:2, 1] = V_h[:, 1]
+            eigenvectors[2, 2] = 1.0
+            # eigenvalue_ratio uses the horizontal pair only; the infinite
+            # down eigenvalue is ignored so the ratio reflects true
+            # horizontal anisotropy.
+            eigenvalue_ratio = float(w_h[1] / w_h[0])
+        else:
+            eigenvalues, eigenvectors = eigendecompose_ned_covariance(P_ned)
+            eigenvalues = np.maximum(eigenvalues, 1.0e-10)
+            eigenvalue_ratio = float(eigenvalues[2] / eigenvalues[0])
 
-        # Clamp eigenvalues to a small positive floor
-        eigenvalues = np.maximum(eigenvalues, 1.0e-10)
-
-        eigenvalue_ratio = float(eigenvalues[2] / eigenvalues[0])
         ess_fraction = float(pf_update.effective_sample_size_after / max(num_particles, 1))
 
         # Best-constrained direction = eigenvector of smallest eigenvalue
