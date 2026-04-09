@@ -87,6 +87,7 @@ from ..estimators.fusion import (
     summarize_update_result,
 )
 from ..estimators.integrity import IntegrityMonitor
+from ..estimators.integrity import integrity_snapshot_from_ins
 from ..estimators.map_match_pf import (
     GravityMapParticleFilter,
     MapMatchPFSpec,
@@ -928,6 +929,147 @@ class ScenarioSimulationRunner:
             P0=P0,
         )
 
+    def _apply_depth_update(
+        self,
+        ins: ErrorStateINS,
+        measurement: DepthMeasurement,
+        *,
+        depth_variance_m2: float,
+        estimators: Optional[SimulationEstimatorLog] = None,
+        stream_name: Optional[str] = None,
+    ) -> Any:
+        """
+        Apply one configured depth-aiding update.
+        """
+        cfg = self.config
+        if cfg.depth_aid.height_only_update:
+            update = apply_depth_sensor_measurement_height_only(
+                ins,
+                measurement,
+                depth_variance_m2=depth_variance_m2,
+                reference_surface_height_m=cfg.reference_surface_height_m,
+                nis_threshold=cfg.depth_aid.nis_threshold,
+                label="depth_height_only",
+            )
+        else:
+            update = apply_depth_sensor_measurement(
+                ins,
+                measurement,
+                depth_variance_m2=depth_variance_m2,
+                reference_surface_height_m=cfg.reference_surface_height_m,
+                nis_threshold=cfg.depth_aid.nis_threshold,
+                label="depth",
+            )
+        if estimators is not None and stream_name is not None:
+            estimators.add_custom_sample(
+                stream_name,
+                summarize_update_result(update),
+            )
+        return update
+
+    def _apply_velocity_update(
+        self,
+        ins: ErrorStateINS,
+        measurement: VelocityAidMeasurement,
+        *,
+        velocity_R: FloatArray,
+        estimators: Optional[SimulationEstimatorLog] = None,
+        stream_name: Optional[str] = None,
+    ) -> Any:
+        """
+        Apply one configured velocity-aiding update.
+        """
+        cfg = self.config
+        if cfg.velocity_aid.velocity_only_update:
+            update = apply_velocity_aid_measurement_velocity_only(
+                ins,
+                measurement,
+                velocity_R,
+                nis_threshold=cfg.velocity_aid.nis_threshold,
+                label=f"velocity_{measurement.frame}_velocity_only",
+            )
+        else:
+            update = apply_velocity_aid_measurement(
+                ins,
+                measurement,
+                velocity_R,
+                nis_threshold=cfg.velocity_aid.nis_threshold,
+                label=f"velocity_{measurement.frame}",
+            )
+        if estimators is not None and stream_name is not None:
+            estimators.add_custom_sample(
+                stream_name,
+                summarize_update_result(update),
+            )
+        return update
+
+    def _replay_ins_segment(
+        self,
+        *,
+        truth: TruthTrajectory,
+        start_index: int,
+        end_index: int,
+        initial_state: Any,
+        imu_samples: list[Any],
+        depth_measurements_by_step: list[Optional[DepthMeasurement]],
+        velocity_measurements_by_step: list[Optional[VelocityAidMeasurement]],
+        depth_variance_m2: float,
+        velocity_R: FloatArray,
+    ) -> tuple[ErrorStateINS, list[Any]]:
+        """
+        Replay one lag segment from a corrected historical INS state.
+
+        The caller supplies the corrected INS state at ``start_index``. The
+        helper then replays the stored IMU and aiding measurements through
+        ``end_index`` inclusive and returns the replayed live filter plus the
+        state history `[start_index, ..., end_index]`.
+        """
+        if start_index < 0 or end_index < start_index:
+            raise ValueError(
+                "Replay indices must satisfy 0 <= start_index <= end_index."
+            )
+        if end_index >= len(truth):
+            raise IndexError(
+                f"end_index {end_index} is out of bounds for truth length {len(truth)}."
+            )
+        if len(imu_samples) < end_index:
+            raise ValueError(
+                "imu_samples does not contain enough entries for the requested replay."
+            )
+
+        replay_ins = ErrorStateINS(initial_state.copy())
+        replayed_states = [replay_ins.state.copy()]
+
+        for step_idx in range(start_index + 1, end_index + 1):
+            dt = float(truth.time_s[step_idx] - truth.time_s[step_idx - 1])
+            imu_meas = imu_samples[step_idx - 1]
+
+            replay_ins.predict(
+                imu_meas.omega_ib_b_radps,
+                imu_meas.f_ib_b_mps2,
+                dt,
+            )
+
+            depth_meas = depth_measurements_by_step[step_idx]
+            if depth_meas is not None and self.config.depth_aid.enabled:
+                self._apply_depth_update(
+                    replay_ins,
+                    depth_meas,
+                    depth_variance_m2=depth_variance_m2,
+                )
+
+            vel_meas = velocity_measurements_by_step[step_idx]
+            if vel_meas is not None and self.config.velocity_aid.enabled:
+                self._apply_velocity_update(
+                    replay_ins,
+                    vel_meas,
+                    velocity_R=velocity_R,
+                )
+
+            replayed_states.append(replay_ins.state.copy())
+
+        return replay_ins, replayed_states
+
     # ------------------------------------------------------------------
     # Public run methods
     # ------------------------------------------------------------------
@@ -1050,6 +1192,8 @@ class ScenarioSimulationRunner:
         last_depth_measurement: Optional[DepthMeasurement] = None
         last_velocity_sample_time_s: Optional[float] = None
         last_depth_sample_time_s: Optional[float] = None
+        depth_measurements_by_step: list[Optional[DepthMeasurement]] = [None] * len(truth)
+        velocity_measurements_by_step: list[Optional[VelocityAidMeasurement]] = [None] * len(truth)
 
         for k in range(1, len(truth)):
             t_now = float(truth.time_s[k])
@@ -1122,32 +1266,18 @@ class ScenarioSimulationRunner:
                         reference_surface_height_m=cfg.reference_surface_height_m,
                         time_s=t_now,
                     )
+                    depth_measurements_by_step[k] = current_depth_measurement
                     sensors.depth_samples.append(current_depth_measurement)
 
                     last_depth_sample_time_s = t_now
                     last_depth_measurement = current_depth_measurement
 
-                    if cfg.depth_aid.height_only_update:
-                        depth_update = apply_depth_sensor_measurement_height_only(
-                            ins,
-                            current_depth_measurement,
-                            depth_variance_m2=depth_variance_m2,
-                            reference_surface_height_m=cfg.reference_surface_height_m,
-                            nis_threshold=cfg.depth_aid.nis_threshold,
-                            label="depth_height_only",
-                        )
-                    else:
-                        depth_update = apply_depth_sensor_measurement(
-                            ins,
-                            current_depth_measurement,
-                            depth_variance_m2=depth_variance_m2,
-                            reference_surface_height_m=cfg.reference_surface_height_m,
-                            nis_threshold=cfg.depth_aid.nis_threshold,
-                            label="depth",
-                        )
-                    estimators.add_custom_sample(
-                        "depth_updates",
-                        summarize_update_result(depth_update),
+                    self._apply_depth_update(
+                        ins,
+                        current_depth_measurement,
+                        depth_variance_m2=depth_variance_m2,
+                        estimators=estimators,
+                        stream_name="depth_updates",
                     )
 
             # ----------------------------------------------------------
@@ -1175,28 +1305,16 @@ class ScenarioSimulationRunner:
                             time_s=t_now,
                         )
 
+                    velocity_measurements_by_step[k] = vel_meas
                     sensors.velocity_aid_samples.append(vel_meas)
                     last_velocity_sample_time_s = t_now
 
-                    if cfg.velocity_aid.velocity_only_update:
-                        vel_update = apply_velocity_aid_measurement_velocity_only(
-                            ins,
-                            vel_meas,
-                            velocity_R,
-                            nis_threshold=cfg.velocity_aid.nis_threshold,
-                            label=f"velocity_{vel_meas.frame}_velocity_only",
-                        )
-                    else:
-                        vel_update = apply_velocity_aid_measurement(
-                            ins,
-                            vel_meas,
-                            velocity_R,
-                            nis_threshold=cfg.velocity_aid.nis_threshold,
-                            label=f"velocity_{vel_meas.frame}",
-                        )
-                    estimators.add_custom_sample(
-                        "velocity_updates",
-                        summarize_update_result(vel_update),
+                    self._apply_velocity_update(
+                        ins,
+                        vel_meas,
+                        velocity_R=velocity_R,
+                        estimators=estimators,
+                        stream_name="velocity_updates",
                     )
 
             # ----------------------------------------------------------
@@ -1368,14 +1486,102 @@ class ScenarioSimulationRunner:
                     if len(seq_updates) > 0:
                         estimators.sequence_updates.extend(seq_updates)
                         if sequence_feedback_ctrl is not None:
-                            seq_fb_result = sequence_feedback_ctrl.evaluate(
-                                seq_updates[-1],
-                                ins,
-                                current_time_s=t_now,
-                            )
+                            selected_update = seq_updates[-1]
+                            seq_fb_summary: dict[str, Any]
+
+                            if sequence_feedback_ctrl.spec.mode == "lag_replay":
+                                target_step = max(
+                                    0,
+                                    k - int(selected_update.delayed_by_steps),
+                                )
+                                delayed_ins = ErrorStateINS(
+                                    estimators.ins_states[target_step].copy()
+                                )
+                                seq_fb_result = sequence_feedback_ctrl.evaluate(
+                                    selected_update,
+                                    delayed_ins,
+                                    current_time_s=t_now,
+                                )
+                                replayed_steps = 0
+                                matcher_reset = False
+                                if seq_fb_result.applied:
+                                    replay_ins, replayed_states = self._replay_ins_segment(
+                                        truth=truth,
+                                        start_index=target_step,
+                                        end_index=k,
+                                        initial_state=delayed_ins.state,
+                                        imu_samples=sensors.imu_samples,
+                                        depth_measurements_by_step=depth_measurements_by_step,
+                                        velocity_measurements_by_step=velocity_measurements_by_step,
+                                        depth_variance_m2=depth_variance_m2,
+                                        velocity_R=velocity_R,
+                                    )
+
+                                    historical_states = [s.copy() for s in replayed_states[:-1]]
+                                    estimators.ins_states[target_step:] = historical_states
+                                    ins.state = replay_ins.state.copy()
+                                    replayed_steps = max(0, k - target_step)
+
+                                    if integrity is not None:
+                                        for state_index, replayed_state in enumerate(
+                                            historical_states,
+                                            start=target_step,
+                                        ):
+                                            replay_time_s = float(truth.time_s[state_index])
+                                            snap = integrity_snapshot_from_ins(
+                                                replayed_state,
+                                                true_lat_rad=float(truth.lat_rad[state_index]),
+                                                true_lon_rad=float(truth.lon_rad[state_index]),
+                                                true_height_m=float(truth.height_m[state_index]),
+                                                horizontal_alert_limit_m=integrity.horizontal_alert_limit_m,
+                                                vertical_alert_limit_m=integrity.vertical_alert_limit_m,
+                                                horizontal_k_sigma=integrity.horizontal_k_sigma,
+                                                vertical_k_sigma=integrity.vertical_k_sigma,
+                                                radial_k_sigma=integrity.radial_k_sigma,
+                                                consistency_confidence=integrity.consistency_confidence,
+                                                time_s=replay_time_s,
+                                            )
+                                            estimators.integrity_snapshots[state_index] = snap
+                                            integrity.history.snapshots[state_index] = snap
+
+                                    if sequence_feedback_ctrl.spec.reset_matcher_after_apply:
+                                        sequence_matcher.reset()
+                                        sequence_matcher.update_from_gravimeter_measurement(
+                                            gravimeter_meas,
+                                            gravity_meas_std_mps2=cfg.map_match.gravity_meas_std_mps2,
+                                            ins_or_state=ins,
+                                            depth_measurement=depth_for_matcher,
+                                            measured_gradient_per_s2=(
+                                                None
+                                                if gradiometer_meas is None
+                                                else np.asarray(
+                                                    gradiometer_meas.value_per_s2,
+                                                    dtype=np.float64,
+                                                )
+                                            ),
+                                            gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
+                                            reference_surface_height_m=cfg.reference_surface_height_m,
+                                        )
+                                        matcher_reset = True
+
+                                seq_fb_summary = summarize_sequence_feedback(seq_fb_result)
+                                seq_fb_summary["target_step_index"] = int(target_step)
+                                seq_fb_summary["replayed_steps"] = int(replayed_steps)
+                                seq_fb_summary["matcher_reset"] = bool(matcher_reset)
+                            else:
+                                seq_fb_result = sequence_feedback_ctrl.evaluate(
+                                    selected_update,
+                                    ins,
+                                    current_time_s=t_now,
+                                )
+                                seq_fb_summary = summarize_sequence_feedback(seq_fb_result)
+                                seq_fb_summary["target_step_index"] = None
+                                seq_fb_summary["replayed_steps"] = 0
+                                seq_fb_summary["matcher_reset"] = False
+
                             estimators.add_custom_sample(
                                 "sequence_feedback",
-                                summarize_sequence_feedback(seq_fb_result),
+                                seq_fb_summary,
                             )
 
             # ----------------------------------------------------------

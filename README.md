@@ -28,7 +28,7 @@ What is validated today:
 What is implemented but not yet part of the validated production path:
 
 - directional PF-to-INS feedback
-- delayed sequence-to-INS feedback
+- delayed sequence-to-INS feedback, including a fixed-lag replay path
 - closed-loop gravity-feedback policies that actually improve INS metrics over the validated observe-only baseline
 
 ## What The Repo Does
@@ -150,15 +150,22 @@ The repo also contains an experimental delayed sequence-to-INS feedback controll
 
 Current outcome:
 
-- the default policy is intentionally conservative and applies zero updates on the maritime benchmark
-- relaxed variants are harmful, not helpful
-- tested active variants degraded INS horizontal RMSE from `103.5 m` to about `214.6 m`, `828.2 m`, and `7.2 km`
+- two architectures now exist:
+  - `bias_transfer`: the older current-state transfer path
+  - `lag_replay`: a fixed-lag path that applies the delayed estimate at the delayed state and replays forward
+- the default conservative settings for both remain a safe no-op on the maritime benchmark
+- a relaxed fixed-lag replay benchmark does fire safely in the software sense, but still degrades performance:
+  - `93` replayed sequence updates applied
+  - INS horizontal RMSE worsened from `103.5 m` to `113.1 m`
+  - horizontal HMI rose to about `38.5%`
+- earlier relaxed current-state transfer variants were much worse, degrading INS horizontal RMSE to about `214.6 m`, `828.2 m`, and `7.2 km`
 
 Conclusion:
 
 - simple current-state transfer of delayed sequence bias is not a valid production feedback design
-- this path is useful as a documented negative result
-- the next serious closed-loop sequence design would need replay or smoother-aware delayed updates
+- fixed-lag replay is the right architectural direction, but the current replay controller is still not good enough to beat the observe-only baseline
+- this entire area is currently useful as a documented negative result and benchmark harness, not as a production feedback path
+- the next serious closed-loop sequence design would need replay plus retrodiction/smoother-aware delayed updates rather than direct horizontal pseudo-measurements alone
 
 ## System Coverage
 

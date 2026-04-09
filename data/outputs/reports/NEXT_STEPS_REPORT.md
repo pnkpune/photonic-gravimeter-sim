@@ -2,7 +2,7 @@
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
 **Date: 2026-04-09**
-**Repo state: validated maritime baseline, PF feedback disabled, 27 tests passing**
+**Repo state: validated maritime baseline, PF feedback disabled, 28 tests passing**
 
 ---
 
@@ -183,6 +183,20 @@ Result:
 | Active tune C (`peak>=0.05`, inflation 10.0, transfer RW 1.5, max corr 50 m) | 214.6 m | Less bad, still clearly worse |
 
 **Conclusion:** A simple current-state transfer of delayed sequence bias is structurally inadequate. The delayed sequence estimate is useful, but not in the form “apply this old horizontal offset to the current INS state.” The next serious closed-loop step is a replay/smoother-aware delayed-update design, not more tuning of this transfer controller.
+
+**Follow-up (2026-04-09 fixed-lag replay experiment):** Implemented a replay-aware delayed sequence feedback path. In this mode, the delayed sequence estimate is fused into the INS state at the delayed time, then the runner replays the stored IMU, depth, and velocity-aid measurements forward to the present. The sequence matcher is reset after an applied replay update so subsequent windows use consistent INS centers. This path is wired into `src/gravnav/estimators/feedback_policy.py`, `src/gravnav/simulation/runner.py`, `scripts/run_single_scenario.py`, and `scripts/benchmark_filters.py`.
+
+Result on `maritime_baseline`, seed 42:
+
+| Configuration | INS horizontal RMSE | CEP95 | HMI horiz | Applied updates | Finding |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Sequence + gradient observe-only | 103.5 m | 190.0 m | 0.0 % | 0 | Reference |
+| Replay feedback, conservative default | 103.5 m | 190.0 m | 0.0 % | 0 | Safe no-op |
+| Replay feedback, relaxed (`peak>=0.03`, `max_std<=120 m`, `max_corr<=50 m`, inflation `10.0`) | 113.1 m | 220.1 m | 38.5 % | 93 | Much less destructive than bias-transfer, but still worse than observe-only |
+
+**Interpretation:** The replay architecture is the correct structural move because it applies the estimate at the time it actually describes. But that alone is not enough. Even with lag replay, the current horizontal pseudo-measurement remains biased enough that active updates degrade both INS accuracy and integrity.
+
+**Decision:** Priority 4 remains complete only in the observe-only sense. The repo now contains both the bad current-state transfer baseline and a better-structured fixed-lag replay baseline. Neither is yet acceptable as a production feedback path. The next serious step is no longer “add replay”; it is “add replay plus retrodiction/smoother-aware delayed-update logic or a richer delayed measurement model.”
 
 ---
 

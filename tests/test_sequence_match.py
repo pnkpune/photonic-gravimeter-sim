@@ -239,6 +239,7 @@ def test_runner_sequence_feedback_path_executes_and_logs() -> None:
         height_std_m=1.0,
     )
     cfg.map_match.sequence_feedback_spec.min_peak_probability = 0.05
+    cfg.map_match.sequence_feedback_spec.mode = "lag_replay"
     cfg.map_match.sequence_feedback_spec.max_horizontal_std_m = 100.0
     cfg.map_match.sequence_feedback_spec.max_correction_norm_m = 200.0
     cfg.map_match.gravity_meas_std_mps2 = 1.0e-6
@@ -263,6 +264,10 @@ def test_runner_sequence_feedback_path_executes_and_logs() -> None:
     assert rows is not None
     assert len(rows) > 0
     first = rows[0]
+    assert first["mode"] == "lag_replay"
     assert "feedback_allowed" in first
     assert "horizontal_offset_ned_m" in first
     assert "horizontal_std_m" in first
+    assert "target_step_index" in first
+    assert "replayed_steps" in first
+    assert "matcher_reset" in first

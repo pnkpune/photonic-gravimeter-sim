@@ -283,28 +283,44 @@ class SequenceFeedbackSpec:
     """
     Configuration for delayed sequence-to-INS feedback.
 
-    This controller treats the delayed sequence estimate as an estimate of the
-    INS horizontal bias over the sequence window, then transfers that bias to
-    the current INS state with explicit delay inflation.
+    Two modes are supported:
+
+    - ``bias_transfer``:
+      Treat the delayed sequence estimate as a current-state horizontal bias
+      estimate and inject it directly into the live INS with explicit
+      delay-driven covariance inflation. This is the original experimental path
+      and is retained mainly for benchmarking.
+
+    - ``lag_replay``:
+      Apply the delayed sequence estimate to the INS state at the delayed time,
+      then replay the stored IMU and aiding measurements forward. This is the
+      safer fixed-lag architecture for sequence outputs because the estimate is
+      fused at the time it actually describes.
     """
 
     enabled: bool = True
+    mode: str = "lag_replay"
     min_window_size: int = 5
     min_peak_probability: float = 0.12
     max_horizontal_std_m: float = 80.0
     max_correction_norm_m: float = 150.0
     covariance_inflation: float = 3.0
     transfer_rw_std_mps: float = 0.6
+    reset_matcher_after_apply: bool = True
     nis_threshold: Optional[float] = 25.0
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
+        self.mode = str(self.mode).strip().lower()
+        if self.mode not in {"bias_transfer", "lag_replay"}:
+            raise ValueError("mode must be 'bias_transfer' or 'lag_replay'.")
         self.min_window_size = max(1, int(self.min_window_size))
         self.min_peak_probability = float(self.min_peak_probability)
         self.max_horizontal_std_m = float(self.max_horizontal_std_m)
         self.max_correction_norm_m = float(self.max_correction_norm_m)
         self.covariance_inflation = float(self.covariance_inflation)
         self.transfer_rw_std_mps = float(self.transfer_rw_std_mps)
+        self.reset_matcher_after_apply = bool(self.reset_matcher_after_apply)
         if not (0.0 <= self.min_peak_probability <= 1.0):
             raise ValueError("min_peak_probability must lie in [0, 1].")
         if self.max_horizontal_std_m <= 0.0:
@@ -325,6 +341,7 @@ class SequenceFeedbackDiagnostics:
     Diagnostics from one delayed sequence-feedback evaluation.
     """
 
+    mode: str
     age_s: float
     window_size_used: int
     delayed_by_steps: int
@@ -827,9 +844,13 @@ class SequenceFeedbackController:
     """
     Conservative controller for delayed sequence-estimate feedback.
 
-    The controller uses the delayed sequence estimate as a horizontal INS-bias
-    estimate. That bias is transferred to the current state with covariance
-    inflation proportional to delay.
+    In ``bias_transfer`` mode, the delayed sequence estimate is treated as a
+    current-state horizontal bias estimate.
+
+    In ``lag_replay`` mode, the caller is expected to pass the INS state at the
+    delayed estimate time. The controller fuses the delayed horizontal offset at
+    that time, and the caller is then responsible for replaying the segment
+    forward to the present.
     """
 
     def __init__(self, spec: SequenceFeedbackSpec) -> None:
@@ -845,6 +866,14 @@ class SequenceFeedbackController:
         """
         Evaluate whether delayed sequence feedback should be applied and, if so,
         inject a conservative horizontal pseudo-position measurement.
+
+        Notes
+        -----
+        The meaning of ``ins`` depends on ``spec.mode``:
+
+        - ``bias_transfer``: ``ins`` is the live current INS state.
+        - ``lag_replay``: ``ins`` is the delayed INS state aligned to
+          ``sequence_update.time_s``.
         """
         age_s = max(0.0, float(current_time_s) - float(sequence_update.time_s))
         offset_h = np.asarray(
@@ -861,7 +890,14 @@ class SequenceFeedbackController:
         correction_norm = float(np.linalg.norm(offset_h))
         peak_prob = float(sequence_update.marginal_peak_probability)
         entropy = float(sequence_update.posterior_entropy_nats)
-        transfer_std_m = float(self.spec.transfer_rw_std_mps * age_s)
+        if self.spec.mode == "bias_transfer":
+            transfer_std_m = float(self.spec.transfer_rw_std_mps * age_s)
+            measurement_time_s = float(current_time_s)
+            measurement_label = "sequence_horizontal_bias"
+        else:
+            transfer_std_m = 0.0
+            measurement_time_s = float(sequence_update.time_s)
+            measurement_label = "sequence_horizontal_delayed"
 
         feedback_allowed = True
         rejection_reason: Optional[str] = None
@@ -895,6 +931,7 @@ class SequenceFeedbackController:
             )
 
         diagnostics = SequenceFeedbackDiagnostics(
+            mode=self.spec.mode,
             age_s=age_s,
             window_size_used=int(sequence_update.window_size_used),
             delayed_by_steps=int(sequence_update.delayed_by_steps),
@@ -923,8 +960,8 @@ class SequenceFeedbackController:
             ins,
             offset_h,
             R_h,
-            label="sequence_horizontal_bias",
-            time_s=float(current_time_s),
+            label=measurement_label,
+            time_s=measurement_time_s,
         )
         fusion_result = apply_linear_measurement(
             ins,
@@ -972,6 +1009,7 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
     """
     d = result.diagnostics
     summary = {
+        "mode": d.mode,
         "feedback_allowed": d.feedback_allowed,
         "applied": result.applied,
         "rejection_reason": d.rejection_reason,

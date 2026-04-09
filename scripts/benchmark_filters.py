@@ -104,11 +104,34 @@ def main() -> int:
             "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
         },
         {
-            "label": "sequence_plus_gradient_feedback",
+            "label": "sequence_plus_gradient_replay_feedback",
             "extra_flags": [
                 "--map-matcher", "sequence",
                 "--use-gradiometer",
                 "--use-sequence-feedback",
+                "--sequence-feedback-mode", "lag_replay",
+            ],
+        },
+        {
+            "label": "sequence_plus_gradient_replay_feedback_relaxed",
+            "extra_flags": [
+                "--map-matcher", "sequence",
+                "--use-gradiometer",
+                "--use-sequence-feedback",
+                "--sequence-feedback-mode", "lag_replay",
+                "--sequence-feedback-min-peak-prob", "0.03",
+                "--sequence-feedback-max-horizontal-std-m", "120",
+                "--sequence-feedback-max-correction-m", "50",
+                "--sequence-feedback-inflation", "10.0",
+            ],
+        },
+        {
+            "label": "sequence_plus_gradient_transfer_feedback",
+            "extra_flags": [
+                "--map-matcher", "sequence",
+                "--use-gradiometer",
+                "--use-sequence-feedback",
+                "--sequence-feedback-mode", "bias_transfer",
             ],
         },
     ]

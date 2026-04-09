@@ -323,6 +323,7 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
     map_match.sequence_feedback_spec.min_peak_probability = (
         float(args.sequence_feedback_min_peak_prob)
     )
+    map_match.sequence_feedback_spec.mode = str(args.sequence_feedback_mode)
     map_match.sequence_feedback_spec.max_horizontal_std_m = (
         float(args.sequence_feedback_max_horizontal_std_m)
     )
@@ -611,6 +612,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.12,
         help="Minimum sequence posterior peak probability required for feedback.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-mode",
+        choices=("lag_replay", "bias_transfer"),
+        default="lag_replay",
+        help=(
+            "Delayed sequence feedback architecture. "
+            "'lag_replay' applies the estimate at the delayed state and replays "
+            "forward; 'bias_transfer' is the older current-state transfer path."
+        ),
     )
     parser.add_argument(
         "--sequence-feedback-max-horizontal-std-m",
