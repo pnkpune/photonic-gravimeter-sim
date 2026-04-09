@@ -938,6 +938,13 @@ class MapMatchPFSpec:
             if self.depth_meas_std_m <= 0.0:
                 raise ValueError("depth_meas_std_m must be positive when provided.")
 
+        if self.gradient_meas_std_per_s2 is not None:
+            self.gradient_meas_std_per_s2 = float(self.gradient_meas_std_per_s2)
+            if self.gradient_meas_std_per_s2 <= 0.0:
+                raise ValueError(
+                    "gradient_meas_std_per_s2 must be positive when provided."
+                )
+
         self.resample_effective_fraction = float(self.resample_effective_fraction)
         if not (0.0 < self.resample_effective_fraction <= 1.0):
             raise ValueError(
@@ -1366,6 +1373,8 @@ class GravityMapParticleFilter:
         ins_or_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
         measured_depth_m: Optional[float] = None,
         depth_meas_std_m: Optional[float] = None,
+        measured_gradient_per_s2: Optional[ArrayLike] = None,
+        gradient_meas_std_per_s2: Optional[float] = None,
         reference_surface_height_m: float = 0.0,
         time_s: Optional[float] = None,
     ) -> MapMatchPFUpdateResult:
@@ -1447,6 +1456,38 @@ class GravityMapParticleFilter:
                 sigma=sigma_d,
             )
 
+        if measured_gradient_per_s2 is not None:
+            sigma_grad = (
+                self.spec.gradient_meas_std_per_s2
+                if gradient_meas_std_per_s2 is None
+                else float(gradient_meas_std_per_s2)
+            )
+            if sigma_grad is None or sigma_grad <= 0.0:
+                raise ValueError(
+                    "A positive gradient standard deviation is required when "
+                    "measured_gradient_per_s2 is provided."
+                )
+            grad_obs = np.asarray(
+                measured_gradient_per_s2, dtype=np.float64
+            ).reshape(-1)
+            if grad_obs.size != 2:
+                raise ValueError(
+                    "measured_gradient_per_s2 must have length 2 ([Gamma_N, Gamma_E])."
+                )
+
+            grad_pred = evaluate_gravity_map_horizontal_gradient(
+                self.map_model,
+                self.lat_particles_rad,
+                self.lon_particles_rad,
+                self.height_particles_m,
+            )  # shape (2, N)
+
+            # Independent N/E components share sigma_grad.
+            res_n = float(grad_obs[0]) - grad_pred[0]
+            res_e = float(grad_obs[1]) - grad_pred[1]
+            logw += gaussian_log_likelihood_scalar(res_n, sigma=sigma_grad)
+            logw += gaussian_log_likelihood_scalar(res_e, sigma=sigma_grad)
+
         if self.spec.use_ins_position_prior and ins_or_state is not None:
             logw = self._apply_soft_ins_position_prior(logw, ins_or_state)
 
@@ -1489,6 +1530,8 @@ class GravityMapParticleFilter:
         depth_measurement: Optional[DepthMeasurement] = None,
         depth_meas_std_m: Optional[float] = None,
         reference_surface_height_m: Optional[float] = None,
+        measured_gradient_per_s2: Optional[ArrayLike] = None,
+        gradient_meas_std_per_s2: Optional[float] = None,
     ) -> MapMatchPFUpdateResult:
         """
         Convenience wrapper for a gravimeter sensor-layer measurement.
@@ -1526,6 +1569,8 @@ class GravityMapParticleFilter:
             ins_or_state=ins_or_state,
             measured_depth_m=depth_value,
             depth_meas_std_m=depth_meas_std_m,
+            measured_gradient_per_s2=measured_gradient_per_s2,
+            gradient_meas_std_per_s2=gradient_meas_std_per_s2,
             reference_surface_height_m=href,
             time_s=time_s,
         )

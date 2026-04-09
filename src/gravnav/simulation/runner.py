@@ -79,6 +79,7 @@ from ..estimators.integrity import IntegrityMonitor
 from ..estimators.map_match_pf import (
     GravityMapParticleFilter,
     MapMatchPFSpec,
+    evaluate_gravity_map_horizontal_gradient,
     geodetic_covariance_from_ned_covariance,
 )
 from ..physics.gravity_map import GravityGridMap
@@ -87,6 +88,10 @@ from ..sensors.gravimeter import (
     GravimeterMeasurement,
     GravimeterSpec,
     ScalarGravimeterSensor,
+)
+from ..sensors.gravity_gradiometer import (
+    GravityGradiometerSensor,
+    GravityGradiometerSpec,
 )
 from ..sensors.imu import (
     IMUSensor,
@@ -397,6 +402,8 @@ class MapMatchFeedbackConfig:
     feedback_covariance_inflation: float = 1.0
     feedback_min_std_geodetic: ArrayLike | float = (0.0, 0.0, 0.0)
     feedback_nis_threshold: Optional[float] = None
+    use_gradiometer: bool = False
+    gradient_meas_std_per_s2: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -421,6 +428,12 @@ class MapMatchFeedbackConfig:
         if self.feedback_nis_threshold is not None and float(self.feedback_nis_threshold) < 0.0:
             raise ValueError(
                 "feedback_nis_threshold must be nonnegative when provided."
+            )
+        self.use_gradiometer = bool(self.use_gradiometer)
+        if self.gradient_meas_std_per_s2 is not None:
+            self.gradient_meas_std_per_s2 = _positive_scalar(
+                self.gradient_meas_std_per_s2,
+                name="gradient_meas_std_per_s2",
             )
 
 
@@ -804,6 +817,7 @@ class ScenarioSimulationRunner:
         gravimeter_sensor: Optional[ScalarGravimeterSensor] = None,
         depth_sensor: Optional[DepthSensor] = None,
         velocity_aid_sensor: Optional[VelocityAidSensor] = None,
+        gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
     ) -> ScenarioSimulationResult:
@@ -1041,6 +1055,30 @@ class ScenarioSimulationRunner:
                     time_s=t_now,
                 )
                 sensors.gravimeter_samples.append(gravimeter_meas)
+
+            # ----------------------------------------------------------
+            # Gravity gradiometer sampling
+            # ----------------------------------------------------------
+            gradiometer_meas = None
+            if (
+                gradiometer_sensor is not None
+                and resolved_map is not None
+                and cfg.map_match.use_gradiometer
+            ):
+                # Truth horizontal gradient at the true position (scalar inputs
+                # broadcast to length-1 arrays in the helper).
+                grad_truth = evaluate_gravity_map_horizontal_gradient(
+                    resolved_map,
+                    np.atleast_1d(np.float64(truth.lat_rad[k])),
+                    np.atleast_1d(np.float64(truth.lon_rad[k])),
+                    np.atleast_1d(np.float64(truth.height_m[k])),
+                ).reshape(2)
+                gradiometer_meas = gradiometer_sensor.measure(
+                    ideal_gradient_per_s2=grad_truth,
+                    dt_s=dt,
+                    time_s=t_now,
+                )
+                sensors.add_custom_sample("gradiometer", gradiometer_meas)
 
             # ----------------------------------------------------------
             # Gravity map matching and optional PF feedback
