@@ -2,7 +2,7 @@
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
 **Date: 2026-04-10**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, PF feedback disabled, 35 tests passing**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, PF feedback disabled, 36 tests passing**
 
 ---
 
@@ -53,6 +53,45 @@ What this means:
 - the current regional path is a realism check, not yet a benchmark on a full public Norwegian-margin survey product
 
 **Decision:** before adding more estimator complexity, the next highest-impact step is to replace the in-repo fixture with a full public regional product and rerun the exact same benchmark stack. The algorithm question is no longer “can sequence beat PF on synthetic maps?” It already can. The real question is how much of that survives once the map realism improves further.
+
+---
+
+## Public-product benchmark update (2026-04-10)
+
+That next step is now partly complete. The repo can ingest the public NAG-TEC Bouguer anomaly export (`bouguer_anomaly_geo.xyz`, DOI `10.22008/FK2/AQ38FS`) by binning the scattered geographic XYZ product into the existing `GravityGridMap` interface, then generating a regional maritime scenario inside the processed map bounds.
+
+Important reality check: the default regional sequence settings that worked on the synthetic and fixture benchmarks do **not** automatically carry over. On the first high-information public-product routes, default observe-only PF and default observe-only sequence were often worse than the live INS. That is the expected kind of realism penalty the fixture could not expose.
+
+But there is now a real public-product win:
+
+- route: `norwegian_margin_public_maritime`
+- initial state: `lat 66.0 deg`, `lon 14.0 deg`, `heading 45 deg`
+- source: public NAG-TEC Bouguer anomaly export, binned into a regular grid
+
+With a tighter INS-centered sequence configuration:
+
+- `sequence_window_size = 11`
+- `sequence_grid_half_span = (100 m, 100 m)`
+- `sequence_grid_spacing = (20 m, 20 m)`
+- `sequence_transition_std = (15 m, 15 m)`
+- `sequence_center_prior_std = (50 m, 50 m)`
+
+the public-product sequence result becomes:
+
+| Path | Horizontal RMSE [m] | CEP95 [m] |
+| --- | ---: | ---: |
+| Live INS | 104.322 | 187.937 |
+| Tuned observe-only sequence | 91.721 | 139.566 |
+| Tuned bounded-lag smoother | 98.144 | 172.432 |
+
+Interpretation:
+
+- the first public-product benchmark win in the repo is now real, but it is a **tuned observe-only sequence** win, not yet a validated delayed-output win
+- the tuned lag smoother also improves RMSE and CEP95, but it still shows nonzero lag-output horizontal HMI (`16.65%`), so it is not promotable yet
+- the public-product result survives only after retuning the sequence priors to stay much closer to the INS than the default synthetic-benchmark settings did
+- that means the next high-impact work is not more PF feedback machinery; it is **productizing public-product preparation and sequence-configuration benchmarking by map regime**
+
+**Decision:** the current strongest gravity-aided result on the public product is now the tuned observe-only sequence matcher. The next work should preserve that gain and make it reproducible across public regional products, rather than pushing closed-loop gravity feedback before the public-map tuning story is stable.
 
 ---
 

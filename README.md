@@ -20,11 +20,13 @@ The repo is past the scaffold stage. It now has:
 - benchmark and reporting scripts
 - a validated maritime baseline with saved outputs and comparison against IMU-only
 - a Norwegian-margin regional benchmark path with a tracked in-repo fixture and processed manifest
+- a public-product Norwegian benchmark path built from the NAG-TEC Bouguer anomaly export
 
 What is validated today:
 
 - the single-scenario maritime baseline run path
 - the Norwegian-margin ingest/cache path and regional benchmark smoke path
+- the explicit-scenario public-product benchmark path and benchmark script path-resolution fix
 - the core INS plus depth and velocity aiding path
 - observe-only PF and sequence map-matching diagnostics
 - the bounded-lag sequence smoother as a delayed navigation output
@@ -132,6 +134,43 @@ Interpretation:
 - the bounded-lag smoother still beats the live INS with `0.0%` lag-output horizontal HMI
 - the gains shrink sharply versus the synthetic maritime benchmark, so the synthetic map materially overstated gravity distinctiveness relative to the current Norwegian fixture
 - this path is now useful as a realism check, but the current in-repo input is still a tracked fixture, not yet a full public survey product
+
+### Public-Product Norwegian Benchmark
+
+The repo now also has a public-product preparation path for the NAG-TEC Bouguer anomaly export (`bouguer_anomaly_geo.xyz`, DOI `10.22008/FK2/AQ38FS`). The ingest step bins the scattered geographic XYZ product into the existing `GravityGridMap` runtime interface, then selects a maritime-style route inside the processed map bounds.
+
+Tracked public-product scenario:
+
+- `norwegian_margin_public_maritime`
+
+Current public-product benchmark route:
+
+- initial latitude: `66.0 deg`
+- initial longitude: `14.0 deg`
+- initial heading: `45.0 deg`
+
+Default public-product sequence settings were close but did not beat the live INS on that route. A tighter INS-centered observe-only sequence matcher did:
+
+| Path | Horizontal RMSE [m] | CEP95 [m] |
+| --- | ---: | ---: |
+| Live INS | 104.322 | 187.937 |
+| Tuned observe-only sequence | 91.721 | 139.566 |
+| Tuned bounded-lag smoother | 98.144 | 172.432 |
+
+Tuned sequence settings for this public-product result:
+
+- sequence window size: `11`
+- grid half-span north/east: `100 m`, `100 m`
+- grid spacing north/east: `20 m`, `20 m`
+- transition std north/east: `15 m`, `15 m`
+- center prior std north/east: `50 m`, `50 m`
+
+Interpretation:
+
+- this is the first current public-product result in the repo where sequence map matching beats the live INS on both RMSE and CEP95
+- the win is currently on the observe-only sequence estimate, not yet on a validated delayed navigation output
+- the tuned bounded-lag smoother also beats the live INS on RMSE and CEP95, but it still shows nonzero lag-output horizontal HMI, so it is not yet promotable as a validated public-product navigation output
+- this public-product path is still based on a scattered Bouguer-anomaly proxy binned into a regular grid, so it should be treated as a realistic benchmark step, not yet as a final geophysical truth product
 
 ## Current Estimator Findings
 
@@ -264,6 +303,7 @@ Built-in scenarios:
 Config-defined regional scenario:
 
 - `norwegian_margin_maritime`
+- `norwegian_margin_public_maritime`
 
 ## Conventions
 
@@ -331,6 +371,33 @@ python3 scripts/benchmark_filters.py \
   --pf-particles 32
 ```
 
+Prepare the public NAG-TEC Norwegian benchmark inputs:
+
+```bash
+python3 scripts/prepare_public_norwegian_benchmark.py \
+  --raw-xyz-path data/gravity_maps/raw/public_nagtec/bouguer_anomaly_geo.xyz
+```
+
+Run the current public-product winning sequence configuration:
+
+```bash
+python3 scripts/run_single_scenario.py \
+  --scenario configs/scenarios/norwegian_margin_public_maritime.json \
+  --map-path data/gravity_maps/processed/norwegian_margin_public_bouguer_map.npz \
+  --output-dir /tmp/gravnav_public_sequence \
+  --run-id public_sequence_tuned \
+  --seed 42 \
+  --dt-s 2.0 \
+  --map-matcher sequence \
+  --use-gradiometer \
+  --sequence-window-size 11 \
+  --sequence-grid-half-span-north-m 100 \
+  --sequence-grid-half-span-east-m 100 \
+  --sequence-grid-spacing-m 20 20 \
+  --sequence-transition-std-m 15 15 \
+  --sequence-center-prior-std-m 50 50
+```
+
 Generate the Norwegian regional benchmark report:
 
 ```bash
@@ -358,7 +425,7 @@ The current automated regression suite covers:
 Current status:
 
 - `python3 -m pytest -q`
-- `35 passed`
+- `36 passed`
 
 ## Reports And Artifacts
 
@@ -383,7 +450,7 @@ What is not yet validated or still incomplete:
 - closed-loop PF-to-INS feedback as part of the production baseline
 - closed-loop delayed sequence-to-INS feedback as part of the production baseline
 - proof that any current gravity-feedback policy improves INS metrics beyond the validated observe-only baseline
-- the same Norwegian-margin benchmark on a full public regional gravity product instead of the tracked in-repo fixture
+- a productized end-to-end benchmark on the full downloaded public Norwegian regional product without relying on a locally prepared clipped/binned cache
 - broader Monte Carlo and scenario sweeps as a standard documented workflow
 - fuller plotting coverage for sensor-only diagnostics
 - broader estimator and sensor test coverage beyond the current core suite
@@ -397,12 +464,12 @@ Today this repo should be understood as:
 - a serious gravity-aided navigation simulator, not a toy notebook
 - a validated maritime-style aided INS baseline with strong geodesy and frame conventions
 - a useful benchmark platform for comparing scalar gravity, gradient likelihood, PF matching, sequence matching, and delayed lag-smoothed outputs
-- a regional-benchmark-ready stack that can ingest a Norwegian-margin product into the existing map interface
+- a regional-benchmark-ready stack that can ingest both tracked fixtures and a public Norwegian-margin product into the existing map interface
 - a place where negative results are preserved explicitly instead of being hidden behind retuning
 
 It should not yet be described as:
 
 - a fully validated closed-loop gravity-feedback navigation system
 - a finished product for arbitrary routes or platforms
-- a benchmarked result on a full public Norwegian-margin survey product
+- a fully productized result on a cleaned full public Norwegian-margin survey product
 - a proof that the current PF or delayed sequence feedback policies are ready for production use

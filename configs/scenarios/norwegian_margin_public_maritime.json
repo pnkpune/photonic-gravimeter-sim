@@ -1,0 +1,70 @@
+{
+  "name": "norwegian_margin_public_maritime",
+  "initial_height_m": 0.0,
+  "default_dt_s": 1.0,
+  "description": "Public-product Norwegian-margin maritime benchmark selected from the NAG-TEC Bouguer anomaly grid using a route-information score.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "regional_gravity_benchmark",
+    "region_name": "norwegian_margin_public_bouguer",
+    "route_selection": {
+      "information_score": 9.215239392533517,
+      "value_std_mgal": 0.712763026547874,
+      "mean_horizontal_gradient_mgal_per_km": 3.3048566926293432,
+      "cross_gradient_alignment": 0.9182220654456716
+    }
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_rad": 0.13962634015954636,
+      "flight_path_angle_rad": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "gravity_mps2": null,
+      "label": "regional_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_rad": 0.13962634015954636,
+      "flight_path_angle_rad": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "gravity_mps2": null,
+      "label": "regional_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_3"
+    }
+  ],
+  "initial_lat_deg": 66.0,
+  "initial_lon_deg": 14.0,
+  "initial_heading_deg": 45.0
+}

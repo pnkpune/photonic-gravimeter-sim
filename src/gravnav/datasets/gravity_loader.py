@@ -255,6 +255,96 @@ def load_regular_csv_gravity_map(
     )
 
 
+def load_regular_xyz_gravity_map(
+    raw_xyz_path: str | Path,
+    *,
+    name: str,
+    region_name: str,
+    source_name: str,
+    column_order: tuple[str, str, str] = ("lon_deg", "lat_deg", "disturbance_mgal"),
+    skiprows: int = 0,
+    crop_bounds_deg: Optional[tuple[float, float, float, float]] = None,
+    reference_height_m: float = 0.0,
+    default_method: str = "linear",
+    bounds_error: bool = False,
+    fill_value_mgal: float = np.nan,
+    metadata_extra: Optional[dict[str, Any]] = None,
+) -> GravityGridMap:
+    """
+    Load a regular-grid XYZ text product into ``GravityGridMap``.
+
+    The current supported semantic column names are:
+    - ``lat_deg``
+    - ``lon_deg``
+    - ``disturbance_mgal``
+    """
+    p = Path(raw_xyz_path).expanduser().resolve()
+    table = np.loadtxt(p, dtype=np.float64, ndmin=2, skiprows=int(skiprows))
+    if table.ndim != 2 or table.shape[1] < 3:
+        raise ValueError(
+            f"XYZ gravity map {p} must contain at least 3 numeric columns."
+        )
+
+    semantic_names = tuple(str(name).strip().lower() for name in column_order)
+    if set(semantic_names) != {"lat_deg", "lon_deg", "disturbance_mgal"}:
+        raise ValueError(
+            "column_order must be a permutation of "
+            "('lat_deg', 'lon_deg', 'disturbance_mgal')."
+        )
+
+    column_index = {semantic_names[idx]: idx for idx in range(3)}
+    lat_deg = np.asarray(table[:, column_index["lat_deg"]], dtype=np.float64)
+    lon_deg = np.asarray(table[:, column_index["lon_deg"]], dtype=np.float64)
+    disturbance_mgal = np.asarray(
+        table[:, column_index["disturbance_mgal"]],
+        dtype=np.float64,
+    )
+    if crop_bounds_deg is not None:
+        lat_min_deg, lat_max_deg, lon_min_deg, lon_max_deg = crop_bounds_deg
+        keep = (
+            (lat_deg >= float(lat_min_deg))
+            & (lat_deg <= float(lat_max_deg))
+            & (lon_deg >= float(lon_min_deg))
+            & (lon_deg <= float(lon_max_deg))
+        )
+        if not np.any(keep):
+            raise ValueError("Requested crop bounds do not intersect the XYZ grid.")
+        lat_deg = lat_deg[keep]
+        lon_deg = lon_deg[keep]
+        disturbance_mgal = disturbance_mgal[keep]
+    lat_axis_deg, lon_axis_deg, disturbance_grid_mgal, vertical_gradient = _validate_regular_grid(
+        lat_deg,
+        lon_deg,
+        disturbance_mgal,
+        None,
+    )
+
+    metadata = {
+        "region_name": region_name,
+        "source_name": source_name,
+        "source_kind": "regular_grid_xyz",
+        "raw_data_path": str(p),
+        "column_order": list(semantic_names),
+        "skiprows": int(skiprows),
+        "crop_bounds_deg": None if crop_bounds_deg is None else list(crop_bounds_deg),
+    }
+    if metadata_extra:
+        metadata.update(dict(metadata_extra))
+
+    return GravityGridMap.from_mgal_grid(
+        lat_axis_rad=np.deg2rad(lat_axis_deg),
+        lon_axis_rad=np.deg2rad(lon_axis_deg),
+        disturbance_grid_mgal=disturbance_grid_mgal,
+        reference_height_m=reference_height_m,
+        vertical_gradient_mgal_per_m=vertical_gradient,
+        default_method=default_method,
+        bounds_error=bounds_error,
+        fill_value_mgal=fill_value_mgal,
+        name=name,
+        metadata=metadata,
+    )
+
+
 def _axis_spacing_deg(axis: np.ndarray) -> float:
     if axis.size < 2:
         return float("nan")
@@ -330,6 +420,90 @@ def process_regular_csv_gravity_map(
                 else float(map_model.fill_value_mps2)
             ),
             "raw_loader": "load_regular_csv_gravity_map",
+            **({} if metadata_extra is None else dict(metadata_extra)),
+        },
+    )
+    manifest.write_json(manifest_target)
+    return map_model, manifest
+
+
+def process_regular_xyz_gravity_map(
+    raw_xyz_path: str | Path,
+    *,
+    processed_npz_path: str | Path,
+    manifest_path: str | Path,
+    region_name: str,
+    source_name: str,
+    column_order: tuple[str, str, str] = ("lon_deg", "lat_deg", "disturbance_mgal"),
+    skiprows: int = 0,
+    reference_height_m: float = 0.0,
+    default_method: str = "linear",
+    bounds_error: bool = False,
+    fill_value_mgal: float = np.nan,
+    metadata_extra: Optional[dict[str, Any]] = None,
+    project_root: str | Path | None = None,
+    crop_bounds_deg: Optional[tuple[float, float, float, float]] = None,
+) -> tuple[GravityGridMap, RegionalGravityMapManifest]:
+    """
+    Convert one raw XYZ gravity grid into a processed NPZ cache and manifest.
+    """
+    root = _project_root(project_root)
+    raw_path = Path(raw_xyz_path).expanduser().resolve()
+    map_model = load_regular_xyz_gravity_map(
+        raw_path,
+        name=f"{region_name}_gravity_map",
+        region_name=region_name,
+        source_name=source_name,
+        column_order=column_order,
+        skiprows=skiprows,
+        crop_bounds_deg=crop_bounds_deg,
+        reference_height_m=reference_height_m,
+        default_method=default_method,
+        bounds_error=bounds_error,
+        fill_value_mgal=fill_value_mgal,
+        metadata_extra=metadata_extra,
+    )
+
+    processed_path = map_model.to_npz(processed_npz_path)
+    manifest_target = Path(manifest_path).expanduser().resolve()
+    manifest = RegionalGravityMapManifest(
+        region_name=region_name,
+        source_name=source_name,
+        source_kind="regular_grid_xyz",
+        raw_data_path=_relative_to_root(raw_path, project_root=root),
+        processed_map_path=_relative_to_root(processed_path, project_root=root),
+        manifest_path=_relative_to_root(manifest_target, project_root=root),
+        disturbance_units="mGal",
+        reference_height_m=float(reference_height_m),
+        lat_bounds_deg=(
+            float(map_model.lat_axis_deg[0]),
+            float(map_model.lat_axis_deg[-1]),
+        ),
+        lon_bounds_deg=(
+            float(map_model.lon_axis_deg[0]),
+            float(map_model.lon_axis_deg[-1]),
+        ),
+        spacing_deg=(
+            _axis_spacing_deg(np.asarray(map_model.lat_axis_deg, dtype=np.float64)),
+            _axis_spacing_deg(np.asarray(map_model.lon_axis_deg, dtype=np.float64)),
+        ),
+        shape=tuple(int(x) for x in map_model.shape),
+        interpolation=str(map_model.default_method),
+        notes=[
+            "Processed from a regular XYZ anomaly grid into GravityGridMap NPZ cache.",
+            "This source is used as a regional scalar map proxy; check source semantics before interpreting it as same-point disturbance.",
+        ],
+        metadata={
+            "map_name": map_model.name,
+            "bounds_error": bool(map_model.bounds_error),
+            "fill_value_mps2": (
+                None
+                if not np.isfinite(float(map_model.fill_value_mps2))
+                else float(map_model.fill_value_mps2)
+            ),
+            "raw_loader": "load_regular_xyz_gravity_map",
+            "column_order": list(column_order),
+            "skiprows": int(skiprows),
             **({} if metadata_extra is None else dict(metadata_extra)),
         },
     )
@@ -413,6 +587,8 @@ __all__ = [
     "ensure_norwegian_margin_map",
     "ensure_regional_gravity_map",
     "load_regular_csv_gravity_map",
+    "load_regular_xyz_gravity_map",
     "load_regional_manifest",
     "process_regular_csv_gravity_map",
+    "process_regular_xyz_gravity_map",
 ]

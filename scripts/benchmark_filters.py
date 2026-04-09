@@ -13,9 +13,30 @@ from typing import Any
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from gravnav.utils.config import load_config_mapping
+
 PYTHON = sys.executable
 RUNNER = PROJECT_ROOT / "scripts" / "run_single_scenario.py"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "outputs" / "reports" / "priority3_benchmark"
+
+
+def _scenario_output_name(scenario: str) -> str:
+    text = str(scenario).strip()
+    path = Path(text).expanduser()
+    if path.exists() and path.is_file():
+        try:
+            mapping = load_config_mapping(path)
+        except Exception:
+            return path.stem
+        name = mapping.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return path.stem
+    return text
 
 
 def _run_one(
@@ -49,8 +70,9 @@ def _run_one(
     env["PYTHONPATH"] = src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
     subprocess.run(cmd, check=True, cwd=PROJECT_ROOT, env=env)
 
-    metrics_path = output_dir / f"{scenario}_{label}_metrics.json"
-    archive_path = output_dir / f"{scenario}_{label}.npz"
+    scenario_name = _scenario_output_name(scenario)
+    metrics_path = output_dir / f"{scenario_name}_{label}_metrics.json"
+    archive_path = output_dir / f"{scenario_name}_{label}.npz"
     metrics = json.loads(metrics_path.read_text())
     pos = metrics["ins_position_error"]
     lag = metrics.get("lag_smoothed_position_error") or {}
@@ -312,12 +334,13 @@ def main() -> int:
     summary_payload = {
         "profile": args.profile,
         "scenario": args.scenario,
+        "scenario_output_name": _scenario_output_name(str(args.scenario)),
         "seed": int(args.seed),
         "regional_map": args.regional_map,
         "map_path": args.map_path,
         "runs": rows,
     }
-    summary_path = output_dir / f"{Path(str(args.scenario)).stem}_summary.json"
+    summary_path = output_dir / f"{_scenario_output_name(str(args.scenario))}_summary.json"
     summary_path.write_text(json.dumps(summary_payload, indent=2) + "\n")
 
     print("\n=== SUMMARY ===")

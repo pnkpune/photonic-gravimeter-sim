@@ -9,6 +9,7 @@ import sys
 def test_regional_benchmark_summary_smoke(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     output_dir = tmp_path / "benchmark"
+    scenario_path = root / "configs/scenarios/norwegian_margin_maritime.json"
 
     proc = subprocess.run(
         [
@@ -17,7 +18,7 @@ def test_regional_benchmark_summary_smoke(tmp_path: Path) -> None:
             "--profile",
             "regional_core",
             "--scenario",
-            "norwegian_margin_maritime",
+            str(scenario_path),
             "--regional-map",
             "norwegian_margin",
             "--output-dir",
@@ -41,6 +42,7 @@ def test_regional_benchmark_summary_smoke(tmp_path: Path) -> None:
     assert summary_path.exists()
     payload = json.loads(summary_path.read_text())
     assert payload["profile"] == "regional_core"
+    assert payload["scenario_output_name"] == "norwegian_margin_maritime"
     assert payload["regional_map"] == "norwegian_margin"
 
     labels = {row["label"] for row in payload["runs"]}

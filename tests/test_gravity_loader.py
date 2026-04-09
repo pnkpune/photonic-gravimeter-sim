@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
 from gravnav.datasets.gravity_loader import (
     load_regional_manifest,
     load_regular_csv_gravity_map,
+    load_regular_xyz_gravity_map,
     process_regular_csv_gravity_map,
 )
 from gravnav.truth.scenarios import ScenarioSpec, build_truth_trajectory_from_scenario
@@ -72,3 +74,33 @@ def test_norwegian_margin_scenario_stays_inside_fixture_grid() -> None:
 
     mask = map_model.contains(truth.lat_rad, truth.lon_rad)
     assert bool(mask.all())
+
+
+def test_load_regular_xyz_gravity_map_small_grid(tmp_path: Path) -> None:
+    xyz_path = tmp_path / "small.xyz"
+    xyz_path.write_text(
+        "\n".join(
+            [
+                "4.0 63.5 -10.0",
+                "4.5 63.5 -8.0",
+                "4.0 64.0 -6.0",
+                "4.5 64.0 -4.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    map_model = load_regular_xyz_gravity_map(
+        xyz_path,
+        name="small_xyz",
+        region_name="test_region",
+        source_name="unit_test",
+    )
+
+    assert map_model.shape == (2, 2)
+    assert float(map_model.lat_axis_deg[0]) == pytest.approx(63.5)
+    assert float(map_model.lat_axis_deg[-1]) == pytest.approx(64.0)
+    assert float(map_model.lon_axis_deg[0]) == pytest.approx(4.0)
+    assert float(map_model.lon_axis_deg[-1]) == pytest.approx(4.5)
+    assert map_model.metadata["source_kind"] == "regular_grid_xyz"
