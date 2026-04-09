@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -38,3 +39,8 @@ def test_run_single_scenario_cli_smoke(tmp_path: Path) -> None:
     assert (output_dir / "maritime_baseline_test_summary.json").exists()
     assert (output_dir / "maritime_baseline_test_metrics.json").exists()
     assert (output_dir / "maritime_baseline_test_config.json").exists()
+
+    metrics = json.loads(
+        (output_dir / "maritime_baseline_test_metrics.json").read_text()
+    )
+    assert metrics["pf_position_error"] is not None

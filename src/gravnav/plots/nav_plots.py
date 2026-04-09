@@ -51,7 +51,10 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ..estimators.map_match_pf import geodetic_offsets_to_local_ned
-from ..simulation.metrics import ins_position_error_history_from_truth
+from ..simulation.metrics import (
+    ins_position_error_history_from_truth,
+    pf_position_error_history_from_truth,
+)
 from ..simulation.results import ScenarioSimulationResult
 from ..truth.trajectory import TruthTrajectory, ypr_from_dcm_body_to_ned
 
@@ -228,6 +231,46 @@ def _integrity_history_arrays(
     if len(result.estimators.integrity_snapshots) == 0:
         return None
     return result.estimators.integrity_history_arrays()
+
+
+def _observability_history_arrays(
+    result: ScenarioSimulationResult,
+) -> Optional[dict[str, np.ndarray]]:
+    """
+    Return observability-analysis arrays from the estimator custom stream.
+    """
+    rows = result.estimators.custom_streams.get("observability")
+    if rows is None or len(rows) == 0:
+        return None
+
+    n = len(rows)
+    out: dict[str, np.ndarray] = {
+        "time_s": np.full(n, np.nan, dtype=np.float64),
+        "gradient_ned_mps2_per_m": np.full((n, 3), np.nan, dtype=np.float64),
+        "gradient_norm_horizontal_mps2_per_m": np.full(n, np.nan, dtype=np.float64),
+        "gramian_eigenvalues": np.full((n, 3), np.nan, dtype=np.float64),
+        "information_density": np.full(n, np.nan, dtype=np.float64),
+        "observable_rank": np.full(n, np.nan, dtype=np.float64),
+        "feedback_recommended": np.zeros(n, dtype=bool),
+    }
+
+    for k, row in enumerate(rows):
+        out["time_s"][k] = float(row.get("time_s", np.nan))
+        grad = row.get("gradient_ned_mps2_per_m")
+        if grad is not None:
+            out["gradient_ned_mps2_per_m"][k] = _as_float_array(grad).reshape(3)
+        out["gradient_norm_horizontal_mps2_per_m"][k] = float(
+            row.get("gradient_norm_horizontal_mps2_per_m", np.nan)
+        )
+        eig = row.get("gramian_eigenvalues")
+        if eig is not None:
+            out["gramian_eigenvalues"][k] = _as_float_array(eig).reshape(3)
+        info = row.get("information_density")
+        out["information_density"][k] = np.nan if info is None else float(info)
+        out["observable_rank"][k] = float(row.get("observable_rank", np.nan))
+        out["feedback_recommended"][k] = bool(row.get("feedback_recommended", False))
+
+    return out
 
 
 def _ins_local_ned_offsets(
@@ -991,6 +1034,162 @@ def plot_pf_diagnostics(
     return fig, ax_tuple
 
 
+def plot_pf_position_error_ned(
+    result: ScenarioSimulationResult,
+    *,
+    axes: Optional[Sequence[Axes]] = None,
+    figsize: tuple[float, float] = (9.0, 8.2),
+    title: Optional[str] = None,
+) -> tuple[Figure, tuple[Axes, Axes, Axes, Axes]]:
+    """
+    Plot PF position error in local NED coordinates against truth.
+
+    Parameters
+    ----------
+    result : ScenarioSimulationResult
+        Run result.
+    axes : sequence of matplotlib.axes.Axes, optional
+        Existing 4-axis stack.
+    figsize : tuple, default=(9.0, 8.2)
+        Figure size used when `axes is None`.
+    title : str, optional
+        Title override.
+
+    Returns
+    -------
+    tuple[Figure, tuple[Axes, Axes, Axes, Axes]]
+        Figure and four axes for `(dN, dE, dD, horizontal_norm)`.
+    """
+    if len(result.estimators.pf_updates) == 0:
+        raise ValueError("No PF update history is available in the result.")
+
+    err_ned = pf_position_error_history_from_truth(
+        result.truth,
+        result.estimators.pf_updates,
+    )
+    pf = result.estimators.pf_history_arrays()
+    tt = _truth_time_s(result)
+    t_pf = _safe_time_axis(pf["pf_time_s"], truth_time_s=tt)
+
+    if axes is None:
+        fig, axes_arr = _new_figure_and_axes(
+            nrows=4,
+            ncols=1,
+            figsize=figsize,
+            squeeze=False,
+            sharex=True,
+        )
+        ax_tuple = (
+            axes_arr[0, 0],
+            axes_arr[1, 0],
+            axes_arr[2, 0],
+            axes_arr[3, 0],
+        )
+    else:
+        if len(axes) != 4:
+            raise ValueError("axes must contain exactly four Axes.")
+        ax_tuple = (axes[0], axes[1], axes[2], axes[3])
+        fig = ax_tuple[0].figure
+
+    labels = ("dN", "dE", "dD")
+    for k in range(3):
+        ax_tuple[k].plot(t_pf, err_ned[:, k], label="PF error")
+        ax_tuple[k].set_ylabel(f"{labels[k]}\n[m]")
+        ax_tuple[k].grid(True, alpha=0.25)
+
+    horiz = np.linalg.norm(err_ned[:, :2], axis=1)
+    ax_tuple[3].plot(t_pf, horiz, label="horizontal")
+    ax_tuple[3].set_ylabel("horizontal\n[m]")
+    ax_tuple[3].set_xlabel("time [s]")
+    ax_tuple[3].grid(True, alpha=0.25)
+
+    ax_tuple[0].set_title("PF position error (NED)" if title is None else str(title))
+    return fig, ax_tuple
+
+
+def plot_observability_history(
+    result: ScenarioSimulationResult,
+    *,
+    axes: Optional[Sequence[Axes]] = None,
+    figsize: tuple[float, float] = (9.0, 9.0),
+    title: Optional[str] = None,
+) -> tuple[Figure, tuple[Axes, Axes, Axes, Axes]]:
+    """
+    Plot online observability diagnostics logged during PF updates.
+
+    Panels
+    ------
+    1) Horizontal gravity-gradient magnitude
+    2) Gramian eigenvalue timeline
+    3) Information density
+    4) Observable rank and feedback recommendation flag
+    """
+    obs = _observability_history_arrays(result)
+    if obs is None:
+        raise ValueError("No observability-analysis history is available in the result.")
+
+    tt = _truth_time_s(result)
+    t = _safe_time_axis(obs["time_s"], truth_time_s=tt)
+
+    if axes is None:
+        fig, axes_arr = _new_figure_and_axes(
+            nrows=4,
+            ncols=1,
+            figsize=figsize,
+            squeeze=False,
+            sharex=True,
+        )
+        ax_tuple = (
+            axes_arr[0, 0],
+            axes_arr[1, 0],
+            axes_arr[2, 0],
+            axes_arr[3, 0],
+        )
+    else:
+        if len(axes) != 4:
+            raise ValueError("axes must contain exactly four Axes.")
+        ax_tuple = (axes[0], axes[1], axes[2], axes[3])
+        fig = ax_tuple[0].figure
+
+    ax_tuple[0].plot(t, obs["gradient_norm_horizontal_mps2_per_m"], label="||grad_h||")
+    ax_tuple[0].set_ylabel("grad_h\n[m/s²/m]")
+    ax_tuple[0].grid(True, alpha=0.25)
+    ax_tuple[0].legend()
+
+    eig = obs["gramian_eigenvalues"]
+    for k, label in enumerate(("lambda_1", "lambda_2", "lambda_3")):
+        ax_tuple[1].plot(t, eig[:, k], label=label)
+    ax_tuple[1].set_ylabel("Gramian\neigs")
+    ax_tuple[1].grid(True, alpha=0.25)
+    ax_tuple[1].legend()
+
+    ax_tuple[2].plot(t, obs["information_density"], label="info density")
+    ax_tuple[2].set_ylabel("log-info")
+    ax_tuple[2].grid(True, alpha=0.25)
+    ax_tuple[2].legend()
+
+    ax_tuple[3].step(
+        t,
+        obs["observable_rank"],
+        where="post",
+        label="observable rank",
+    )
+    ax_tuple[3].step(
+        t,
+        obs["feedback_recommended"].astype(np.float64),
+        where="post",
+        linestyle="--",
+        label="feedback recommended",
+    )
+    ax_tuple[3].set_ylabel("rank / flag")
+    ax_tuple[3].set_xlabel("time [s]")
+    ax_tuple[3].grid(True, alpha=0.25)
+    ax_tuple[3].legend()
+
+    ax_tuple[0].set_title("Observability diagnostics" if title is None else str(title))
+    return fig, ax_tuple
+
+
 def plot_integrity_history(
     result: ScenarioSimulationResult,
     *,
@@ -1228,7 +1427,9 @@ __all__ = [
     "plot_ground_track_local_ned",
     "plot_integrity_history",
     "plot_navigation_overview",
+    "plot_observability_history",
     "plot_pf_diagnostics",
+    "plot_pf_position_error_ned",
     "plot_position_error_ned",
     "plot_velocity_ned",
     "save_figure",

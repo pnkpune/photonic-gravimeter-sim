@@ -29,9 +29,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import matplotlib.pyplot as plt
-import numpy as np
 
-from gravnav.estimators.integrity import geodetic_position_error_ned
 from gravnav.plots.nav_plots import (
     plot_ground_track_local_ned,
     plot_navigation_overview,
@@ -44,9 +42,8 @@ from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.imu import IMUSpec
 from gravnav.sensors.velocity_aid import VelocityAidSpec
 from gravnav.simulation.metrics import (
-    PositionErrorMetrics,
     ins_position_error_history_from_truth,
-    interpolate_truth_geodetic,
+    pf_position_error_metrics_from_result,
     scenario_metrics_from_result,
 )
 from gravnav.simulation.results import ScenarioSimulationResult
@@ -174,27 +171,6 @@ def _plot_horizontal_error_comparison(
     return out
 
 
-def _pf_position_error_metrics(result: ScenarioSimulationResult) -> PositionErrorMetrics | None:
-    if len(result.estimators.pf_updates) == 0:
-        return None
-
-    pf = result.estimators.pf_history_arrays()
-    t_pf = pf["pf_time_s"]
-    lat_true, lon_true, h_true = interpolate_truth_geodetic(result.truth, t_pf)
-
-    err = np.empty((t_pf.size, 3), dtype=np.float64)
-    for k in range(t_pf.size):
-        err[k] = geodetic_position_error_ned(
-            float(pf["pf_lat_rad"][k]),
-            float(pf["pf_lon_rad"][k]),
-            float(pf["pf_height_m"][k]),
-            float(lat_true[k]),
-            float(lon_true[k]),
-            float(h_true[k]),
-        )
-    return PositionErrorMetrics.from_error_series(err)
-
-
 def _write_report(
     *,
     scenario: ScenarioSpec,
@@ -211,7 +187,7 @@ def _write_report(
 ) -> Path:
     aided_metrics = scenario_metrics_from_result(aided_result)
     imu_only_metrics = scenario_metrics_from_result(imu_only_result)
-    pf_metrics = _pf_position_error_metrics(aided_result)
+    pf_metrics = pf_position_error_metrics_from_result(aided_result)
 
     aided_pos = aided_metrics.ins_position_error
     imu_pos = imu_only_metrics.ins_position_error

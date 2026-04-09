@@ -52,6 +52,10 @@ from typing import Any, Optional
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from ..analysis.observability import (
+    ObservabilityAnalyzer,
+    summarize_observability_snapshot,
+)
 from ..estimators.error_state_ins import (
     ERR_ATT,
     ERR_BA,
@@ -485,6 +489,80 @@ class IntegrityMonitorConfig:
 
 
 @dataclass
+class ObservabilityAnalysisConfig:
+    """
+    Configuration for online observability analysis during PF updates.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Enable observability analysis and logging.
+    window_size : int, default=30
+        Sliding-window length in PF updates.
+    gravity_noise_std_mps2 : float, optional
+        Gravity measurement standard deviation used in the Gramian. When
+        omitted, the PF gravity measurement standard deviation is reused.
+    eigenvalue_threshold : float, default=1e-20
+        Small eigenvalues below this threshold are treated as zero.
+    min_rank_for_feedback : int, default=2
+        Minimum observable rank required for the snapshot to recommend
+        closed-loop feedback.
+    min_gradient_norm : float, default=1e-10
+        Minimum horizontal gradient magnitude considered informative.
+    delta_north_m : float, default=50
+        Finite-difference step for the north gradient component [m].
+    delta_east_m : float, default=50
+        Finite-difference step for the east gradient component [m].
+    delta_down_m : float, default=5
+        Finite-difference step for the down gradient component [m].
+    """
+
+    enabled: bool = True
+    window_size: int = 30
+    gravity_noise_std_mps2: Optional[float] = None
+    eigenvalue_threshold: float = 1.0e-20
+    min_rank_for_feedback: int = 2
+    min_gradient_norm: float = 1.0e-10
+    delta_north_m: float = 50.0
+    delta_east_m: float = 50.0
+    delta_down_m: float = 5.0
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.window_size = int(self.window_size)
+        if self.window_size <= 0:
+            raise ValueError("window_size must be positive.")
+        if self.gravity_noise_std_mps2 is not None:
+            self.gravity_noise_std_mps2 = _positive_scalar(
+                self.gravity_noise_std_mps2,
+                name="gravity_noise_std_mps2",
+            )
+        self.eigenvalue_threshold = _positive_scalar(
+            self.eigenvalue_threshold,
+            name="eigenvalue_threshold",
+        )
+        self.min_rank_for_feedback = int(self.min_rank_for_feedback)
+        if self.min_rank_for_feedback < 1 or self.min_rank_for_feedback > 3:
+            raise ValueError("min_rank_for_feedback must be in {1, 2, 3}.")
+        self.min_gradient_norm = _positive_scalar(
+            self.min_gradient_norm,
+            name="min_gradient_norm",
+        )
+        self.delta_north_m = _positive_scalar(
+            self.delta_north_m,
+            name="delta_north_m",
+        )
+        self.delta_east_m = _positive_scalar(
+            self.delta_east_m,
+            name="delta_east_m",
+        )
+        self.delta_down_m = _positive_scalar(
+            self.delta_down_m,
+            name="delta_down_m",
+        )
+
+
+@dataclass
 class SimulationRunnerConfig:
     """
     End-to-end orchestration settings for one scenario run.
@@ -513,6 +591,8 @@ class SimulationRunnerConfig:
         Depth-aid orchestration policy.
     map_match : MapMatchFeedbackConfig
         Gravity PF and PF-feedback policy.
+    observability : ObservabilityAnalysisConfig
+        Online observability-analysis policy for PF update times.
     integrity : IntegrityMonitorConfig
         Integrity-monitoring policy.
     metadata_extra : dict[str, Any], default={}
@@ -535,6 +615,7 @@ class SimulationRunnerConfig:
     velocity_aid: VelocityAidFusionConfig = field(default_factory=VelocityAidFusionConfig)
     depth_aid: DepthFusionConfig = field(default_factory=DepthFusionConfig)
     map_match: MapMatchFeedbackConfig = field(default_factory=MapMatchFeedbackConfig)
+    observability: ObservabilityAnalysisConfig = field(default_factory=ObservabilityAnalysisConfig)
     integrity: IntegrityMonitorConfig = field(default_factory=IntegrityMonitorConfig)
 
     metadata_extra: dict[str, Any] = field(default_factory=dict)
@@ -818,6 +899,7 @@ class ScenarioSimulationRunner:
         depth_sensor: Optional[DepthSensor] = None,
         velocity_aid_sensor: Optional[VelocityAidSensor] = None,
         gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
+        pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
     ) -> ScenarioSimulationResult:
@@ -836,6 +918,9 @@ class ScenarioSimulationRunner:
             Depth-aiding sensor simulator.
         velocity_aid_sensor : VelocityAidSensor, optional
             External velocity-aid simulator.
+        pf_rng : numpy.random.Generator, optional
+            Optional RNG for the PF. Supply this when reproducible PF histories
+            are required across repeated runs.
         map_model : object, path, or None, optional
             Gravity-map object or path to a `GravityGridMap` NPZ file.
         metadata : SimulationMetadata, optional
@@ -860,13 +945,35 @@ class ScenarioSimulationRunner:
 
         pf: Optional[GravityMapParticleFilter] = None
         directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
+        observability: Optional[ObservabilityAnalyzer] = None
         resolved_map = resolve_map_model(map_model)
         if cfg.map_match.enabled and gravimeter_sensor is not None and resolved_map is not None:
-            pf = GravityMapParticleFilter(cfg.map_match.pf_spec, resolved_map)
+            pf = GravityMapParticleFilter(
+                cfg.map_match.pf_spec,
+                resolved_map,
+                rng=pf_rng,
+            )
             pf.reset_from_ins(ins)
             if cfg.map_match.use_directional_feedback:
                 directional_feedback_ctrl = DirectionalFeedbackController(
                     cfg.map_match.directional_feedback_spec,
+                )
+            if cfg.observability.enabled:
+                observability = ObservabilityAnalyzer(
+                    resolved_map,
+                    window_size=cfg.observability.window_size,
+                    gravity_noise_std_mps2=(
+                        (
+                            pf.spec.gravity_meas_std_mps2
+                            if cfg.map_match.gravity_meas_std_mps2 is None
+                            else cfg.map_match.gravity_meas_std_mps2
+                        )
+                        if cfg.observability.gravity_noise_std_mps2 is None
+                        else cfg.observability.gravity_noise_std_mps2
+                    ),
+                    eigenvalue_threshold=cfg.observability.eigenvalue_threshold,
+                    min_rank_for_feedback=cfg.observability.min_rank_for_feedback,
+                    min_gradient_norm=cfg.observability.min_gradient_norm,
                 )
 
         integrity = self._make_integrity_monitor()
@@ -1098,9 +1205,31 @@ class ScenarioSimulationRunner:
                         ins_or_state=ins,
                         depth_measurement=depth_for_pf,
                         depth_meas_std_m=cfg.map_match.depth_meas_std_m,
+                        measured_gradient_per_s2=(
+                            None
+                            if gradiometer_meas is None
+                            else np.asarray(gradiometer_meas.value_per_s2, dtype=np.float64)
+                        ),
+                        gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
                         reference_surface_height_m=cfg.reference_surface_height_m,
                     )
                     estimators.pf_updates.append(pf_update)
+
+                    obs_snapshot = None
+                    if observability is not None:
+                        obs_snapshot = observability.update(
+                            lat_rad=float(ins.state.nominal.lat_rad),
+                            lon_rad=float(ins.state.nominal.lon_rad),
+                            height_m=float(ins.state.nominal.height_m),
+                            time_s=t_now,
+                            delta_north_m=cfg.observability.delta_north_m,
+                            delta_east_m=cfg.observability.delta_east_m,
+                            delta_down_m=cfg.observability.delta_down_m,
+                        )
+                        estimators.add_custom_sample(
+                            "observability",
+                            summarize_observability_snapshot(obs_snapshot),
+                        )
 
                     # --- Directional feedback (new, recommended) ---
                     if directional_feedback_ctrl is not None:
@@ -1109,6 +1238,7 @@ class ScenarioSimulationRunner:
                             ins,
                             num_particles=cfg.map_match.pf_spec.num_particles,
                             time_s=t_now,
+                            observability_snapshot=obs_snapshot,
                         )
                         estimators.add_custom_sample(
                             "pf_directional_feedback",
@@ -1189,6 +1319,8 @@ class ScenarioSimulationRunner:
         gravimeter_sensor: Optional[ScalarGravimeterSensor] = None,
         depth_sensor: Optional[DepthSensor] = None,
         velocity_aid_sensor: Optional[VelocityAidSensor] = None,
+        gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
+        pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
         dt_s: Optional[float] = None,
@@ -1230,6 +1362,8 @@ class ScenarioSimulationRunner:
             gravimeter_sensor=gravimeter_sensor,
             depth_sensor=depth_sensor,
             velocity_aid_sensor=velocity_aid_sensor,
+            gradiometer_sensor=gradiometer_sensor,
+            pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
         )
@@ -1242,6 +1376,7 @@ class ScenarioSimulationRunner:
         gravimeter_spec: Optional[GravimeterSpec] = None,
         depth_spec: Optional[DepthSensorSpec] = None,
         velocity_aid_spec: Optional[VelocityAidSpec] = None,
+        gradiometer_spec: Optional[GravityGradiometerSpec] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
         dt_s: Optional[float] = None,
@@ -1262,6 +1397,8 @@ class ScenarioSimulationRunner:
             Depth-sensor spec.
         velocity_aid_spec : VelocityAidSpec, optional
             Velocity-aid spec.
+        gradiometer_spec : GravityGradiometerSpec, optional
+            Horizontal gravity-gradiometer spec.
         map_model : object, path, or None, optional
             Gravity-map backend or NPZ path.
         metadata : SimulationMetadata, optional
@@ -1304,6 +1441,12 @@ class ScenarioSimulationRunner:
             if velocity_aid_spec is None
             else VelocityAidSensor(velocity_aid_spec, rng=child_rng())
         )
+        gradiometer_sensor = (
+            None
+            if gradiometer_spec is None
+            else GravityGradiometerSensor(gradiometer_spec, rng=child_rng())
+        )
+        pf_rng = child_rng()
 
         meta = SimulationMetadata() if metadata is None else metadata.copy()
         meta.rng_state = {"seed": None if seed is None else int(seed)}
@@ -1314,6 +1457,8 @@ class ScenarioSimulationRunner:
             gravimeter_sensor=gravimeter_sensor,
             depth_sensor=depth_sensor,
             velocity_aid_sensor=velocity_aid_sensor,
+            gradiometer_sensor=gradiometer_sensor,
+            pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
             dt_s=dt_s,
@@ -1328,6 +1473,7 @@ __all__ = [
     "ScenarioSimulationRunner",
     "SimulationRunnerConfig",
     "VelocityAidFusionConfig",
+    "GravityGradiometerSpec",
     "build_initial_covariance_geodetic",
     "process_noise_from_imu_spec",
     "resolve_map_model",

@@ -41,6 +41,7 @@ from gravnav.physics.gravity_map import (
 )
 from gravnav.sensors.depth import DepthSensorSpec
 from gravnav.sensors.gravimeter import GravimeterSpec
+from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
 from gravnav.sensors.imu import IMUSpec
 from gravnav.sensors.velocity_aid import VelocityAidSpec
 from gravnav.simulation.metrics import ScenarioMetricsSummary, scenario_metrics_from_result
@@ -68,6 +69,7 @@ DEFAULT_IMU_CONFIG = PROJECT_ROOT / "configs/sensors/imu_nav_grade.json"
 DEFAULT_GRAVIMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravimeter_proto.json"
 DEFAULT_DEPTH_CONFIG = PROJECT_ROOT / "configs/sensors/depth_sensor.json"
 DEFAULT_VELOCITY_AID_CONFIG = PROJECT_ROOT / "configs/sensors/velocity_aid.json"
+DEFAULT_GRADIOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravity_gradiometer_proto.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/outputs/runs/single_run"
 
 
@@ -291,6 +293,12 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         inject_position_to_ins=bool(args.enable_pf_feedback),
         feedback_covariance_inflation=args.pf_feedback_covariance_inflation,
         use_directional_feedback=bool(getattr(args, "use_directional_feedback", False)),
+        use_gradiometer=bool(getattr(args, "use_gradiometer", False)),
+        gradient_meas_std_per_s2=(
+            None
+            if getattr(args, "pf_gradient_std_per_s2", None) is None
+            else float(args.pf_gradient_std_per_s2)
+        ),
     )
     integrity = IntegrityMonitorConfig(
         enabled=not args.disable_integrity,
@@ -338,6 +346,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--velocity-aid-config",
         default=_relative_to_root(DEFAULT_VELOCITY_AID_CONFIG),
         help="Velocity-aid spec config path or bare JSON stem under configs/sensors.",
+    )
+    parser.add_argument(
+        "--gradiometer-config",
+        default=_relative_to_root(DEFAULT_GRADIOMETER_CONFIG),
+        help="Gravity-gradiometer spec config path or bare JSON stem under configs/sensors.",
     )
     parser.add_argument(
         "--map-path",
@@ -435,6 +448,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="PF depth measurement standard deviation in metres when depth is used.",
     )
     parser.add_argument(
+        "--pf-gradient-std-per-s2",
+        type=float,
+        default=1.0e-8,
+        help="PF horizontal-gradient measurement standard deviation per axis in 1/s^2.",
+    )
+    parser.add_argument(
         "--pf-feedback-covariance-inflation",
         type=float,
         default=1.0,
@@ -456,6 +475,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--disable-map-match",
         action="store_true",
         help="Disable PF gravity map matching entirely.",
+    )
+    parser.add_argument(
+        "--use-gradiometer",
+        action="store_true",
+        help="Enable horizontal gravity-gradient sampling and PF gradient likelihood.",
     )
     pf_feedback_group = parser.add_mutually_exclusive_group()
     pf_feedback_group.add_argument(
@@ -515,6 +539,14 @@ def _metrics_summary_lines(metrics: ScenarioMetricsSummary) -> list[str]:
             f"Gravimeter RMSE: {metrics.gravimeter_error.rmse:.6e} m/s^2"
         )
 
+    if metrics.pf_position_error is not None:
+        lines.append(
+            f"PF horizontal RMSE: {metrics.pf_position_error.horizontal_rmse_m:.3f} m"
+        )
+        lines.append(
+            f"PF CEP95: {metrics.pf_position_error.cep95_m:.3f} m"
+        )
+
     if metrics.integrity is not None:
         nis_fraction = float(metrics.integrity.fraction_nis_passed)
         if np.isfinite(nis_fraction):
@@ -551,6 +583,15 @@ def main() -> int:
         args.velocity_aid_config,
         base_dir=DEFAULT_VELOCITY_AID_CONFIG.parent,
     )
+    gradiometer_spec = None
+    gradiometer_cfg = None
+    gradiometer_source = None
+    if args.use_gradiometer:
+        gradiometer_spec, gradiometer_cfg, gradiometer_source = _load_sensor_spec(
+            GravityGradiometerSpec,
+            args.gradiometer_config,
+            base_dir=DEFAULT_GRADIOMETER_CONFIG.parent,
+        )
 
     truth = build_truth_trajectory_from_scenario(scenario, dt_s=args.dt_s)
 
@@ -587,6 +628,8 @@ def main() -> int:
             "gravimeter": gravimeter_cfg,
             "depth": depth_cfg,
             "velocity_aid": velocity_cfg,
+            "gradiometer_source": gradiometer_source,
+            "gradiometer": gradiometer_cfg,
         },
         "runner": {
             "dt_s": float(scenario.default_dt_s if args.dt_s is None else args.dt_s),
@@ -616,6 +659,8 @@ def main() -> int:
                 "feedback_covariance_inflation": float(
                     args.pf_feedback_covariance_inflation
                 ),
+                "use_gradiometer": bool(args.use_gradiometer),
+                "gradient_std_per_s2": float(args.pf_gradient_std_per_s2),
             },
             "integrity": {
                 "enabled": not args.disable_integrity,
@@ -651,6 +696,7 @@ def main() -> int:
         gravimeter_spec=gravimeter_spec,
         depth_spec=None if args.disable_depth_aid else depth_spec,
         velocity_aid_spec=None if args.disable_velocity_aid else velocity_aid_spec,
+        gradiometer_spec=gradiometer_spec,
         map_model=map_model,
         metadata=metadata,
         seed=args.seed,

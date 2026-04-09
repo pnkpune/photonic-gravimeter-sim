@@ -52,6 +52,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from ..estimators.error_state_ins import ErrorStateINSState
 from ..estimators.integrity import IntegritySnapshot, geodetic_position_error_ned
+from ..estimators.map_match_pf import MapMatchPFUpdateResult
 from ..truth.trajectory import TruthTrajectory
 from .results import ScenarioSimulationResult
 
@@ -776,6 +777,8 @@ class ScenarioMetricsSummary:
         IMU accelerometer measurement-minus-ideal summary.
     ins_position_error : PositionErrorMetrics or None
         INS position error summary against truth.
+    pf_position_error : PositionErrorMetrics or None
+        PF position error summary against truth.
     integrity : IntegrityMetricsSummary or None
         Integrity-history summary.
     """
@@ -792,6 +795,7 @@ class ScenarioMetricsSummary:
     imu_gyro_error: Optional[VectorErrorMetrics] = None
     imu_accel_error: Optional[VectorErrorMetrics] = None
     ins_position_error: Optional[PositionErrorMetrics] = None
+    pf_position_error: Optional[PositionErrorMetrics] = None
     integrity: Optional[IntegrityMetricsSummary] = None
 
     def to_mapping(self) -> dict[str, Any]:
@@ -857,6 +861,20 @@ def ins_state_times(ins_states: Sequence[ErrorStateINSState]) -> FloatArray:
     return out
 
 
+def pf_update_times(pf_updates: Sequence[MapMatchPFUpdateResult]) -> FloatArray:
+    """
+    Extract timestamps from a sequence of PF update results.
+
+    Missing timestamps are recorded as NaN.
+    """
+    out = np.full(len(pf_updates), np.nan, dtype=np.float64)
+    for k, update in enumerate(pf_updates):
+        time_s = getattr(update, "time_s", None)
+        if time_s is not None:
+            out[k] = float(time_s)
+    return out
+
+
 def ins_position_error_history_from_truth(
     truth: TruthTrajectory,
     ins_states: Sequence[ErrorStateINSState],
@@ -906,6 +924,55 @@ def ins_position_error_history_from_truth(
                 true_height_m=float(true_h[k]),
             ),
             name="position_error_ned_m",
+        )
+
+    return err
+
+
+def pf_position_error_history_from_truth(
+    truth: TruthTrajectory,
+    pf_updates: Sequence[MapMatchPFUpdateResult],
+) -> FloatArray:
+    """
+    Build local NED PF position error history against truth.
+
+    Parameters
+    ----------
+    truth : TruthTrajectory
+        Truth trajectory.
+    pf_updates : sequence[MapMatchPFUpdateResult]
+        Logged PF update results.
+
+    Returns
+    -------
+    np.ndarray, shape (N, 3)
+        NED position errors `[dN, dE, dD]` [m].
+    """
+    n = len(pf_updates)
+    if n == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    t_pf = pf_update_times(pf_updates)
+    if np.any(~np.isfinite(t_pf)):
+        raise ValueError(
+            "All PF updates must have finite time_s for truth comparison."
+        )
+
+    true_lat, true_lon, true_h = interpolate_truth_geodetic(truth, t_pf)
+    err = np.empty((n, 3), dtype=np.float64)
+
+    for k, update in enumerate(pf_updates):
+        est = update.estimate
+        err[k] = _vec3(
+            geodetic_position_error_ned(
+                estimated_lat_rad=float(est.lat_rad),
+                estimated_lon_rad=float(est.lon_rad),
+                estimated_height_m=float(est.height_m),
+                true_lat_rad=float(true_lat[k]),
+                true_lon_rad=float(true_lon[k]),
+                true_height_m=float(true_h[k]),
+            ),
+            name="pf_position_error_ned_m",
         )
 
     return err
@@ -1016,6 +1083,26 @@ def ins_position_error_metrics_from_result(
     return PositionErrorMetrics.from_error_series(err)
 
 
+def pf_position_error_metrics_from_result(
+    result: ScenarioSimulationResult,
+) -> Optional[PositionErrorMetrics]:
+    """
+    Build PF position error metrics against truth.
+
+    Returns
+    -------
+    PositionErrorMetrics or None
+        None when no PF history exists.
+    """
+    if len(result.estimators.pf_updates) == 0:
+        return None
+    err = pf_position_error_history_from_truth(
+        result.truth,
+        result.estimators.pf_updates,
+    )
+    return PositionErrorMetrics.from_error_series(err)
+
+
 def integrity_metrics_from_result(
     result: ScenarioSimulationResult,
 ) -> Optional[IntegrityMetricsSummary]:
@@ -1059,6 +1146,7 @@ def scenario_metrics_from_result(
         imu_gyro_error=gyro_metrics,
         imu_accel_error=accel_metrics,
         ins_position_error=ins_position_error_metrics_from_result(result),
+        pf_position_error=pf_position_error_metrics_from_result(result),
         integrity=integrity_metrics_from_result(result),
     )
 
@@ -1087,6 +1175,9 @@ __all__ = [
     "mean_error",
     "median_absolute_error",
     "percentile_absolute_error",
+    "pf_position_error_history_from_truth",
+    "pf_position_error_metrics_from_result",
+    "pf_update_times",
     "radial_error_series",
     "root_mean_square_error",
     "scenario_metrics_from_result",

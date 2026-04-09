@@ -45,6 +45,7 @@ from typing import Optional
 import numpy as np
 from numpy.typing import NDArray
 
+from ..analysis.observability import ObservabilitySnapshot
 from .error_state_ins import (
     ERROR_STATE_SIZE,
     ERR_POS,
@@ -126,6 +127,17 @@ class DirectionalFeedbackSpec:
         best-constrained just because depth aiding has already made it tight,
         which is a degenerate failure mode of the naive 3D eigendecomposition.
         Vertical aiding should be handled independently by the depth sensor.
+    require_observability_recommended : bool, default=False
+        When True, require the online observability analyzer to recommend that
+        feedback is appropriate at the current step.
+    min_observable_rank : int or None, default=None
+        Optional lower bound on the online observability rank.
+    min_information_density : float or None, default=None
+        Optional lower bound on the online observability information-density
+        metric.
+    min_observability_gradient_norm : float or None, default=None
+        Optional lower bound on the horizontal gravity-gradient norm from the
+        observability analyzer.
     """
 
     # Defaults are tuned as a SAFE NO-OP against the current maritime_baseline
@@ -146,6 +158,10 @@ class DirectionalFeedbackSpec:
     num_directions: int = 1
     nis_threshold: Optional[float] = None
     horizontal_only: bool = True
+    require_observability_recommended: bool = False
+    min_observable_rank: Optional[int] = None
+    min_information_density: Optional[float] = None
+    min_observability_gradient_norm: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -160,6 +176,23 @@ class DirectionalFeedbackSpec:
         self.adaptive_inflation = bool(self.adaptive_inflation)
         self.num_directions = max(1, min(3, int(self.num_directions)))
         self.horizontal_only = bool(self.horizontal_only)
+        self.require_observability_recommended = bool(
+            self.require_observability_recommended
+        )
+        if self.min_observable_rank is not None:
+            self.min_observable_rank = int(self.min_observable_rank)
+            if self.min_observable_rank < 1 or self.min_observable_rank > 3:
+                raise ValueError("min_observable_rank must be in {1, 2, 3}.")
+        if self.min_information_density is not None:
+            self.min_information_density = float(self.min_information_density)
+        if self.min_observability_gradient_norm is not None:
+            self.min_observability_gradient_norm = float(
+                self.min_observability_gradient_norm
+            )
+            if self.min_observability_gradient_norm < 0.0:
+                raise ValueError(
+                    "min_observability_gradient_norm must be nonnegative when provided."
+                )
 
 
 @dataclass
@@ -193,6 +226,14 @@ class DirectionalFeedbackDiagnostics:
         Number of consecutive informative updates seen so far.
     inflation_applied : float
         Actual covariance inflation applied to the measurement.
+    observable_rank : int or None
+        Online observability rank if available.
+    information_density : float or None
+        Online information-density metric if available.
+    gradient_norm_horizontal : float or None
+        Horizontal gravity-gradient norm if available.
+    observability_feedback_recommended : bool or None
+        Recommendation flag from the observability analyzer if available.
     """
 
     eigenvalues_ned_m2: FloatArray
@@ -207,6 +248,10 @@ class DirectionalFeedbackDiagnostics:
     rejection_reason: Optional[str]
     consecutive_informative: int
     inflation_applied: float
+    observable_rank: Optional[int] = None
+    information_density: Optional[float] = None
+    gradient_norm_horizontal: Optional[float] = None
+    observability_feedback_recommended: Optional[bool] = None
 
 
 @dataclass
@@ -331,6 +376,7 @@ class DirectionalFeedbackController:
         *,
         num_particles: int,
         time_s: Optional[float] = None,
+        observability_snapshot: Optional[ObservabilitySnapshot] = None,
     ) -> DirectionalFeedbackResult:
         """
         Evaluate whether directional feedback should be injected and, if so,
@@ -346,6 +392,10 @@ class DirectionalFeedbackController:
             Total particle count (for ESS normalization).
         time_s : float, optional
             Timestamp.
+        observability_snapshot : ObservabilitySnapshot, optional
+            Online observability analysis aligned to the current PF update.
+            When the spec enables observability-based gates, the absence of
+            this snapshot suppresses feedback.
 
         Returns
         -------
@@ -432,6 +482,20 @@ class DirectionalFeedbackController:
 
         pf_ins_ratio = projected_variance / max(ins_projected_variance, 1.0e-10)
 
+        observable_rank = None
+        information_density = None
+        gradient_norm_horizontal = None
+        observability_feedback_recommended = None
+        if observability_snapshot is not None:
+            observable_rank = int(observability_snapshot.observable_rank)
+            information_density = float(observability_snapshot.information_density)
+            gradient_norm_horizontal = float(
+                observability_snapshot.gradient_norm_horizontal
+            )
+            observability_feedback_recommended = bool(
+                observability_snapshot.feedback_recommended
+            )
+
         # --- Gate evaluation ---
         feedback_allowed = True
         rejection_reason: Optional[str] = None
@@ -478,6 +542,80 @@ class DirectionalFeedbackController:
                 f"max={self.spec.min_pf_ins_covariance_ratio:.3f}"
             )
 
+        elif (
+            self.spec.require_observability_recommended
+            and observability_snapshot is None
+        ):
+            feedback_allowed = False
+            rejection_reason = "observability_missing"
+
+        elif (
+            self.spec.require_observability_recommended
+            and not bool(observability_feedback_recommended)
+        ):
+            feedback_allowed = False
+            rejection_reason = "observability_feedback_not_recommended"
+
+        elif (
+            self.spec.min_observable_rank is not None
+            and observability_snapshot is None
+        ):
+            feedback_allowed = False
+            rejection_reason = "observability_missing"
+
+        elif (
+            self.spec.min_observable_rank is not None
+            and int(observable_rank) < self.spec.min_observable_rank
+        ):
+            feedback_allowed = False
+            rejection_reason = (
+                f"observable_rank={int(observable_rank)} < "
+                f"min={self.spec.min_observable_rank}"
+            )
+
+        elif (
+            self.spec.min_information_density is not None
+            and observability_snapshot is None
+        ):
+            feedback_allowed = False
+            rejection_reason = "observability_missing"
+
+        elif (
+            self.spec.min_information_density is not None
+            and (
+                information_density is None
+                or not np.isfinite(information_density)
+                or information_density < self.spec.min_information_density
+            )
+        ):
+            density_str = "nan" if information_density is None else f"{information_density:.2f}"
+            feedback_allowed = False
+            rejection_reason = (
+                f"information_density={density_str} < "
+                f"min={self.spec.min_information_density:.2f}"
+            )
+
+        elif (
+            self.spec.min_observability_gradient_norm is not None
+            and observability_snapshot is None
+        ):
+            feedback_allowed = False
+            rejection_reason = "observability_missing"
+
+        elif (
+            self.spec.min_observability_gradient_norm is not None
+            and (
+                gradient_norm_horizontal is None
+                or gradient_norm_horizontal < self.spec.min_observability_gradient_norm
+            )
+        ):
+            grad_str = "nan" if gradient_norm_horizontal is None else f"{gradient_norm_horizontal:.3e}"
+            feedback_allowed = False
+            rejection_reason = (
+                f"gradient_norm={grad_str} < "
+                f"min={self.spec.min_observability_gradient_norm:.3e}"
+            )
+
         # Update persistence counter
         if feedback_allowed:
             self._consecutive_informative += 1
@@ -520,6 +658,10 @@ class DirectionalFeedbackController:
             rejection_reason=rejection_reason,
             consecutive_informative=self._consecutive_informative,
             inflation_applied=inflation,
+            observable_rank=observable_rank,
+            information_density=information_density,
+            gradient_norm_horizontal=gradient_norm_horizontal,
+            observability_feedback_recommended=observability_feedback_recommended,
         )
 
         if not feedback_allowed:
@@ -621,6 +763,10 @@ def summarize_directional_feedback(result: DirectionalFeedbackResult) -> dict:
         "consecutive_informative": d.consecutive_informative,
         "inflation_applied": d.inflation_applied,
         "constrained_direction_ned": d.constrained_direction_ned.tolist(),
+        "observable_rank": d.observable_rank,
+        "information_density": d.information_density,
+        "gradient_norm_horizontal": d.gradient_norm_horizontal,
+        "observability_feedback_recommended": d.observability_feedback_recommended,
     }
     if result.fusion_result is not None:
         summary["nis"] = result.fusion_result.nis

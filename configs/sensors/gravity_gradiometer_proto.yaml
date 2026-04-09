@@ -1,0 +1,25 @@
+{
+  "name": "gravity_gradiometer_proto",
+  "noise_density_per_s2_per_sqrt_hz": [
+    1.0e-08,
+    1.0e-08
+  ],
+  "bias_random_walk_per_s2_per_sqrt_s": [
+    2.5e-10,
+    2.5e-10
+  ],
+  "turn_on_bias_std_per_s2": [
+    2.5e-09,
+    2.5e-09
+  ],
+  "fixed_bias_per_s2": [
+    0.0,
+    0.0
+  ],
+  "scale_factor_error_ppm": [
+    0.0,
+    0.0
+  ],
+  "max_abs_per_s2": 1.0e-05,
+  "supports_full_tensor": false
+}

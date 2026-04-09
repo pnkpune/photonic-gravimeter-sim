@@ -72,7 +72,7 @@ Conventions
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -212,6 +212,47 @@ class ObservabilitySnapshot:
     information_density: float
     observable_rank: int
     feedback_recommended: bool
+
+
+def summarize_observability_snapshot(
+    snapshot: ObservabilitySnapshot,
+) -> dict[str, Any]:
+    """
+    Convert an observability snapshot into a JSON-friendly summary.
+
+    Notes
+    -----
+    `information_density` can be non-finite during the earliest steps before the
+    Gramian accumulates meaningful rank. Those cases are exported as ``None`` so
+    downstream JSON consumers do not need to special-case infinities.
+    """
+    info_density = float(snapshot.information_density)
+    if not np.isfinite(info_density):
+        info_value: float | None = None
+    else:
+        info_value = info_density
+
+    return {
+        "time_s": float(snapshot.time_s),
+        "gradient_ned_mps2_per_m": np.asarray(
+            snapshot.gradient_ned,
+            dtype=np.float64,
+        ).tolist(),
+        "gradient_norm_horizontal_mps2_per_m": float(
+            snapshot.gradient_norm_horizontal,
+        ),
+        "gramian_eigenvalues": np.asarray(
+            snapshot.gramian_eigenvalues,
+            dtype=np.float64,
+        ).tolist(),
+        "gramian_eigenvectors": np.asarray(
+            snapshot.gramian_eigenvectors,
+            dtype=np.float64,
+        ).tolist(),
+        "information_density": info_value,
+        "observable_rank": int(snapshot.observable_rank),
+        "feedback_recommended": bool(snapshot.feedback_recommended),
+    }
 
 
 class ObservabilityAnalyzer:
@@ -421,4 +462,5 @@ __all__ = [
     "compute_trajectory_observability",
     "gravity_map_gradient_ned",
     "gravity_map_gradient_norm",
+    "summarize_observability_snapshot",
 ]
