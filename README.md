@@ -13,7 +13,7 @@ The current code path supports this end-to-end flow:
 3. simulate IMU, scalar gravimeter, depth, and velocity-aid measurements
 4. propagate a local-level error-state INS
 5. apply constrained aiding updates and either particle-filter or sequence-based gravity map matching
-6. optionally analyze local gravity observability and apply directional PF feedback policies
+6. optionally analyze local gravity observability, run observe-only sequence matching, and evaluate experimental feedback policies
 7. compute navigation and integrity metrics
 8. save run archives, JSON summaries, figures, and a markdown report
 
@@ -21,6 +21,7 @@ The main validated runnable entry points are:
 
 - [scripts/run_single_scenario.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_single_scenario.py)
 - [scripts/generate_validation_report.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/generate_validation_report.py)
+- [scripts/benchmark_filters.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/benchmark_filters.py)
 
 ## Current Validated Baseline
 
@@ -61,7 +62,8 @@ Latest repo state beyond the validated baseline:
 - the PF now exports posterior NED eigenvalues/eigenvectors to support geometry-aware feedback decisions
 - the runner now supports an observability-aware directional PF-to-INS feedback path
 - the repo now also includes a sliding-window Viterbi/HMM-style gravity sequence matcher as an alternative map-matching path
-- this directional feedback machinery is implemented, but it is not yet claimed as part of the validated baseline
+- the repo now also includes an experimental delayed sequence-to-INS feedback path
+- neither feedback path is currently claimed as part of the validated baseline
 
 ## Priority 4 Outcome
 
@@ -91,6 +93,7 @@ Delayed sequence-feedback status:
 - the repo now contains an experimental delayed sequence-to-INS horizontal feedback controller
 - the default policy is intentionally conservative and currently fires zero updates on the maritime baseline
 - a bounded tuning pass showed that simple current-state bias transfer from delayed sequence estimates is not safe enough yet: active variants degraded INS RMSE from `103.5 m` to roughly `214.6 m`, `828.2 m`, and `7.2 km`
+- the current repo conclusion is that this controller is useful as a negative result and benchmark path, not as a production feedback design
 - the correct next closed-loop design is therefore not more gain tuning; it is a replay/smoother-aware delayed-update architecture
 
 The full saved report is:
@@ -267,7 +270,7 @@ The current non-empty regression tests are:
 - [test_observability.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_observability.py)
 - [test_sequence_match.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_sequence_match.py)
 
-The current regression suite completes with `27 passed`.
+The current regression suite completes with `28 passed`.
 
 ## Current Limits
 
@@ -280,6 +283,7 @@ What is implemented:
 - particle-filter gravity map matching
 - sequence-based gravity map matching
 - observability analysis and directional-feedback policy infrastructure
+- an experimental delayed sequence-feedback path with benchmarked failure envelopes
 - integrity monitoring, run logging, metrics, plots, and a reproducible validation report
 - a stable single-scenario maritime baseline
 
@@ -301,8 +305,10 @@ Today this repo is best understood as a validated gravity-aided navigation simul
 
 - testing inertial-plus-gravity aiding behavior against a controlled truth model
 - benchmarking IMU-only versus aided navigation
+- benchmarking PF versus sequence-based gravity map matching under scalar and scalar-plus-gradient likelihoods
 - generating reproducible figures, metrics, and report artifacts
 - experimenting with observability-aware PF feedback policies without changing the validated observe-only baseline
+- preserving negative results for delayed sequence feedback instead of hiding them behind retuning
 - serving as the base for later Monte Carlo studies and gravity-feedback tuning
 
 It is not yet a finished research product for arbitrary scenarios or a fully validated closed-loop gravity-feedback system.
