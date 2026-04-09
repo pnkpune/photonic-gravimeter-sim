@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark observe-only vs gradient-aided vs directional+gradient PF modes."""
+"""Benchmark PF and sequence-based map-matching modes."""
 from __future__ import annotations
 
 import json
@@ -45,6 +45,7 @@ def _run_one(
     metrics = json.loads(metrics_path.read_text())
     pos = metrics["ins_position_error"]
     pf = metrics.get("pf_position_error") or {}
+    seq = metrics.get("sequence_position_error") or {}
     integrity = metrics.get("integrity") or {}
     directional_applied = None
     directional_allowed = None
@@ -65,6 +66,8 @@ def _run_one(
         "vertical_rmse_m": pos["vertical_rmse_m"],
         "pf_horizontal_rmse_m": pf.get("horizontal_rmse_m"),
         "pf_cep95_m": pf.get("cep95_m"),
+        "sequence_horizontal_rmse_m": seq.get("horizontal_rmse_m"),
+        "sequence_cep95_m": seq.get("cep95_m"),
         "hmi_horizontal": integrity.get("fraction_hazardously_misleading_horizontal"),
         "directional_allowed_updates": directional_allowed,
         "directional_applied_updates": directional_applied,
@@ -84,6 +87,14 @@ def main() -> int:
         {
             "label": "directional_plus_gradient",
             "extra_flags": ["--use-gradiometer", "--use-directional-feedback"],
+        },
+        {
+            "label": "sequence_only",
+            "extra_flags": ["--map-matcher", "sequence"],
+        },
+        {
+            "label": "sequence_plus_gradient",
+            "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
         },
     ]
 
@@ -105,18 +116,20 @@ def main() -> int:
 
     print("\n=== SUMMARY ===")
     print(
-        f"{'label':<28} {'INS_RMSE':>10} {'PF_RMSE':>10} {'INS_CEP95':>10} "
-        f"{'PF_CEP95':>10} {'HMI%':>10} {'PF_APPLY':>10}"
+        f"{'label':<28} {'INS_RMSE':>10} {'PF_RMSE':>10} {'SEQ_RMSE':>10} "
+        f"{'INS_CEP95':>10} {'PF_CEP95':>10} {'SEQ_CEP95':>10} {'HMI%':>10} {'PF_APPLY':>10}"
     )
     for row in rows:
         hmi = row["hmi_horizontal"]
         hmi_pct = float('nan') if hmi is None else 100.0 * float(hmi)
         pf_rmse = float("nan") if row["pf_horizontal_rmse_m"] is None else float(row["pf_horizontal_rmse_m"])
         pf_cep95 = float("nan") if row["pf_cep95_m"] is None else float(row["pf_cep95_m"])
+        seq_rmse = float("nan") if row["sequence_horizontal_rmse_m"] is None else float(row["sequence_horizontal_rmse_m"])
+        seq_cep95 = float("nan") if row["sequence_cep95_m"] is None else float(row["sequence_cep95_m"])
         pf_applied = float("nan") if row["directional_applied_updates"] is None else float(row["directional_applied_updates"])
         print(
-            f"{row['label']:<28} {row['horizontal_rmse_m']:10.3f} {pf_rmse:10.3f} "
-            f"{row['cep95_m']:10.3f} {pf_cep95:10.3f} {hmi_pct:10.3f} {pf_applied:10.0f}"
+            f"{row['label']:<28} {row['horizontal_rmse_m']:10.3f} {pf_rmse:10.3f} {seq_rmse:10.3f} "
+            f"{row['cep95_m']:10.3f} {pf_cep95:10.3f} {seq_cep95:10.3f} {hmi_pct:10.3f} {pf_applied:10.0f}"
         )
     print(f"\nSaved summary: {summary_path}")
     return 0

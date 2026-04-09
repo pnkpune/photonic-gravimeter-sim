@@ -70,6 +70,10 @@ from ..estimators.feedback_policy import (
     DirectionalFeedbackSpec,
     summarize_directional_feedback,
 )
+from ..estimators.gravity_sequence_match import (
+    GravitySequenceMatcher,
+    GravitySequenceMatcherSpec,
+)
 from ..estimators.fusion import (
     apply_depth_sensor_measurement,
     apply_depth_sensor_measurement_height_only,
@@ -356,10 +360,15 @@ class MapMatchFeedbackConfig:
     ----------
     enabled : bool, default=True
         Enable the PF map-matching layer.
+    matcher : {"pf", "sequence"}, default="pf"
+        Which map-matching algorithm to run.
     schedule : PeriodicUpdateSchedule
-        Triggering policy for PF gravity updates.
+        Triggering policy for map-matching gravity updates.
     pf_spec : MapMatchPFSpec
-        PF algorithm specification.
+        PF algorithm specification, used only when ``matcher="pf"``.
+    sequence_spec : GravitySequenceMatcherSpec
+        Sequence-matching algorithm specification, used only when
+        ``matcher="sequence"``.
     gravity_meas_std_mps2 : float, optional
         Optional measurement standard deviation override for the gravity update.
     use_depth_measurement : bool, default=True
@@ -392,8 +401,12 @@ class MapMatchFeedbackConfig:
     """
 
     enabled: bool = True
+    matcher: str = "pf"
     schedule: PeriodicUpdateSchedule = field(default_factory=PeriodicUpdateSchedule)
     pf_spec: MapMatchPFSpec = field(default_factory=MapMatchPFSpec)
+    sequence_spec: GravitySequenceMatcherSpec = field(
+        default_factory=GravitySequenceMatcherSpec
+    )
     gravity_meas_std_mps2: Optional[float] = None
     use_depth_measurement: bool = True
     use_last_depth_measurement: bool = True
@@ -411,6 +424,9 @@ class MapMatchFeedbackConfig:
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
+        self.matcher = str(self.matcher).strip().lower()
+        if self.matcher not in {"pf", "sequence"}:
+            raise ValueError("matcher must be 'pf' or 'sequence'.")
         if self.gravity_meas_std_mps2 is not None:
             self.gravity_meas_std_mps2 = _positive_scalar(
                 self.gravity_meas_std_mps2,
@@ -439,6 +455,15 @@ class MapMatchFeedbackConfig:
                 self.gradient_meas_std_per_s2,
                 name="gradient_meas_std_per_s2",
             )
+        if self.matcher != "pf":
+            if self.inject_position_to_ins:
+                raise ValueError(
+                    "inject_position_to_ins is only supported with matcher='pf'."
+                )
+            if self.use_directional_feedback:
+                raise ValueError(
+                    "use_directional_feedback is only supported with matcher='pf'."
+                )
 
 
 @dataclass
@@ -944,36 +969,43 @@ class ScenarioSimulationRunner:
         ins = self._build_initial_ins(truth, imu_sensor)
 
         pf: Optional[GravityMapParticleFilter] = None
+        sequence_matcher: Optional[GravitySequenceMatcher] = None
         directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
         observability: Optional[ObservabilityAnalyzer] = None
         resolved_map = resolve_map_model(map_model)
         if cfg.map_match.enabled and gravimeter_sensor is not None and resolved_map is not None:
-            pf = GravityMapParticleFilter(
-                cfg.map_match.pf_spec,
-                resolved_map,
-                rng=pf_rng,
-            )
-            pf.reset_from_ins(ins)
-            if cfg.map_match.use_directional_feedback:
-                directional_feedback_ctrl = DirectionalFeedbackController(
-                    cfg.map_match.directional_feedback_spec,
-                )
-            if cfg.observability.enabled:
-                observability = ObservabilityAnalyzer(
+            if cfg.map_match.matcher == "pf":
+                pf = GravityMapParticleFilter(
+                    cfg.map_match.pf_spec,
                     resolved_map,
-                    window_size=cfg.observability.window_size,
-                    gravity_noise_std_mps2=(
-                        (
-                            pf.spec.gravity_meas_std_mps2
-                            if cfg.map_match.gravity_meas_std_mps2 is None
-                            else cfg.map_match.gravity_meas_std_mps2
-                        )
-                        if cfg.observability.gravity_noise_std_mps2 is None
-                        else cfg.observability.gravity_noise_std_mps2
-                    ),
-                    eigenvalue_threshold=cfg.observability.eigenvalue_threshold,
-                    min_rank_for_feedback=cfg.observability.min_rank_for_feedback,
-                    min_gradient_norm=cfg.observability.min_gradient_norm,
+                    rng=pf_rng,
+                )
+                pf.reset_from_ins(ins)
+                if cfg.map_match.use_directional_feedback:
+                    directional_feedback_ctrl = DirectionalFeedbackController(
+                        cfg.map_match.directional_feedback_spec,
+                    )
+                if cfg.observability.enabled:
+                    observability = ObservabilityAnalyzer(
+                        resolved_map,
+                        window_size=cfg.observability.window_size,
+                        gravity_noise_std_mps2=(
+                            (
+                                pf.spec.gravity_meas_std_mps2
+                                if cfg.map_match.gravity_meas_std_mps2 is None
+                                else cfg.map_match.gravity_meas_std_mps2
+                            )
+                            if cfg.observability.gravity_noise_std_mps2 is None
+                            else cfg.observability.gravity_noise_std_mps2
+                        ),
+                        eigenvalue_threshold=cfg.observability.eigenvalue_threshold,
+                        min_rank_for_feedback=cfg.observability.min_rank_for_feedback,
+                        min_gradient_norm=cfg.observability.min_gradient_norm,
+                    )
+            else:
+                sequence_matcher = GravitySequenceMatcher(
+                    cfg.map_match.sequence_spec,
+                    resolved_map,
                 )
 
         integrity = self._make_integrity_monitor()
@@ -1289,6 +1321,31 @@ class ScenarioSimulationRunner:
                                 },
                             )
 
+            elif sequence_matcher is not None and gravimeter_meas is not None:
+                if cfg.map_match.schedule.should_trigger(k, t_now, t_prev):
+                    depth_for_matcher: Optional[DepthMeasurement] = None
+                    if cfg.map_match.use_depth_measurement:
+                        if current_depth_measurement is not None:
+                            depth_for_matcher = current_depth_measurement
+                        elif cfg.map_match.use_last_depth_measurement:
+                            depth_for_matcher = last_depth_measurement
+
+                    seq_updates = sequence_matcher.update_from_gravimeter_measurement(
+                        gravimeter_meas,
+                        gravity_meas_std_mps2=cfg.map_match.gravity_meas_std_mps2,
+                        ins_or_state=ins,
+                        depth_measurement=depth_for_matcher,
+                        measured_gradient_per_s2=(
+                            None
+                            if gradiometer_meas is None
+                            else np.asarray(gradiometer_meas.value_per_s2, dtype=np.float64)
+                        ),
+                        gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
+                        reference_surface_height_m=cfg.reference_surface_height_m,
+                    )
+                    if len(seq_updates) > 0:
+                        estimators.sequence_updates.extend(seq_updates)
+
             # ----------------------------------------------------------
             # Log estimator state after all current-step updates
             # ----------------------------------------------------------
@@ -1303,6 +1360,9 @@ class ScenarioSimulationRunner:
                     time_s=t_now,
                 )
                 estimators.integrity_snapshots.append(snap)
+
+        if sequence_matcher is not None:
+            estimators.sequence_updates.extend(sequence_matcher.finalize())
 
         return ScenarioSimulationResult(
             truth=truth.copy(),
@@ -1474,6 +1534,7 @@ __all__ = [
     "SimulationRunnerConfig",
     "VelocityAidFusionConfig",
     "GravityGradiometerSpec",
+    "GravitySequenceMatcherSpec",
     "build_initial_covariance_geodetic",
     "process_noise_from_imu_spec",
     "resolve_map_model",

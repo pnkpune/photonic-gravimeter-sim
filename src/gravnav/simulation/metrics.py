@@ -51,6 +51,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ..estimators.error_state_ins import ErrorStateINSState
+from ..estimators.gravity_sequence_match import SequenceMatchUpdateResult
 from ..estimators.integrity import IntegritySnapshot, geodetic_position_error_ned
 from ..estimators.map_match_pf import MapMatchPFUpdateResult
 from ..truth.trajectory import TruthTrajectory
@@ -763,6 +764,8 @@ class ScenarioMetricsSummary:
         Number of INS states logged.
     num_pf_updates : int
         Number of PF updates logged.
+    num_sequence_updates : int
+        Number of sequence-matcher updates logged.
     num_integrity_snapshots : int
         Number of integrity snapshots logged.
     gravimeter_error : ScalarErrorMetrics or None
@@ -779,6 +782,8 @@ class ScenarioMetricsSummary:
         INS position error summary against truth.
     pf_position_error : PositionErrorMetrics or None
         PF position error summary against truth.
+    sequence_position_error : PositionErrorMetrics or None
+        Sequence-matcher position error summary against truth.
     integrity : IntegrityMetricsSummary or None
         Integrity-history summary.
     """
@@ -787,6 +792,7 @@ class ScenarioMetricsSummary:
     num_truth_samples: int
     num_ins_states: int
     num_pf_updates: int
+    num_sequence_updates: int
     num_integrity_snapshots: int
 
     gravimeter_error: Optional[ScalarErrorMetrics] = None
@@ -796,6 +802,7 @@ class ScenarioMetricsSummary:
     imu_accel_error: Optional[VectorErrorMetrics] = None
     ins_position_error: Optional[PositionErrorMetrics] = None
     pf_position_error: Optional[PositionErrorMetrics] = None
+    sequence_position_error: Optional[PositionErrorMetrics] = None
     integrity: Optional[IntegrityMetricsSummary] = None
 
     def to_mapping(self) -> dict[str, Any]:
@@ -869,6 +876,22 @@ def pf_update_times(pf_updates: Sequence[MapMatchPFUpdateResult]) -> FloatArray:
     """
     out = np.full(len(pf_updates), np.nan, dtype=np.float64)
     for k, update in enumerate(pf_updates):
+        time_s = getattr(update, "time_s", None)
+        if time_s is not None:
+            out[k] = float(time_s)
+    return out
+
+
+def sequence_update_times(
+    sequence_updates: Sequence[SequenceMatchUpdateResult],
+) -> FloatArray:
+    """
+    Extract timestamps from a sequence of sequence-matcher update results.
+
+    Missing timestamps are recorded as NaN.
+    """
+    out = np.full(len(sequence_updates), np.nan, dtype=np.float64)
+    for k, update in enumerate(sequence_updates):
         time_s = getattr(update, "time_s", None)
         if time_s is not None:
             out[k] = float(time_s)
@@ -973,6 +996,55 @@ def pf_position_error_history_from_truth(
                 true_height_m=float(true_h[k]),
             ),
             name="pf_position_error_ned_m",
+        )
+
+    return err
+
+
+def sequence_position_error_history_from_truth(
+    truth: TruthTrajectory,
+    sequence_updates: Sequence[SequenceMatchUpdateResult],
+) -> FloatArray:
+    """
+    Build local NED sequence-matcher position error history against truth.
+
+    Parameters
+    ----------
+    truth : TruthTrajectory
+        Truth trajectory.
+    sequence_updates : sequence[SequenceMatchUpdateResult]
+        Logged delayed sequence-matcher updates.
+
+    Returns
+    -------
+    np.ndarray, shape (N, 3)
+        NED position errors `[dN, dE, dD]` [m].
+    """
+    n = len(sequence_updates)
+    if n == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    t_seq = sequence_update_times(sequence_updates)
+    if np.any(~np.isfinite(t_seq)):
+        raise ValueError(
+            "All sequence updates must have finite time_s for truth comparison."
+        )
+
+    true_lat, true_lon, true_h = interpolate_truth_geodetic(truth, t_seq)
+    err = np.empty((n, 3), dtype=np.float64)
+
+    for k, update in enumerate(sequence_updates):
+        est = update.estimate
+        err[k] = _vec3(
+            geodetic_position_error_ned(
+                estimated_lat_rad=float(est.lat_rad),
+                estimated_lon_rad=float(est.lon_rad),
+                estimated_height_m=float(est.height_m),
+                true_lat_rad=float(true_lat[k]),
+                true_lon_rad=float(true_lon[k]),
+                true_height_m=float(true_h[k]),
+            ),
+            name="sequence_position_error_ned_m",
         )
 
     return err
@@ -1103,6 +1175,26 @@ def pf_position_error_metrics_from_result(
     return PositionErrorMetrics.from_error_series(err)
 
 
+def sequence_position_error_metrics_from_result(
+    result: ScenarioSimulationResult,
+) -> Optional[PositionErrorMetrics]:
+    """
+    Build sequence-matcher position error metrics against truth.
+
+    Returns
+    -------
+    PositionErrorMetrics or None
+        None when no sequence history exists.
+    """
+    if len(result.estimators.sequence_updates) == 0:
+        return None
+    err = sequence_position_error_history_from_truth(
+        result.truth,
+        result.estimators.sequence_updates,
+    )
+    return PositionErrorMetrics.from_error_series(err)
+
+
 def integrity_metrics_from_result(
     result: ScenarioSimulationResult,
 ) -> Optional[IntegrityMetricsSummary]:
@@ -1139,6 +1231,7 @@ def scenario_metrics_from_result(
         num_truth_samples=len(result.truth),
         num_ins_states=len(result.estimators.ins_states),
         num_pf_updates=len(result.estimators.pf_updates),
+        num_sequence_updates=len(result.estimators.sequence_updates),
         num_integrity_snapshots=len(result.estimators.integrity_snapshots),
         gravimeter_error=gravimeter_error_metrics_from_result(result),
         depth_error=depth_error_metrics_from_result(result),
@@ -1147,6 +1240,7 @@ def scenario_metrics_from_result(
         imu_accel_error=accel_metrics,
         ins_position_error=ins_position_error_metrics_from_result(result),
         pf_position_error=pf_position_error_metrics_from_result(result),
+        sequence_position_error=sequence_position_error_metrics_from_result(result),
         integrity=integrity_metrics_from_result(result),
     )
 
@@ -1181,6 +1275,9 @@ __all__ = [
     "radial_error_series",
     "root_mean_square_error",
     "scenario_metrics_from_result",
+    "sequence_position_error_history_from_truth",
+    "sequence_position_error_metrics_from_result",
+    "sequence_update_times",
     "velocity_aid_error_metrics_from_result",
     "vertical_error_series",
 ]

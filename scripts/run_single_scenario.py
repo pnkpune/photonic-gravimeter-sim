@@ -49,6 +49,7 @@ from gravnav.simulation.results import SimulationMetadata
 from gravnav.simulation.runner import (
     DepthFusionConfig,
     IntegrityMonitorConfig,
+    GravitySequenceMatcherSpec,
     MapMatchFeedbackConfig,
     PeriodicUpdateSchedule,
     ScenarioSimulationRunner,
@@ -280,6 +281,7 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
     )
     map_match = MapMatchFeedbackConfig(
         enabled=not args.disable_map_match,
+        matcher=args.map_matcher,
         schedule=PeriodicUpdateSchedule(every_steps=args.map_match_every_steps),
         pf_spec=MapMatchPFSpec(
             num_particles=args.pf_particles,
@@ -287,6 +289,23 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
             process_position_rw_std_m_per_sqrt_s=(1.0, 1.0, 0.1),
             rejuvenation_std_m=(2.0, 2.0, 0.2),
             ins_position_prior_std_m=(50.0, 50.0, 5.0),
+        ),
+        sequence_spec=GravitySequenceMatcherSpec(
+            window_size=args.sequence_window_size,
+            grid_half_span_m=(
+                args.sequence_grid_half_span_north_m,
+                args.sequence_grid_half_span_east_m,
+            ),
+            grid_spacing_m=args.sequence_grid_spacing_m,
+            transition_std_m=args.sequence_transition_std_m,
+            center_prior_std_m=args.sequence_center_prior_std_m,
+            gravity_meas_std_mps2=args.pf_gravity_std_mps2,
+            gradient_meas_std_per_s2=(
+                None
+                if getattr(args, "pf_gradient_std_per_s2", None) is None
+                else float(args.pf_gradient_std_per_s2)
+            ),
+            height_std_m=args.sequence_height_std_m,
         ),
         gravity_meas_std_mps2=args.pf_gravity_std_mps2,
         depth_meas_std_m=args.pf_depth_std_m,
@@ -392,16 +411,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Extra geodetic margin in degrees around the truth route for synthetic maps.",
     )
     parser.add_argument(
+        "--map-matcher",
+        choices=("pf", "sequence"),
+        default="pf",
+        help="Map-matching algorithm to run.",
+    )
+    parser.add_argument(
         "--pf-particles",
         type=int,
         default=128,
         help="Particle count for the map-matching PF.",
     )
     parser.add_argument(
+        "--sequence-window-size",
+        type=int,
+        default=9,
+        help="Sliding-window length for the sequence matcher.",
+    )
+    parser.add_argument(
+        "--sequence-grid-half-span-north-m",
+        type=float,
+        default=120.0,
+        help="North half-span of the sequence-matcher candidate grid in metres.",
+    )
+    parser.add_argument(
+        "--sequence-grid-half-span-east-m",
+        type=float,
+        default=120.0,
+        help="East half-span of the sequence-matcher candidate grid in metres.",
+    )
+    parser.add_argument(
+        "--sequence-grid-spacing-m",
+        type=float,
+        nargs=2,
+        default=(20.0, 20.0),
+        metavar=("DN", "DE"),
+        help="North/east candidate-grid spacing for the sequence matcher in metres.",
+    )
+    parser.add_argument(
+        "--sequence-transition-std-m",
+        type=float,
+        nargs=2,
+        default=(20.0, 20.0),
+        metavar=("TN", "TE"),
+        help="North/east transition standard deviation for the sequence matcher in metres.",
+    )
+    parser.add_argument(
+        "--sequence-center-prior-std-m",
+        type=float,
+        nargs=2,
+        default=(80.0, 80.0),
+        metavar=("PN", "PE"),
+        help="North/east soft prior standard deviation about the INS center for the sequence matcher in metres.",
+    )
+    parser.add_argument(
+        "--sequence-height-std-m",
+        type=float,
+        default=2.0,
+        help="Vertical covariance floor used by the sequence matcher in metres.",
+    )
+    parser.add_argument(
         "--map-match-every-steps",
         type=int,
         default=2,
-        help="Run one PF gravity update every N simulation steps.",
+        help="Run one map-matching gravity update every N simulation steps.",
     )
     parser.add_argument(
         "--depth-update-every-steps",
@@ -546,6 +619,14 @@ def _metrics_summary_lines(metrics: ScenarioMetricsSummary) -> list[str]:
         lines.append(
             f"PF CEP95: {metrics.pf_position_error.cep95_m:.3f} m"
         )
+    if metrics.sequence_position_error is not None:
+        lines.append(
+            "Sequence horizontal RMSE: "
+            f"{metrics.sequence_position_error.horizontal_rmse_m:.3f} m"
+        )
+        lines.append(
+            f"Sequence CEP95: {metrics.sequence_position_error.cep95_m:.3f} m"
+        )
 
     if metrics.integrity is not None:
         nis_fraction = float(metrics.integrity.fraction_nis_passed)
@@ -651,6 +732,7 @@ def main() -> int:
             },
             "map_match": {
                 "enabled": not args.disable_map_match,
+                "matcher": args.map_matcher,
                 "every_steps": int(args.map_match_every_steps),
                 "num_particles": int(args.pf_particles),
                 "gravity_std_mps2": float(args.pf_gravity_std_mps2),
@@ -661,6 +743,15 @@ def main() -> int:
                 ),
                 "use_gradiometer": bool(args.use_gradiometer),
                 "gradient_std_per_s2": float(args.pf_gradient_std_per_s2),
+                "sequence_window_size": int(args.sequence_window_size),
+                "sequence_grid_half_span_m": [
+                    float(args.sequence_grid_half_span_north_m),
+                    float(args.sequence_grid_half_span_east_m),
+                ],
+                "sequence_grid_spacing_m": list(args.sequence_grid_spacing_m),
+                "sequence_transition_std_m": list(args.sequence_transition_std_m),
+                "sequence_center_prior_std_m": list(args.sequence_center_prior_std_m),
+                "sequence_height_std_m": float(args.sequence_height_std_m),
             },
             "integrity": {
                 "enabled": not args.disable_integrity,
@@ -719,6 +810,7 @@ def main() -> int:
     print(f"Truth samples: {len(result.truth)}")
     print(f"INS states: {len(result.estimators.ins_states)}")
     print(f"PF updates: {len(result.estimators.pf_updates)}")
+    print(f"Sequence updates: {len(result.estimators.sequence_updates)}")
     print(f"Integrity snapshots: {len(result.estimators.integrity_snapshots)}")
     for line in _metrics_summary_lines(metrics):
         print(line)

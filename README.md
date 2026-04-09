@@ -12,7 +12,7 @@ The current code path supports this end-to-end flow:
 2. sample a synthetic or grid-based gravity-disturbance map along that trajectory
 3. simulate IMU, scalar gravimeter, depth, and velocity-aid measurements
 4. propagate a local-level error-state INS
-5. apply constrained aiding updates and particle-filter gravity map matching
+5. apply constrained aiding updates and either particle-filter or sequence-based gravity map matching
 6. optionally analyze local gravity observability and apply directional PF feedback policies
 7. compute navigation and integrity metrics
 8. save run archives, JSON summaries, figures, and a markdown report
@@ -60,7 +60,31 @@ Latest repo state beyond the validated baseline:
 - the repo now includes an observability analysis layer for gravity-information scoring along a trajectory
 - the PF now exports posterior NED eigenvalues/eigenvectors to support geometry-aware feedback decisions
 - the runner now supports an observability-aware directional PF-to-INS feedback path
+- the repo now also includes a sliding-window Viterbi/HMM-style gravity sequence matcher as an alternative map-matching path
 - this directional feedback machinery is implemented, but it is not yet claimed as part of the validated baseline
+
+## Priority 4 Outcome
+
+Priority 4 is now implemented as an observe-only alternative estimator path:
+
+- estimator: [gravity_sequence_match.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/gravity_sequence_match.py)
+- runner integration: [runner.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/runner.py)
+- benchmark entry point: [benchmark_filters.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/benchmark_filters.py)
+
+Current maritime baseline benchmark, seed `42`, with the current synthetic map and safe INS settings:
+
+| Matcher | Gradient | Map-matcher horizontal RMSE [m] | Map-matcher CEP95 [m] |
+| --- | --- | ---: | ---: |
+| PF | no | 98.943 | 180.590 |
+| PF | yes | 96.902 | 178.540 |
+| Sequence | no | 99.043 | 179.497 |
+| Sequence | yes | 92.808 | 168.130 |
+
+Important interpretation:
+
+- the validated INS baseline is unchanged; INS RMSE stays `103.512 m` because the sequence matcher is observe-only today
+- sequence matching with gradient is the best current map-matching estimator on this benchmark
+- this means Priority 4 is worth keeping as a first-class estimator path before attempting any delayed feedback design
 
 The full saved report is:
 
@@ -153,6 +177,8 @@ These conventions are used across the physics and navigation layers:
   Observability-aware directional PF-to-INS feedback gating, covariance inflation, persistence logic, and feedback diagnostics.
 - [integrity.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/integrity.py)
   NIS/NEES checks, protection-level calculations, alert-limit evaluation, and history monitoring.
+- [gravity_sequence_match.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/gravity_sequence_match.py)
+  Sliding-window discrete candidate-grid sequence matching with forward/backward marginals, Viterbi path extraction, and delayed sequence estimates.
 
 ### Analysis, Simulation And Plots
 
@@ -160,7 +186,7 @@ These conventions are used across the physics and navigation layers:
   Local gravity-gradient estimation, sliding-window observability Gramian tracking, eigenvalue analysis, information-density scoring, and feedback-recommendation diagnostics.
 
 - [runner.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/runner.py)
-  End-to-end single-scenario orchestration, including observe-only PF mode, legacy full-3D PF feedback, and the new directional-feedback hook.
+  End-to-end single-scenario orchestration, including observe-only PF mode, observe-only sequence mode, legacy full-3D PF feedback, and the directional-feedback hook.
 - [results.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/results.py)
   Typed result/log containers and JSON/NPZ persistence.
 - [metrics.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/simulation/metrics.py)
@@ -209,6 +235,12 @@ Generate the saved validation figures and report:
 python3 scripts/generate_validation_report.py
 ```
 
+Run the PF/sequence comparison benchmark:
+
+```bash
+python3 scripts/benchmark_filters.py
+```
+
 The default CLI path uses JSON configs under `configs/` and does not require PyYAML.
 
 ## Tests
@@ -223,8 +255,12 @@ The current non-empty regression tests are:
 - [test_error_state_ins.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_error_state_ins.py)
 - [test_imu.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_imu.py)
 - [test_cli_smoke.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_cli_smoke.py)
+- [test_gravity_gradiometer.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_gravity_gradiometer.py)
+- [test_map_match_pf.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_map_match_pf.py)
+- [test_observability.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_observability.py)
+- [test_sequence_match.py](/Users/pranav/Downloads/photonic-gravimeter-sim/tests/test_sequence_match.py)
 
-The latest stabilization pass completed with `14 passed` on the core regression suite.
+The current regression suite completes with `27 passed`.
 
 ## Current Limits
 
@@ -235,6 +271,7 @@ What is implemented:
 - IMU, gravimeter, depth, and velocity-aid sensor models
 - local-level INS propagation and constrained aiding fusion
 - particle-filter gravity map matching
+- sequence-based gravity map matching
 - observability analysis and directional-feedback policy infrastructure
 - integrity monitoring, run logging, metrics, plots, and a reproducible validation report
 - a stable single-scenario maritime baseline
@@ -243,11 +280,11 @@ What is not yet validated or still scaffold-only:
 
 - closed-loop PF-to-INS position feedback as part of the production baseline
 - the new observability-aware directional PF feedback path as a proven improvement over the observe-only baseline
+- delayed sequence-to-INS feedback as part of the production baseline
 - [sensor_plots.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/plots/sensor_plots.py)
 - [run_monte_carlo.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/run_monte_carlo.py)
 - [make_synthetic_map.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/make_synthetic_map.py)
-- [benchmark_filters.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/benchmark_filters.py)
-- broad sensor-specific and estimator-specific test coverage such as `test_gravimeter.py` and `test_map_match_pf.py`
+- broader sensor-specific and estimator-specific test coverage beyond the current core suite, especially `test_gravimeter.py`
 - YAML config population and the notebook layer
 - `pyproject.toml` packaging/setup wiring
 

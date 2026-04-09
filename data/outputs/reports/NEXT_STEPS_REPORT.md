@@ -2,7 +2,7 @@
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
 **Date: 2026-04-09**
-**Repo state: validated maritime baseline, PF feedback disabled, 14 tests passing**
+**Repo state: validated maritime baseline, PF feedback disabled, 27 tests passing**
 
 ---
 
@@ -155,6 +155,21 @@ Feeding this posterior back as a pseudo-position measurement treats a ridge as i
 
 **Files to modify:**
 - `src/gravnav/simulation/runner.py` — add sequence matcher as an alternative estimator path
+
+**Outcome (2026-04-09 benchmark, seed 42):** Implemented as `GravitySequenceMatcher` in `src/gravnav/estimators/gravity_sequence_match.py` and wired into `src/gravnav/simulation/runner.py`, `src/gravnav/simulation/results.py`, `src/gravnav/simulation/metrics.py`, `scripts/run_single_scenario.py`, and `scripts/benchmark_filters.py`. The first implementation is deliberately **observe-only**: it emits delayed trajectory estimates and metrics, but does not yet feed delayed corrections into the live INS.
+
+Benchmark on `maritime_baseline`:
+
+| Configuration | INS horizontal RMSE | Map-matcher horizontal RMSE | Map-matcher CEP95 | Finding |
+| --- | ---: | ---: | ---: | --- |
+| PF observe-only | 103.5 m | 98.94 m | 180.59 m | Reference PF result |
+| PF + gradient | 103.5 m | 96.90 m | 178.54 m | Best current PF result |
+| Sequence only | 103.5 m | 99.04 m | 179.50 m | Roughly ties scalar PF |
+| Sequence + gradient | 103.5 m | **92.81 m** | **168.13 m** | Best current map-matching estimator |
+
+**Interpretation:** Sequence matching is now justified as a first-class estimator path. History helps enough to beat the current PF on the map-matcher estimate itself, especially once gradient likelihood is included. But because the current implementation is observe-only, the INS metrics stay flat at the validated baseline. That means the next architectural step is **not** more pointwise PF tuning; it is designing a delayed sequence-to-INS feedback path that respects the delayed-estimate timing.
+
+**Decision:** Priority 4 is implemented and benchmarked successfully in observe-only mode. The next work should focus on delayed feedback / smoothing-aware fusion for sequence outputs, or move in parallel on Priority 5 if sensor-physics fidelity becomes the bottleneck.
 
 ---
 

@@ -57,6 +57,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ..estimators.error_state_ins import ErrorStateINS, ErrorStateINSState
+from ..estimators.gravity_sequence_match import SequenceMatchUpdateResult
 from ..estimators.integrity import IntegritySnapshot
 from ..estimators.map_match_pf import MapMatchPFUpdateResult
 from ..truth.trajectory import TruthTrajectory
@@ -393,6 +394,8 @@ class ScenarioSimulationSummary:
         Number of INS states logged.
     num_pf_updates : int
         Number of PF updates logged.
+    num_sequence_updates : int
+        Number of sequence-matcher updates logged.
     num_integrity_snapshots : int
         Number of integrity snapshots logged.
     """
@@ -407,6 +410,7 @@ class ScenarioSimulationSummary:
     num_velocity_aid_samples: int
     num_ins_states: int
     num_pf_updates: int
+    num_sequence_updates: int
     num_integrity_snapshots: int
 
     def to_mapping(self) -> dict[str, Any]:
@@ -684,6 +688,8 @@ class SimulationEstimatorLog:
         Logged INS states.
     pf_updates : list[MapMatchPFUpdateResult]
         Logged gravity-map PF updates.
+    sequence_updates : list[SequenceMatchUpdateResult]
+        Logged delayed sequence-matcher updates.
     integrity_snapshots : list[IntegritySnapshot]
         Logged integrity snapshots.
     custom_streams : dict[str, list]
@@ -692,6 +698,7 @@ class SimulationEstimatorLog:
 
     ins_states: list[ErrorStateINSState] = field(default_factory=list)
     pf_updates: list[MapMatchPFUpdateResult] = field(default_factory=list)
+    sequence_updates: list[SequenceMatchUpdateResult] = field(default_factory=list)
     integrity_snapshots: list[IntegritySnapshot] = field(default_factory=list)
     custom_streams: dict[str, list[Any]] = field(default_factory=dict)
 
@@ -702,6 +709,7 @@ class SimulationEstimatorLog:
         out = {
             "ins_states": len(self.ins_states),
             "pf_updates": len(self.pf_updates),
+            "sequence_updates": len(self.sequence_updates),
             "integrity_snapshots": len(self.integrity_snapshots),
         }
         for key, value in self.custom_streams.items():
@@ -838,6 +846,78 @@ class SimulationEstimatorLog:
                 _get_required_attr(upd, "predicted_disturbance_std_mps2")
             )
             out["pf_resampled"][k] = bool(_get_required_attr(upd, "resampled"))
+
+        return out
+
+    def sequence_history_arrays(self) -> dict[str, np.ndarray]:
+        """
+        Extract sequence-matcher update history arrays.
+        """
+        n = len(self.sequence_updates)
+        out: dict[str, np.ndarray] = {
+            "sequence_time_s": np.full(n, np.nan, dtype=np.float64),
+            "sequence_lat_rad": np.empty(n, dtype=np.float64),
+            "sequence_lon_rad": np.empty(n, dtype=np.float64),
+            "sequence_height_m": np.empty(n, dtype=np.float64),
+            "sequence_covariance_ned_m2": np.empty((n, 3, 3), dtype=np.float64),
+            "sequence_covariance_geodetic": np.empty((n, 3, 3), dtype=np.float64),
+            "sequence_window_size_used": np.empty(n, dtype=np.int64),
+            "sequence_delayed_by_steps": np.empty(n, dtype=np.int64),
+            "sequence_num_candidates": np.empty(n, dtype=np.int64),
+            "sequence_posterior_entropy_nats": np.empty(n, dtype=np.float64),
+            "sequence_marginal_peak_probability": np.empty(n, dtype=np.float64),
+            "sequence_predicted_disturbance_mean_mps2": np.empty(n, dtype=np.float64),
+            "sequence_predicted_disturbance_std_mps2": np.empty(n, dtype=np.float64),
+            "sequence_used_gradient": np.empty(n, dtype=bool),
+            "sequence_viterbi_log_score": np.empty(n, dtype=np.float64),
+            "sequence_viterbi_offset_ned_m": np.empty((n, 3), dtype=np.float64),
+        }
+
+        for k, upd in enumerate(self.sequence_updates):
+            est = upd.estimate
+            out["sequence_time_s"][k] = float(_get_required_attr(upd, "time_s"))
+            out["sequence_lat_rad"][k] = float(_get_required_attr(est, "lat_rad"))
+            out["sequence_lon_rad"][k] = float(_get_required_attr(est, "lon_rad"))
+            out["sequence_height_m"][k] = float(_get_required_attr(est, "height_m"))
+            out["sequence_covariance_ned_m2"][k] = _mat3(
+                _get_required_attr(est, "covariance_ned_m2"),
+                name="covariance_ned_m2",
+            )
+            out["sequence_covariance_geodetic"][k] = _mat3(
+                _get_required_attr(est, "covariance_geodetic"),
+                name="covariance_geodetic",
+            )
+            out["sequence_window_size_used"][k] = int(
+                _get_required_attr(upd, "window_size_used")
+            )
+            out["sequence_delayed_by_steps"][k] = int(
+                _get_required_attr(upd, "delayed_by_steps")
+            )
+            out["sequence_num_candidates"][k] = int(
+                _get_required_attr(upd, "num_candidates")
+            )
+            out["sequence_posterior_entropy_nats"][k] = float(
+                _get_required_attr(upd, "posterior_entropy_nats")
+            )
+            out["sequence_marginal_peak_probability"][k] = float(
+                _get_required_attr(upd, "marginal_peak_probability")
+            )
+            out["sequence_predicted_disturbance_mean_mps2"][k] = float(
+                _get_required_attr(upd, "predicted_disturbance_mean_mps2")
+            )
+            out["sequence_predicted_disturbance_std_mps2"][k] = float(
+                _get_required_attr(upd, "predicted_disturbance_std_mps2")
+            )
+            out["sequence_used_gradient"][k] = bool(
+                _get_required_attr(upd, "used_gradient")
+            )
+            out["sequence_viterbi_log_score"][k] = float(
+                _get_required_attr(upd, "viterbi_log_score")
+            )
+            out["sequence_viterbi_offset_ned_m"][k] = _vec3(
+                _get_required_attr(upd, "viterbi_offset_ned_m"),
+                name="viterbi_offset_ned_m",
+            )
 
         return out
 
@@ -994,6 +1074,7 @@ class ScenarioSimulationResult:
             num_velocity_aid_samples=int(sensor_counts.get("velocity_aid", 0)),
             num_ins_states=int(estimator_counts.get("ins_states", 0)),
             num_pf_updates=int(estimator_counts.get("pf_updates", 0)),
+            num_sequence_updates=int(estimator_counts.get("sequence_updates", 0)),
             num_integrity_snapshots=int(
                 estimator_counts.get("integrity_snapshots", 0)
             ),
@@ -1041,6 +1122,8 @@ class ScenarioSimulationResult:
             out.update(self.estimators.ins_history_arrays())
         if len(self.estimators.pf_updates) > 0:
             out.update(self.estimators.pf_history_arrays())
+        if len(self.estimators.sequence_updates) > 0:
+            out.update(self.estimators.sequence_history_arrays())
         if len(self.estimators.integrity_snapshots) > 0:
             out.update(self.estimators.integrity_history_arrays())
 
