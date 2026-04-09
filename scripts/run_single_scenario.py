@@ -324,6 +324,12 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         float(args.sequence_feedback_min_peak_prob)
     )
     map_match.sequence_feedback_spec.mode = str(args.sequence_feedback_mode)
+    map_match.sequence_feedback_spec.measurement_geometry = str(
+        args.sequence_feedback_geometry
+    )
+    map_match.sequence_feedback_spec.min_horizontal_eigenvalue_ratio = float(
+        args.sequence_feedback_min_eigenvalue_ratio
+    )
     map_match.sequence_feedback_spec.max_horizontal_std_m = (
         float(args.sequence_feedback_max_horizontal_std_m)
     )
@@ -621,6 +627,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "Delayed sequence feedback architecture. "
             "'lag_replay' applies the estimate at the delayed state and replays "
             "forward; 'bias_transfer' is the older current-state transfer path."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-geometry",
+        choices=("directional_horizontal", "full_horizontal"),
+        default="directional_horizontal",
+        help=(
+            "Delayed sequence feedback measurement geometry. "
+            "'directional_horizontal' injects only the best-constrained "
+            "horizontal component; 'full_horizontal' injects the full 2D offset."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-min-eigenvalue-ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Minimum horizontal covariance eigenvalue ratio required for "
+            "directional sequence feedback."
         ),
     )
     parser.add_argument(

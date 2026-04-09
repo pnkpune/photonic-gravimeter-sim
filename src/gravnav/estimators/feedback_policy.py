@@ -57,6 +57,7 @@ from .fusion import (
     FusionUpdateResult,
     LinearMeasurement,
     apply_linear_measurement,
+    make_directional_position_measurement,
     make_horizontal_ned_position_measurement,
 )
 from .map_match_pf import (
@@ -296,12 +297,24 @@ class SequenceFeedbackSpec:
       then replay the stored IMU and aiding measurements forward. This is the
       safer fixed-lag architecture for sequence outputs because the estimate is
       fused at the time it actually describes.
+
+    Measurement geometry is configured independently:
+
+    - ``full_horizontal``:
+      Inject the full 2D horizontal posterior mean offset.
+
+    - ``directional_horizontal``:
+      Eigendecompose the horizontal 2x2 posterior covariance and inject only
+      the best-constrained horizontal component. This is the richer delayed
+      measurement model for sequence feedback.
     """
 
     enabled: bool = True
     mode: str = "lag_replay"
+    measurement_geometry: str = "directional_horizontal"
     min_window_size: int = 5
     min_peak_probability: float = 0.12
+    min_horizontal_eigenvalue_ratio: float = 1.0
     max_horizontal_std_m: float = 80.0
     max_correction_norm_m: float = 150.0
     covariance_inflation: float = 3.0
@@ -314,8 +327,20 @@ class SequenceFeedbackSpec:
         self.mode = str(self.mode).strip().lower()
         if self.mode not in {"bias_transfer", "lag_replay"}:
             raise ValueError("mode must be 'bias_transfer' or 'lag_replay'.")
+        self.measurement_geometry = str(self.measurement_geometry).strip().lower()
+        if self.measurement_geometry not in {
+            "full_horizontal",
+            "directional_horizontal",
+        }:
+            raise ValueError(
+                "measurement_geometry must be 'full_horizontal' or "
+                "'directional_horizontal'."
+            )
         self.min_window_size = max(1, int(self.min_window_size))
         self.min_peak_probability = float(self.min_peak_probability)
+        self.min_horizontal_eigenvalue_ratio = float(
+            self.min_horizontal_eigenvalue_ratio
+        )
         self.max_horizontal_std_m = float(self.max_horizontal_std_m)
         self.max_correction_norm_m = float(self.max_correction_norm_m)
         self.covariance_inflation = float(self.covariance_inflation)
@@ -323,6 +348,8 @@ class SequenceFeedbackSpec:
         self.reset_matcher_after_apply = bool(self.reset_matcher_after_apply)
         if not (0.0 <= self.min_peak_probability <= 1.0):
             raise ValueError("min_peak_probability must lie in [0, 1].")
+        if self.min_horizontal_eigenvalue_ratio < 1.0:
+            raise ValueError("min_horizontal_eigenvalue_ratio must be >= 1.0.")
         if self.max_horizontal_std_m <= 0.0:
             raise ValueError("max_horizontal_std_m must be positive.")
         if self.max_correction_norm_m <= 0.0:
@@ -342,12 +369,17 @@ class SequenceFeedbackDiagnostics:
     """
 
     mode: str
+    measurement_geometry: str
     age_s: float
     window_size_used: int
     delayed_by_steps: int
     horizontal_offset_ned_m: FloatArray
     horizontal_std_m: FloatArray
     correction_norm_m: float
+    projected_correction_m: float
+    projected_std_m: float
+    horizontal_eigenvalue_ratio: float
+    constrained_direction_ned: FloatArray
     marginal_peak_probability: float
     posterior_entropy_nats: float
     covariance_inflation_applied: float
@@ -886,8 +918,20 @@ class SequenceFeedbackController:
                 dtype=np.float64,
             )
         )
+        eigvals_h, eigvecs_h = np.linalg.eigh(P_h)
+        order = np.argsort(eigvals_h)
+        eigvals_h = np.maximum(eigvals_h[order], 1.0e-12)
+        eigvecs_h = eigvecs_h[:, order]
+        horizontal_eigenvalue_ratio = float(eigvals_h[1] / eigvals_h[0])
+        best_dir_h = eigvecs_h[:, 0]
+        constrained_direction_ned = np.array(
+            [best_dir_h[0], best_dir_h[1], 0.0],
+            dtype=np.float64,
+        )
         std_h = np.sqrt(np.maximum(np.diag(P_h), 0.0))
         correction_norm = float(np.linalg.norm(offset_h))
+        projected_correction = float(best_dir_h @ offset_h)
+        projected_std = float(np.sqrt(eigvals_h[0]))
         peak_prob = float(sequence_update.marginal_peak_probability)
         entropy = float(sequence_update.posterior_entropy_nats)
         if self.spec.mode == "bias_transfer":
@@ -917,6 +961,19 @@ class SequenceFeedbackController:
                 f"peak_probability={peak_prob:.3f} < "
                 f"min={self.spec.min_peak_probability:.3f}"
             )
+        elif self.spec.measurement_geometry == "directional_horizontal":
+            if horizontal_eigenvalue_ratio < self.spec.min_horizontal_eigenvalue_ratio:
+                feedback_allowed = False
+                rejection_reason = (
+                    f"horizontal_eigenvalue_ratio={horizontal_eigenvalue_ratio:.3f} < "
+                    f"min={self.spec.min_horizontal_eigenvalue_ratio:.3f}"
+                )
+            elif not np.isfinite(projected_std) or projected_std > self.spec.max_horizontal_std_m:
+                feedback_allowed = False
+                rejection_reason = (
+                    f"projected_std={projected_std:.3f} > "
+                    f"max={self.spec.max_horizontal_std_m:.3f}"
+                )
         elif np.any(~np.isfinite(std_h)) or float(np.max(std_h)) > self.spec.max_horizontal_std_m:
             feedback_allowed = False
             rejection_reason = (
@@ -932,12 +989,17 @@ class SequenceFeedbackController:
 
         diagnostics = SequenceFeedbackDiagnostics(
             mode=self.spec.mode,
+            measurement_geometry=self.spec.measurement_geometry,
             age_s=age_s,
             window_size_used=int(sequence_update.window_size_used),
             delayed_by_steps=int(sequence_update.delayed_by_steps),
             horizontal_offset_ned_m=offset_h.copy(),
             horizontal_std_m=std_h.copy(),
             correction_norm_m=correction_norm,
+            projected_correction_m=projected_correction,
+            projected_std_m=projected_std,
+            horizontal_eigenvalue_ratio=horizontal_eigenvalue_ratio,
+            constrained_direction_ned=constrained_direction_ned.copy(),
             marginal_peak_probability=peak_prob,
             posterior_entropy_nats=entropy,
             covariance_inflation_applied=float(self.spec.covariance_inflation),
@@ -952,17 +1014,30 @@ class SequenceFeedbackController:
                 fusion_result=None,
             )
 
-        R_h = _symmetrize(P_h * float(self.spec.covariance_inflation))
-        if transfer_std_m > 0.0:
-            R_h += np.diag(np.full(2, transfer_std_m**2, dtype=np.float64))
+        if self.spec.measurement_geometry == "directional_horizontal":
+            projected_variance = float(eigvals_h[0] * self.spec.covariance_inflation)
+            if transfer_std_m > 0.0:
+                projected_variance += transfer_std_m**2
+            measurement = make_directional_position_measurement(
+                ins,
+                constrained_direction_ned,
+                projected_correction,
+                projected_variance,
+                label=f"{measurement_label}_directional",
+                time_s=measurement_time_s,
+            )
+        else:
+            R_h = _symmetrize(P_h * float(self.spec.covariance_inflation))
+            if transfer_std_m > 0.0:
+                R_h += np.diag(np.full(2, transfer_std_m**2, dtype=np.float64))
 
-        measurement = make_horizontal_ned_position_measurement(
-            ins,
-            offset_h,
-            R_h,
-            label=measurement_label,
-            time_s=measurement_time_s,
-        )
+            measurement = make_horizontal_ned_position_measurement(
+                ins,
+                offset_h,
+                R_h,
+                label=measurement_label,
+                time_s=measurement_time_s,
+            )
         fusion_result = apply_linear_measurement(
             ins,
             measurement,
@@ -1010,6 +1085,7 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
     d = result.diagnostics
     summary = {
         "mode": d.mode,
+        "measurement_geometry": d.measurement_geometry,
         "feedback_allowed": d.feedback_allowed,
         "applied": result.applied,
         "rejection_reason": d.rejection_reason,
@@ -1019,6 +1095,10 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
         "horizontal_offset_ned_m": d.horizontal_offset_ned_m.tolist(),
         "horizontal_std_m": d.horizontal_std_m.tolist(),
         "correction_norm_m": d.correction_norm_m,
+        "projected_correction_m": d.projected_correction_m,
+        "projected_std_m": d.projected_std_m,
+        "horizontal_eigenvalue_ratio": d.horizontal_eigenvalue_ratio,
+        "constrained_direction_ned": d.constrained_direction_ned.tolist(),
         "marginal_peak_probability": d.marginal_peak_probability,
         "posterior_entropy_nats": d.posterior_entropy_nats,
         "covariance_inflation_applied": d.covariance_inflation_applied,

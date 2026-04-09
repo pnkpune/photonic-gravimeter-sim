@@ -154,6 +154,12 @@ Current outcome:
   - `bias_transfer`: the older current-state transfer path
   - `lag_replay`: a fixed-lag path that applies the delayed estimate at the delayed state and replays forward
 - the default conservative settings for both remain a safe no-op on the maritime benchmark
+- the best current active delayed-feedback result is a directional lag-replay policy:
+  - `38` directional replay updates applied
+  - INS horizontal RMSE `108.1 m`
+  - INS CEP95 `211.5 m`
+  - horizontal HMI `0%`
+  - still worse than the observe-only baseline at `103.5 m`, so not yet promotable
 - a relaxed fixed-lag replay benchmark does fire safely in the software sense, but still degrades performance:
   - `93` replayed sequence updates applied
   - INS horizontal RMSE worsened from `103.5 m` to `113.1 m`
@@ -163,7 +169,7 @@ Current outcome:
 Conclusion:
 
 - simple current-state transfer of delayed sequence bias is not a valid production feedback design
-- fixed-lag replay is the right architectural direction, but the current replay controller is still not good enough to beat the observe-only baseline
+- fixed-lag replay plus directional delayed measurement is the best current closed-loop direction in the repo, but it is still not good enough to beat the observe-only baseline
 - this entire area is currently useful as a documented negative result and benchmark harness, not as a production feedback path
 - the next serious closed-loop sequence design would need replay plus retrodiction/smoother-aware delayed updates rather than direct horizontal pseudo-measurements alone
 

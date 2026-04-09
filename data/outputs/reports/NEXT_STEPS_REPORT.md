@@ -196,7 +196,23 @@ Result on `maritime_baseline`, seed 42:
 
 **Interpretation:** The replay architecture is the correct structural move because it applies the estimate at the time it actually describes. But that alone is not enough. Even with lag replay, the current horizontal pseudo-measurement remains biased enough that active updates degrade both INS accuracy and integrity.
 
-**Decision:** Priority 4 remains complete only in the observe-only sense. The repo now contains both the bad current-state transfer baseline and a better-structured fixed-lag replay baseline. Neither is yet acceptable as a production feedback path. The next serious step is no longer “add replay”; it is “add replay plus retrodiction/smoother-aware delayed-update logic or a richer delayed measurement model.”
+**Follow-up (2026-04-09 directional delayed-measurement experiment):** Upgraded the replay controller to support a richer delayed measurement model: instead of always injecting the full 2D horizontal posterior mean offset, the controller can eigendecompose the horizontal posterior covariance and inject only the best-constrained horizontal component as a rank-1 directional measurement at the delayed state. This is the sequence-side analogue of the earlier PF directional feedback idea, but now combined with lag replay.
+
+Result on `maritime_baseline`, seed 42:
+
+| Configuration | INS horizontal RMSE | CEP95 | HMI horiz | Applied updates | Finding |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Replay, full-horizontal relaxed (`peak>=0.03`, `max_std<=120 m`, `max_corr<=50 m`, inflation `10.0`) | 113.1 m | 220.1 m | 38.5 % | 93 | Better than bias-transfer, but still unsafe |
+| Replay, directional horizontal safe (`ratio>=1.15`, `peak>=0.03`, `max_std<=120 m`, `max_corr<=30 m`, inflation `10.0`) | 108.1 m | 211.5 m | **0.0 %** | 38 | Best current active delayed-feedback result; safer, but still worse than observe-only |
+
+**Interpretation:** The richer delayed measurement model helps. Directional replay removes the integrity collapse seen in relaxed full-horizontal replay and gets much closer to the observe-only baseline. But it still does not actually beat the baseline. That means the remaining issue is not just “full 2D correction is too aggressive”; it is that the delayed posterior itself is still not accurate enough for direct pseudo-measurement injection.
+
+**Decision:** Priority 4 remains complete only in the observe-only sense. The repo now contains:
+- a clearly bad current-state transfer controller
+- a better-structured full-horizontal lag-replay controller
+- an even better directional lag-replay controller
+
+None is yet acceptable as a production feedback path. The next serious step is no longer “add replay” or “add directional geometry”; it is “add replay plus retrodiction/smoother-aware delayed-update logic or a richer delayed state model.”
 
 ---
 
