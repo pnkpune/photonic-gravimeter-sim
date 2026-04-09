@@ -52,7 +52,7 @@ from .error_state_ins import (
     ErrorStateINS,
     ErrorStateINSState,
 )
-from .gravity_sequence_match import SequenceMatchUpdateResult
+from .gravity_sequence_match import SequenceAnchorEstimate, SequenceMatchUpdateResult
 from .fusion import (
     FusionUpdateResult,
     LinearMeasurement,
@@ -400,6 +400,102 @@ class SequenceFeedbackResult:
     @property
     def applied(self) -> bool:
         """True if a sequence-derived measurement was injected into the INS."""
+        return self.fusion_result is not None and self.fusion_result.accepted
+
+
+@dataclass
+class SequenceLagSmootherSpec:
+    """
+    Configuration for bounded-lag sequence-driven navigation smoothing.
+
+    This path is deliberately output-only in v1: it produces a delayed,
+    higher-quality navigation track without mutating the live INS path.
+    """
+
+    enabled: bool = False
+    output_lag_steps: Optional[int] = None
+    measurement_geometry: str = "directional_horizontal"
+    min_peak_probability: float = 0.05
+    min_horizontal_eigenvalue_ratio: float = 1.15
+    max_horizontal_std_m: float = 120.0
+    max_correction_norm_m: float = 30.0
+    covariance_inflation: float = 10.0
+    max_anchor_count: int = 3
+    publish_current_replayed_state: bool = False
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        if self.output_lag_steps is not None:
+            self.output_lag_steps = int(self.output_lag_steps)
+            if self.output_lag_steps < 0:
+                raise ValueError("output_lag_steps must be nonnegative when provided.")
+        self.measurement_geometry = str(self.measurement_geometry).strip().lower()
+        if self.measurement_geometry not in {
+            "full_horizontal",
+            "directional_horizontal",
+        }:
+            raise ValueError(
+                "measurement_geometry must be 'full_horizontal' or "
+                "'directional_horizontal'."
+            )
+        self.min_peak_probability = float(self.min_peak_probability)
+        if not (0.0 <= self.min_peak_probability <= 1.0):
+            raise ValueError("min_peak_probability must lie in [0, 1].")
+        self.min_horizontal_eigenvalue_ratio = float(
+            self.min_horizontal_eigenvalue_ratio
+        )
+        if self.min_horizontal_eigenvalue_ratio < 1.0:
+            raise ValueError("min_horizontal_eigenvalue_ratio must be >= 1.0.")
+        self.max_horizontal_std_m = float(self.max_horizontal_std_m)
+        if self.max_horizontal_std_m <= 0.0:
+            raise ValueError("max_horizontal_std_m must be positive.")
+        self.max_correction_norm_m = float(self.max_correction_norm_m)
+        if self.max_correction_norm_m <= 0.0:
+            raise ValueError("max_correction_norm_m must be positive.")
+        self.covariance_inflation = float(self.covariance_inflation)
+        if self.covariance_inflation <= 0.0:
+            raise ValueError("covariance_inflation must be positive.")
+        self.max_anchor_count = int(self.max_anchor_count)
+        if self.max_anchor_count < 1:
+            raise ValueError("max_anchor_count must be at least 1.")
+        self.publish_current_replayed_state = bool(self.publish_current_replayed_state)
+
+
+@dataclass
+class SequenceLagSmootherDiagnostics:
+    """
+    Diagnostics for one lag-smoother anchor evaluation.
+    """
+
+    measurement_geometry: str
+    time_s: float
+    global_index: int
+    delayed_by_steps: int
+    horizontal_offset_ned_m: FloatArray
+    horizontal_std_m: FloatArray
+    correction_norm_m: float
+    projected_correction_m: float
+    projected_std_m: float
+    horizontal_eigenvalue_ratio: float
+    constrained_direction_ned: FloatArray
+    marginal_peak_probability: float
+    posterior_entropy_nats: float
+    covariance_inflation_applied: float
+    feedback_allowed: bool
+    rejection_reason: Optional[str]
+
+
+@dataclass
+class SequenceLagSmootherResult:
+    """
+    Result of applying one anchor inside the bounded-lag smoother.
+    """
+
+    diagnostics: SequenceLagSmootherDiagnostics
+    fusion_result: Optional[FusionUpdateResult] = None
+
+    @property
+    def applied(self) -> bool:
         return self.fusion_result is not None and self.fusion_result.accepted
 
 
@@ -1049,6 +1145,145 @@ class SequenceFeedbackController:
         )
 
 
+class SequenceLagSmootherController:
+    """
+    Conservative bounded-lag sequence-anchor fusion policy.
+
+    The controller evaluates one anchor estimate at a time against the INS
+    state aligned to that anchor's timestamp. It is intentionally separate from
+    the live closed-loop feedback path.
+    """
+
+    def __init__(self, spec: SequenceLagSmootherSpec) -> None:
+        self.spec = spec
+
+    def evaluate_anchor(
+        self,
+        anchor: SequenceAnchorEstimate,
+        ins: ErrorStateINS,
+    ) -> SequenceLagSmootherResult:
+        """
+        Evaluate and optionally inject one delayed sequence anchor.
+        """
+        offset_h = np.asarray(
+            anchor.posterior_mean_offset_ned_m[:2],
+            dtype=np.float64,
+        )
+        P_h = _symmetrize(
+            np.asarray(
+                anchor.covariance_ned_m2[:2, :2],
+                dtype=np.float64,
+            )
+        )
+        eigvals_h, eigvecs_h = np.linalg.eigh(P_h)
+        order = np.argsort(eigvals_h)
+        eigvals_h = np.maximum(eigvals_h[order], 1.0e-12)
+        eigvecs_h = eigvecs_h[:, order]
+        best_dir_h = eigvecs_h[:, 0]
+        constrained_direction_ned = np.array(
+            [best_dir_h[0], best_dir_h[1], 0.0],
+            dtype=np.float64,
+        )
+        horizontal_std = np.sqrt(np.maximum(np.diag(P_h), 0.0))
+        horizontal_eigenvalue_ratio = float(eigvals_h[1] / eigvals_h[0])
+        projected_correction = float(best_dir_h @ offset_h)
+        projected_std = float(np.sqrt(eigvals_h[0]))
+        correction_norm = float(np.linalg.norm(offset_h))
+        peak_prob = float(anchor.marginal_peak_probability)
+        entropy = float(anchor.posterior_entropy_nats)
+
+        feedback_allowed = True
+        rejection_reason: Optional[str] = None
+
+        if not self.spec.enabled:
+            feedback_allowed = False
+            rejection_reason = "disabled"
+        elif not np.isfinite(peak_prob) or peak_prob < self.spec.min_peak_probability:
+            feedback_allowed = False
+            rejection_reason = (
+                f"peak_probability={peak_prob:.3f} < "
+                f"min={self.spec.min_peak_probability:.3f}"
+            )
+        elif not np.isfinite(correction_norm) or correction_norm > self.spec.max_correction_norm_m:
+            feedback_allowed = False
+            rejection_reason = (
+                f"correction_norm={correction_norm:.3f} > "
+                f"max={self.spec.max_correction_norm_m:.3f}"
+            )
+        elif self.spec.measurement_geometry == "directional_horizontal":
+            if horizontal_eigenvalue_ratio < self.spec.min_horizontal_eigenvalue_ratio:
+                feedback_allowed = False
+                rejection_reason = (
+                    f"horizontal_eigenvalue_ratio={horizontal_eigenvalue_ratio:.3f} < "
+                    f"min={self.spec.min_horizontal_eigenvalue_ratio:.3f}"
+                )
+            elif not np.isfinite(projected_std) or projected_std > self.spec.max_horizontal_std_m:
+                feedback_allowed = False
+                rejection_reason = (
+                    f"projected_std={projected_std:.3f} > "
+                    f"max={self.spec.max_horizontal_std_m:.3f}"
+                )
+        elif np.any(~np.isfinite(horizontal_std)) or float(np.max(horizontal_std)) > self.spec.max_horizontal_std_m:
+            feedback_allowed = False
+            rejection_reason = (
+                f"horizontal_std_max={float(np.max(horizontal_std)):.3f} > "
+                f"max={self.spec.max_horizontal_std_m:.3f}"
+            )
+
+        diagnostics = SequenceLagSmootherDiagnostics(
+            measurement_geometry=self.spec.measurement_geometry,
+            time_s=float(anchor.time_s),
+            global_index=int(anchor.global_index),
+            delayed_by_steps=int(anchor.delayed_by_steps),
+            horizontal_offset_ned_m=offset_h.copy(),
+            horizontal_std_m=horizontal_std.copy(),
+            correction_norm_m=correction_norm,
+            projected_correction_m=projected_correction,
+            projected_std_m=projected_std,
+            horizontal_eigenvalue_ratio=horizontal_eigenvalue_ratio,
+            constrained_direction_ned=constrained_direction_ned.copy(),
+            marginal_peak_probability=peak_prob,
+            posterior_entropy_nats=entropy,
+            covariance_inflation_applied=float(self.spec.covariance_inflation),
+            feedback_allowed=feedback_allowed,
+            rejection_reason=rejection_reason,
+        )
+        if not feedback_allowed:
+            return SequenceLagSmootherResult(diagnostics=diagnostics, fusion_result=None)
+
+        if self.spec.measurement_geometry == "directional_horizontal":
+            projected_variance = float(
+                eigvals_h[0] * self.spec.covariance_inflation
+            )
+            measurement = make_directional_position_measurement(
+                ins,
+                constrained_direction_ned,
+                projected_correction,
+                projected_variance,
+                label="sequence_lag_anchor_directional",
+                time_s=float(anchor.time_s),
+            )
+        else:
+            R_h = _symmetrize(P_h * float(self.spec.covariance_inflation))
+            measurement = make_horizontal_ned_position_measurement(
+                ins,
+                offset_h,
+                R_h,
+                label="sequence_lag_anchor_full_horizontal",
+                time_s=float(anchor.time_s),
+            )
+
+        fusion_result = apply_linear_measurement(
+            ins,
+            measurement,
+            nis_threshold=None,
+        )
+        return SequenceLagSmootherResult(
+            diagnostics=diagnostics,
+            fusion_result=fusion_result,
+        )
+
+
 def summarize_directional_feedback(result: DirectionalFeedbackResult) -> dict:
     """
     Produce a JSON-serializable summary of a directional feedback result.
@@ -1110,11 +1345,45 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
     return summary
 
 
+def summarize_sequence_lag_smoother(result: SequenceLagSmootherResult) -> dict:
+    """
+    Produce a JSON-serializable summary of one lag-smoother anchor evaluation.
+    """
+    d = result.diagnostics
+    summary = {
+        "measurement_geometry": d.measurement_geometry,
+        "feedback_allowed": d.feedback_allowed,
+        "applied": result.applied,
+        "rejection_reason": d.rejection_reason,
+        "time_s": d.time_s,
+        "global_index": d.global_index,
+        "delayed_by_steps": d.delayed_by_steps,
+        "horizontal_offset_ned_m": d.horizontal_offset_ned_m.tolist(),
+        "horizontal_std_m": d.horizontal_std_m.tolist(),
+        "correction_norm_m": d.correction_norm_m,
+        "projected_correction_m": d.projected_correction_m,
+        "projected_std_m": d.projected_std_m,
+        "horizontal_eigenvalue_ratio": d.horizontal_eigenvalue_ratio,
+        "constrained_direction_ned": d.constrained_direction_ned.tolist(),
+        "marginal_peak_probability": d.marginal_peak_probability,
+        "posterior_entropy_nats": d.posterior_entropy_nats,
+        "covariance_inflation_applied": d.covariance_inflation_applied,
+    }
+    if result.fusion_result is not None:
+        summary["nis"] = result.fusion_result.nis
+        summary["gate_accepted"] = result.fusion_result.accepted
+    return summary
+
+
 __all__ = [
     "DirectionalFeedbackController",
     "DirectionalFeedbackDiagnostics",
     "DirectionalFeedbackResult",
     "DirectionalFeedbackSpec",
+    "SequenceLagSmootherController",
+    "SequenceLagSmootherDiagnostics",
+    "SequenceLagSmootherResult",
+    "SequenceLagSmootherSpec",
     "SequenceFeedbackController",
     "SequenceFeedbackDiagnostics",
     "SequenceFeedbackResult",
@@ -1122,5 +1391,6 @@ __all__ = [
     "compute_adaptive_inflation",
     "eigendecompose_ned_covariance",
     "summarize_directional_feedback",
+    "summarize_sequence_lag_smoother",
     "summarize_sequence_feedback",
 ]

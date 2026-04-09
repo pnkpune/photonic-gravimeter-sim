@@ -190,12 +190,45 @@ class SequenceMatchEstimate:
 
 
 @dataclass
+class SequenceAnchorEstimate:
+    """
+    One delayed anchor estimate extracted from a sequence-inference window.
+
+    These anchors expose a few interior states of the window so a bounded-lag
+    smoother can use more of the sequence information than a single delayed
+    center estimate.
+    """
+
+    time_s: float
+    lat_rad: float
+    lon_rad: float
+    height_m: float
+    covariance_ned_m2: FloatArray
+    covariance_geodetic: FloatArray
+    posterior_mean_offset_ned_m: FloatArray
+    viterbi_offset_ned_m: FloatArray
+    marginal_peak_probability: float
+    posterior_entropy_nats: float
+    global_index: int
+    delayed_by_steps: int
+
+    @property
+    def geodetic_vector(self) -> FloatArray:
+        """Return `[lat, lon, h]` as a float64 vector."""
+        return np.array(
+            [self.lat_rad, self.lon_rad, self.height_m],
+            dtype=np.float64,
+        )
+
+
+@dataclass
 class SequenceMatchUpdateResult:
     """
     Diagnostics/result of one emitted sequence estimate.
     """
 
     estimate: SequenceMatchEstimate
+    global_index: int
     time_s: float
     window_size_used: int
     delayed_by_steps: int
@@ -208,6 +241,7 @@ class SequenceMatchUpdateResult:
     viterbi_log_score: float
     viterbi_offset_ned_m: FloatArray
     posterior_mean_offset_ned_m: FloatArray
+    anchor_estimates: tuple[SequenceAnchorEstimate, ...] = ()
 
 
 @dataclass
@@ -300,6 +334,26 @@ class GravitySequenceMatcher:
                 axis=2,
             )
         ).astype(np.float64)
+
+    def _anchor_local_indices(self, target_local_index: int, window_size: int) -> tuple[int, ...]:
+        """
+        Select a small, deterministic set of interior anchor indices.
+
+        The default set is the emitted target plus two symmetric interior points
+        around it. Near the window edges, indices are clipped and deduplicated.
+        """
+        mid = int(target_local_index)
+        delta = max(1, int(window_size // 4))
+        raw = (
+            max(0, mid - delta),
+            max(0, min(window_size - 1, mid)),
+            min(window_size - 1, mid + delta),
+        )
+        deduped: list[int] = []
+        for idx in raw:
+            if idx not in deduped:
+                deduped.append(int(idx))
+        return tuple(deduped)
 
     def _center_height_from_measurements(
         self,
@@ -450,15 +504,23 @@ class GravitySequenceMatcher:
 
         return alpha, beta, delta, psi
 
-    def _emit_result_for_index(
+    def _estimate_for_window_index(
         self,
         window: list[_SequenceObservation],
+        alpha: FloatArray,
+        beta: FloatArray,
+        delta: FloatArray,
+        psi: NDArray[np.int64],
         target_local_index: int,
-    ) -> SequenceMatchUpdateResult:
+    ) -> tuple[SequenceAnchorEstimate, bool, float, float]:
         """
-        Build one delayed sequence estimate for a target window index.
+        Build one posterior/viterbi estimate for a selected window index.
+
+        Returns the anchor estimate plus:
+        - whether the underlying observation used gradient information
+        - the predicted disturbance mean
+        - the predicted disturbance std
         """
-        alpha, beta, delta, psi = self._run_window_inference(window)
         target = int(target_local_index)
         if target < 0 or target >= len(window):
             raise IndexError(
@@ -516,30 +578,81 @@ class GravitySequenceMatcher:
         best_idx = int(path[target])
         best_offset = obs.candidate_offsets_ned_m[best_idx].copy()
 
-        estimate = SequenceMatchEstimate(
+        anchor = SequenceAnchorEstimate(
+            time_s=float(obs.time_s),
             lat_rad=float(lat_hat),
             lon_rad=float(lon_hat),
             height_m=float(h_hat),
             covariance_ned_m2=P_ned.astype(np.float64),
             covariance_geodetic=P_geo.astype(np.float64),
-            predicted_disturbance_mps2=pred_g_mean,
+            posterior_mean_offset_ned_m=mean_offset_ned.astype(np.float64),
+            viterbi_offset_ned_m=np.asarray(best_offset, dtype=np.float64),
             marginal_peak_probability=peak_prob,
+            posterior_entropy_nats=entropy,
+            global_index=int(obs.global_index),
+            delayed_by_steps=len(window) - 1 - target,
+        )
+
+        return anchor, bool(obs.used_gradient), pred_g_mean, pred_g_std
+
+    def _emit_result_for_index(
+        self,
+        window: list[_SequenceObservation],
+        target_local_index: int,
+    ) -> SequenceMatchUpdateResult:
+        """
+        Build one delayed sequence estimate for a target window index.
+        """
+        alpha, beta, delta, psi = self._run_window_inference(window)
+        best_last = int(np.argmax(delta[-1]))
+        target_anchor, used_gradient, pred_g_mean, pred_g_std = self._estimate_for_window_index(
+            window,
+            alpha,
+            beta,
+            delta,
+            psi,
+            target_local_index,
+        )
+        anchor_estimates = tuple(
+            self._estimate_for_window_index(
+                window,
+                alpha,
+                beta,
+                delta,
+                psi,
+                idx,
+            )[0]
+            for idx in self._anchor_local_indices(target_local_index, len(window))
+        )
+        estimate = SequenceMatchEstimate(
+            lat_rad=float(target_anchor.lat_rad),
+            lon_rad=float(target_anchor.lon_rad),
+            height_m=float(target_anchor.height_m),
+            covariance_ned_m2=np.asarray(target_anchor.covariance_ned_m2, dtype=np.float64),
+            covariance_geodetic=np.asarray(target_anchor.covariance_geodetic, dtype=np.float64),
+            predicted_disturbance_mps2=float(pred_g_mean),
+            marginal_peak_probability=float(target_anchor.marginal_peak_probability),
         )
 
         return SequenceMatchUpdateResult(
             estimate=estimate,
-            time_s=float(obs.time_s),
+            global_index=int(target_anchor.global_index),
+            time_s=float(target_anchor.time_s),
             window_size_used=len(window),
-            delayed_by_steps=len(window) - 1 - target,
-            num_candidates=int(obs.candidate_offsets_ned_m.shape[0]),
-            posterior_entropy_nats=entropy,
-            marginal_peak_probability=peak_prob,
+            delayed_by_steps=int(target_anchor.delayed_by_steps),
+            num_candidates=int(window[target_local_index].candidate_offsets_ned_m.shape[0]),
+            posterior_entropy_nats=float(target_anchor.posterior_entropy_nats),
+            marginal_peak_probability=float(target_anchor.marginal_peak_probability),
             predicted_disturbance_mean_mps2=pred_g_mean,
             predicted_disturbance_std_mps2=pred_g_std,
-            used_gradient=bool(obs.used_gradient),
+            used_gradient=used_gradient,
             viterbi_log_score=float(delta[-1, best_last]),
-            viterbi_offset_ned_m=np.asarray(best_offset, dtype=np.float64),
-            posterior_mean_offset_ned_m=mean_offset_ned,
+            viterbi_offset_ned_m=np.asarray(target_anchor.viterbi_offset_ned_m, dtype=np.float64),
+            posterior_mean_offset_ned_m=np.asarray(
+                target_anchor.posterior_mean_offset_ned_m,
+                dtype=np.float64,
+            ),
+            anchor_estimates=anchor_estimates,
         )
 
     def update(
@@ -662,6 +775,7 @@ class GravitySequenceMatcher:
 __all__ = [
     "GravitySequenceMatcher",
     "GravitySequenceMatcherSpec",
+    "SequenceAnchorEstimate",
     "SequenceMatchEstimate",
     "SequenceMatchUpdateResult",
 ]

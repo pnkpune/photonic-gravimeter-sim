@@ -762,6 +762,8 @@ class ScenarioMetricsSummary:
         Number of truth samples.
     num_ins_states : int
         Number of INS states logged.
+    num_lag_smoothed_states : int
+        Number of lag-smoothed states logged.
     num_pf_updates : int
         Number of PF updates logged.
     num_sequence_updates : int
@@ -780,17 +782,22 @@ class ScenarioMetricsSummary:
         IMU accelerometer measurement-minus-ideal summary.
     ins_position_error : PositionErrorMetrics or None
         INS position error summary against truth.
+    lag_smoothed_position_error : PositionErrorMetrics or None
+        Delayed lag-smoothed navigation error summary against truth.
     pf_position_error : PositionErrorMetrics or None
         PF position error summary against truth.
     sequence_position_error : PositionErrorMetrics or None
         Sequence-matcher position error summary against truth.
     integrity : IntegrityMetricsSummary or None
         Integrity-history summary.
+    lag_smoothed_integrity : IntegrityMetricsSummary or None
+        Integrity-history summary for the delayed lag-smoothed output.
     """
 
     duration_s: float
     num_truth_samples: int
     num_ins_states: int
+    num_lag_smoothed_states: int
     num_pf_updates: int
     num_sequence_updates: int
     num_integrity_snapshots: int
@@ -801,9 +808,11 @@ class ScenarioMetricsSummary:
     imu_gyro_error: Optional[VectorErrorMetrics] = None
     imu_accel_error: Optional[VectorErrorMetrics] = None
     ins_position_error: Optional[PositionErrorMetrics] = None
+    lag_smoothed_position_error: Optional[PositionErrorMetrics] = None
     pf_position_error: Optional[PositionErrorMetrics] = None
     sequence_position_error: Optional[PositionErrorMetrics] = None
     integrity: Optional[IntegrityMetricsSummary] = None
+    lag_smoothed_integrity: Optional[IntegrityMetricsSummary] = None
 
     def to_mapping(self) -> dict[str, Any]:
         """Return a JSON-friendly mapping."""
@@ -1050,6 +1059,42 @@ def sequence_position_error_history_from_truth(
     return err
 
 
+def lag_smoothed_position_error_history_from_truth(
+    truth: TruthTrajectory,
+    lag_smoothed_states: Sequence[ErrorStateINSState],
+) -> FloatArray:
+    """
+    Build local NED lag-smoothed position error history against truth.
+    """
+    n = len(lag_smoothed_states)
+    if n == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    t_hist = ins_state_times(lag_smoothed_states)
+    if np.any(~np.isfinite(t_hist)):
+        raise ValueError(
+            "All lag-smoothed states must have finite nominal.time_s for truth comparison."
+        )
+
+    true_lat, true_lon, true_h = interpolate_truth_geodetic(truth, t_hist)
+    err = np.empty((n, 3), dtype=np.float64)
+
+    for k, state in enumerate(lag_smoothed_states):
+        err[k] = _vec3(
+            geodetic_position_error_ned(
+                estimated_lat_rad=float(state.nominal.lat_rad),
+                estimated_lon_rad=float(state.nominal.lon_rad),
+                estimated_height_m=float(state.nominal.height_m),
+                true_lat_rad=float(true_lat[k]),
+                true_lon_rad=float(true_lon[k]),
+                true_height_m=float(true_h[k]),
+            ),
+            name="lag_smoothed_position_error_ned_m",
+        )
+
+    return err
+
+
 # -----------------------------------------------------------------------------
 # High-level builders
 # -----------------------------------------------------------------------------
@@ -1195,6 +1240,21 @@ def sequence_position_error_metrics_from_result(
     return PositionErrorMetrics.from_error_series(err)
 
 
+def lag_smoothed_position_error_metrics_from_result(
+    result: ScenarioSimulationResult,
+) -> Optional[PositionErrorMetrics]:
+    """
+    Build lag-smoothed navigation error metrics against truth.
+    """
+    if len(result.estimators.lag_smoothed_states) == 0:
+        return None
+    err = lag_smoothed_position_error_history_from_truth(
+        result.truth,
+        result.estimators.lag_smoothed_states,
+    )
+    return PositionErrorMetrics.from_error_series(err)
+
+
 def integrity_metrics_from_result(
     result: ScenarioSimulationResult,
 ) -> Optional[IntegrityMetricsSummary]:
@@ -1205,6 +1265,19 @@ def integrity_metrics_from_result(
         return None
     return IntegrityMetricsSummary.from_snapshots(
         result.estimators.integrity_snapshots
+    )
+
+
+def lag_smoothed_integrity_metrics_from_result(
+    result: ScenarioSimulationResult,
+) -> Optional[IntegrityMetricsSummary]:
+    """
+    Build lag-smoothed integrity-history metrics from one scenario result.
+    """
+    if len(result.estimators.lag_smoothed_integrity_snapshots) == 0:
+        return None
+    return IntegrityMetricsSummary.from_snapshots(
+        result.estimators.lag_smoothed_integrity_snapshots
     )
 
 
@@ -1230,6 +1303,7 @@ def scenario_metrics_from_result(
         duration_s=float(result.duration_s),
         num_truth_samples=len(result.truth),
         num_ins_states=len(result.estimators.ins_states),
+        num_lag_smoothed_states=len(result.estimators.lag_smoothed_states),
         num_pf_updates=len(result.estimators.pf_updates),
         num_sequence_updates=len(result.estimators.sequence_updates),
         num_integrity_snapshots=len(result.estimators.integrity_snapshots),
@@ -1239,9 +1313,11 @@ def scenario_metrics_from_result(
         imu_gyro_error=gyro_metrics,
         imu_accel_error=accel_metrics,
         ins_position_error=ins_position_error_metrics_from_result(result),
+        lag_smoothed_position_error=lag_smoothed_position_error_metrics_from_result(result),
         pf_position_error=pf_position_error_metrics_from_result(result),
         sequence_position_error=sequence_position_error_metrics_from_result(result),
         integrity=integrity_metrics_from_result(result),
+        lag_smoothed_integrity=lag_smoothed_integrity_metrics_from_result(result),
     )
 
 
@@ -1264,6 +1340,9 @@ __all__ = [
     "integrity_metrics_from_result",
     "interpolate_truth_geodetic",
     "imu_error_metrics_from_result",
+    "lag_smoothed_integrity_metrics_from_result",
+    "lag_smoothed_position_error_history_from_truth",
+    "lag_smoothed_position_error_metrics_from_result",
     "max_absolute_error",
     "mean_absolute_error",
     "mean_error",

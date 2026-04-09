@@ -14,6 +14,7 @@ The repo is past the scaffold stage. It now has:
 - a closed-loop local-level error-state INS with constrained aiding
 - particle-filter gravity map matching
 - sequence-based gravity map matching
+- a bounded-lag sequence smoother that publishes a separate delayed navigation track
 - observability analysis for gravity-information content along a route
 - benchmark and reporting scripts
 - a validated maritime baseline with saved outputs and comparison against IMU-only
@@ -23,13 +24,14 @@ What is validated today:
 - the single-scenario maritime baseline run path
 - the core INS plus depth and velocity aiding path
 - observe-only PF and sequence map-matching diagnostics
+- the bounded-lag sequence smoother as a delayed navigation output
 - the generated validation report and benchmark artifacts
 
 What is implemented but not yet part of the validated production path:
 
 - directional PF-to-INS feedback
 - delayed sequence-to-INS feedback, including a fixed-lag replay path
-- closed-loop gravity-feedback policies that actually improve INS metrics over the validated observe-only baseline
+- closed-loop gravity-feedback policies that safely improve the live INS over the validated observe-only baseline
 
 ## What The Repo Does
 
@@ -96,7 +98,7 @@ Primary saved figures:
 
 ## Current Estimator Findings
 
-The repo now has three distinct estimator stories:
+The repo now has four distinct estimator stories:
 
 1. `INS + constrained aiding`
    This is the validated production baseline.
@@ -106,6 +108,9 @@ The repo now has three distinct estimator stories:
 
 3. `Observe-only sequence matching`
    Currently the best map-matching estimator in the benchmark set, but still not fed back into the validated INS.
+
+4. `Bounded-lag sequence smoothing`
+   A separate delayed navigation output that uses sequence-plus-gradient estimates without perturbing the live INS.
 
 ### PF vs Sequence Benchmark
 
@@ -123,6 +128,33 @@ What this means:
 - `sequence_plus_gradient` is the best current map-matching estimator in the repo
 - the INS baseline remains `103.512 m` RMSE in these benchmark runs because the sequence path is observe-only
 - sequence matching is worth keeping as a first-class estimator path even before any closed-loop sequence feedback is solved
+
+### Bounded-Lag Sequence Smoother
+
+The repo now also has a fixed-lag delayed navigation output driven by `sequence_plus_gradient`.
+
+Current benchmark on `maritime_baseline`, seed `42`:
+
+| Path | Horizontal RMSE [m] | CEP95 [m] | Vertical RMSE [m] | Horizontal HMI |
+| --- | ---: | ---: | ---: | ---: |
+| Live INS baseline | 103.512 | 189.984 | 0.821 | 0.0% |
+| Sequence + gradient observe-only matcher | 92.808 | 168.130 | n/a | n/a |
+| Bounded-lag smoothed navigation output | 98.268 | 181.906 | 0.583 | 0.0% |
+
+Acceptance runs completed with the same lag-smoother defaults:
+
+| Scenario | Seed | Live INS RMSE [m] | Lag-smoothed RMSE [m] | Live CEP95 [m] | Lag-smoothed CEP95 [m] | Lag HMI |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `maritime_baseline` | 42 | 103.512 | 98.268 | 189.984 | 181.906 | 0.0% |
+| `maritime_baseline` | 123 | 85.733 | 80.183 | 153.248 | 150.279 | 0.0% |
+| `maritime_baseline` | 777 | 249.184 | 234.013 | 425.268 | 413.821 | 0.0% |
+| `uuv_long_endurance` | 42 | 1014.818 | 1005.036 | 2319.284 | 2295.491 | 0.0% |
+
+What this means:
+
+- this is the first delayed navigation path in the repo that consistently improves navigation metrics over the live INS baseline
+- it does so without modifying the validated real-time INS path
+- it is a first-class delayed-output estimator, not a replacement for the live filter
 
 ### Directional PF Feedback
 
@@ -144,7 +176,7 @@ Conclusion:
 - the current problem is PF posterior bias/calibration, not just missing gating logic
 - more threshold tuning is not the right next closed-loop solution
 
-### Delayed Sequence Feedback
+### Closed-Loop Delayed Sequence Feedback
 
 The repo also contains an experimental delayed sequence-to-INS feedback controller.
 
@@ -219,6 +251,19 @@ python3 scripts/run_single_scenario.py \
   --map-grid-size 101
 ```
 
+Run the bounded-lag sequence smoother:
+
+```bash
+python3 scripts/run_single_scenario.py \
+  --scenario maritime_baseline \
+  --seed 42 \
+  --run-id sequence_lag \
+  --output-dir /tmp/gravnav_sequence_lag \
+  --map-matcher sequence \
+  --use-gradiometer \
+  --use-sequence-lag-smoother
+```
+
 Generate the saved validation report:
 
 ```bash
@@ -250,7 +295,7 @@ The current automated regression suite covers:
 Current status:
 
 - `python3 -m pytest -q`
-- `28 passed`
+- `30 passed`
 
 ## Reports And Artifacts
 

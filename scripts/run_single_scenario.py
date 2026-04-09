@@ -347,6 +347,41 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         if args.sequence_feedback_nis_threshold is None
         else float(args.sequence_feedback_nis_threshold)
     )
+    map_match.use_sequence_lag_smoother = bool(
+        getattr(args, "use_sequence_lag_smoother", False)
+    )
+    map_match.sequence_lag_smoother_spec.enabled = bool(
+        getattr(args, "use_sequence_lag_smoother", False)
+    )
+    map_match.sequence_lag_smoother_spec.output_lag_steps = (
+        None
+        if args.sequence_lag_output_steps is None
+        else int(args.sequence_lag_output_steps)
+    )
+    map_match.sequence_lag_smoother_spec.measurement_geometry = str(
+        args.sequence_lag_geometry
+    )
+    map_match.sequence_lag_smoother_spec.min_peak_probability = float(
+        args.sequence_lag_min_peak_prob
+    )
+    map_match.sequence_lag_smoother_spec.min_horizontal_eigenvalue_ratio = float(
+        args.sequence_lag_min_eigenvalue_ratio
+    )
+    map_match.sequence_lag_smoother_spec.max_horizontal_std_m = float(
+        args.sequence_lag_max_horizontal_std_m
+    )
+    map_match.sequence_lag_smoother_spec.max_correction_norm_m = float(
+        args.sequence_lag_max_correction_m
+    )
+    map_match.sequence_lag_smoother_spec.covariance_inflation = float(
+        args.sequence_lag_inflation
+    )
+    map_match.sequence_lag_smoother_spec.max_anchor_count = int(
+        args.sequence_lag_max_anchor_count
+    )
+    map_match.sequence_lag_smoother_spec.publish_current_replayed_state = bool(
+        args.sequence_lag_publish_current_replayed_state
+    )
     integrity = IntegrityMonitorConfig(
         enabled=not args.disable_integrity,
         horizontal_alert_limit_m=args.horizontal_alert_limit_m,
@@ -614,6 +649,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--use-sequence-lag-smoother",
+        action="store_true",
+        help=(
+            "Enable the bounded-lag sequence-driven navigation output. "
+            "This publishes a separate delayed track and does not mutate the live INS."
+        ),
+    )
+    parser.add_argument(
         "--sequence-feedback-min-peak-prob",
         type=float,
         default=0.12,
@@ -679,6 +722,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional NIS gate for delayed sequence feedback.",
     )
     parser.add_argument(
+        "--sequence-lag-output-steps",
+        type=int,
+        default=None,
+        help=(
+            "Output lag in simulation steps for the bounded-lag sequence smoother. "
+            "Defaults to sequence_window_size // 2."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-lag-geometry",
+        choices=("directional_horizontal", "full_horizontal"),
+        default="directional_horizontal",
+        help="Measurement geometry for the bounded-lag sequence smoother.",
+    )
+    parser.add_argument(
+        "--sequence-lag-min-peak-prob",
+        type=float,
+        default=0.05,
+        help="Minimum anchor peak probability for the bounded-lag sequence smoother.",
+    )
+    parser.add_argument(
+        "--sequence-lag-min-eigenvalue-ratio",
+        type=float,
+        default=1.15,
+        help="Minimum horizontal covariance eigenvalue ratio for directional lag smoothing.",
+    )
+    parser.add_argument(
+        "--sequence-lag-max-horizontal-std-m",
+        type=float,
+        default=120.0,
+        help="Maximum allowed horizontal anchor standard deviation for lag smoothing in metres.",
+    )
+    parser.add_argument(
+        "--sequence-lag-max-correction-m",
+        type=float,
+        default=30.0,
+        help="Maximum allowed horizontal anchor correction norm for lag smoothing in metres.",
+    )
+    parser.add_argument(
+        "--sequence-lag-inflation",
+        type=float,
+        default=10.0,
+        help="Covariance inflation applied to lag-smoother anchor fusion.",
+    )
+    parser.add_argument(
+        "--sequence-lag-max-anchor-count",
+        type=int,
+        default=3,
+        help="Maximum number of anchor steps fused in one lag-smoothing replay pass.",
+    )
+    parser.add_argument(
+        "--sequence-lag-publish-current-replayed-state",
+        action="store_true",
+        help="Also log the most recent replayed lag-smoother preview state.",
+    )
+    parser.add_argument(
         "--disable-depth-aid",
         action="store_true",
         help="Disable depth aiding.",
@@ -727,6 +826,14 @@ def _metrics_summary_lines(metrics: ScenarioMetricsSummary) -> list[str]:
         )
         lines.append(
             f"Sequence CEP95: {metrics.sequence_position_error.cep95_m:.3f} m"
+        )
+    if metrics.lag_smoothed_position_error is not None:
+        lines.append(
+            "Lag-smoothed horizontal RMSE: "
+            f"{metrics.lag_smoothed_position_error.horizontal_rmse_m:.3f} m"
+        )
+        lines.append(
+            f"Lag-smoothed CEP95: {metrics.lag_smoothed_position_error.cep95_m:.3f} m"
         )
 
     if metrics.integrity is not None:
@@ -845,6 +952,7 @@ def main() -> int:
                 "use_gradiometer": bool(args.use_gradiometer),
                 "gradient_std_per_s2": float(args.pf_gradient_std_per_s2),
                 "use_sequence_feedback": bool(args.use_sequence_feedback),
+                "use_sequence_lag_smoother": bool(args.use_sequence_lag_smoother),
                 "sequence_feedback_min_peak_prob": float(
                     args.sequence_feedback_min_peak_prob
                 ),
@@ -864,6 +972,27 @@ def main() -> int:
                     None
                     if args.sequence_feedback_nis_threshold is None
                     else float(args.sequence_feedback_nis_threshold)
+                ),
+                "sequence_lag_output_steps": (
+                    None
+                    if args.sequence_lag_output_steps is None
+                    else int(args.sequence_lag_output_steps)
+                ),
+                "sequence_lag_geometry": str(args.sequence_lag_geometry),
+                "sequence_lag_min_peak_prob": float(args.sequence_lag_min_peak_prob),
+                "sequence_lag_min_eigenvalue_ratio": float(
+                    args.sequence_lag_min_eigenvalue_ratio
+                ),
+                "sequence_lag_max_horizontal_std_m": float(
+                    args.sequence_lag_max_horizontal_std_m
+                ),
+                "sequence_lag_max_correction_m": float(
+                    args.sequence_lag_max_correction_m
+                ),
+                "sequence_lag_inflation": float(args.sequence_lag_inflation),
+                "sequence_lag_max_anchor_count": int(args.sequence_lag_max_anchor_count),
+                "sequence_lag_publish_current_replayed_state": bool(
+                    args.sequence_lag_publish_current_replayed_state
                 ),
                 "sequence_window_size": int(args.sequence_window_size),
                 "sequence_grid_half_span_m": [
@@ -931,6 +1060,7 @@ def main() -> int:
     print(f"Run ID: {run_id}")
     print(f"Truth samples: {len(result.truth)}")
     print(f"INS states: {len(result.estimators.ins_states)}")
+    print(f"Lag-smoothed states: {len(result.estimators.lag_smoothed_states)}")
     print(f"PF updates: {len(result.estimators.pf_updates)}")
     print(f"Sequence updates: {len(result.estimators.sequence_updates)}")
     print(f"Integrity snapshots: {len(result.estimators.integrity_snapshots)}")

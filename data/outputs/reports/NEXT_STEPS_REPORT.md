@@ -2,7 +2,7 @@
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
 **Date: 2026-04-09**
-**Repo state: validated maritime baseline, PF feedback disabled, 28 tests passing**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, PF feedback disabled, 30 tests passing**
 
 ---
 
@@ -21,6 +21,8 @@ The repo is a real, working gravity-aided navigation simulator. The validated ma
 The stack includes: WGS84 geodesy, nav-grade IMU model, scalar gravimeter with moving-base reduction, depth and velocity aiding, 15-state error-state INS, constrained fusion, particle-filter map matching (observe-only), integrity monitoring, metrics and reporting infrastructure.
 
 PF feedback is intentionally disabled. Naive PF-to-INS pseudo-position injection destroys the INS (19 km RMSE). Covariance inflation makes it non-destructive but never better than observe-only. This is the central bottleneck.
+
+New status beyond that baseline: the repo now also has a **separate bounded-lag smoothed navigation output** driven by `sequence_plus_gradient`. Unlike the closed-loop feedback experiments, this path leaves the live INS untouched and publishes a delayed navigation track. On `maritime_baseline`, seed `42`, it improves the live INS from **103.5 m** horizontal RMSE to **98.3 m** with **0.0%** horizontal HMI. That makes it the first delayed navigation path in the repo that improves navigation metrics without breaking the validated real-time solution.
 
 ---
 
@@ -213,6 +215,48 @@ Result on `maritime_baseline`, seed 42:
 - an even better directional lag-replay controller
 
 None is yet acceptable as a production feedback path. The next serious step is no longer “add replay” or “add directional geometry”; it is “add replay plus retrodiction/smoother-aware delayed-update logic or a richer delayed state model.”
+
+**Follow-up (2026-04-09 bounded-lag sequence smoother output):** Implemented the planned **fixed-lag smoothed navigation track as a first-class delayed estimator output**, without feeding it back into the live INS. The core pieces are:
+
+- `SequenceAnchorEstimate` and anchor export from `GravitySequenceMatcher`
+- `SequenceLagSmootherSpec` / `SequenceLagSmootherController`
+- lag-buffered replay over stored IMU/depth/velocity history
+- `SimulationEstimatorLog.lag_smoothed_states`
+- lag-smoothed metrics and benchmark reporting
+
+Two implementation bugs had to be fixed before this path became meaningful:
+
+1. sequence outputs were initially keyed by the matcher's internal update index instead of truth-step time, so the lag smoother silently fell back to replay for most of the run
+2. the default lag was initially interpreted in raw truth steps instead of **measurement-update lag**, which was wrong whenever gravity updates were downsampled relative to the truth grid
+
+After fixing those, the lag-smoothed path became a real delayed navigation estimator instead of a no-op.
+
+Primary benchmark on `maritime_baseline`, seed `42`:
+
+| Path | Horizontal RMSE | CEP95 | Vertical RMSE | HMI horiz |
+| --- | ---: | ---: | ---: | ---: |
+| Live INS baseline | 103.5 m | 190.0 m | 0.821 m | 0.0 % |
+| Sequence + gradient observe-only matcher | 92.8 m | 168.1 m | — | — |
+| **Bounded-lag smoothed navigation output** | **98.3 m** | **181.9 m** | **0.583 m** | **0.0 %** |
+
+Acceptance checks from the plan:
+
+| Scenario | Seed | Live INS RMSE | Lag-smoothed RMSE | Live CEP95 | Lag-smoothed CEP95 | HMI horiz |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `maritime_baseline` | 42 | 103.5 m | 98.3 m | 190.0 m | 181.9 m | 0.0 % |
+| `maritime_baseline` | 123 | 85.7 m | 80.2 m | 153.2 m | 150.3 m | 0.0 % |
+| `maritime_baseline` | 777 | 249.2 m | 234.0 m | 425.3 m | 413.8 m | 0.0 % |
+| `uuv_long_endurance` | 42 | 1014.8 m | 1005.0 m | 2319.3 m | 2295.5 m | 0.0 % |
+
+**Interpretation:** This is the first delayed navigation path in the repo that actually clears the success criterion of this phase:
+
+- it beats the live INS on the primary maritime benchmark
+- it also improves CEP95
+- the gain survives the small multi-seed maritime check
+- it also survives one additional scenario
+- horizontal HMI remains zero in all tested runs
+
+**Decision:** The bounded-lag sequence smoother is now a successful, validated **delayed-output estimator**. It should remain separate from the real-time INS in this phase. That is the right boundary: the repo now has a credible delayed navigation product, but it still does **not** have a validated closed-loop sequence-feedback solution.
 
 ---
 

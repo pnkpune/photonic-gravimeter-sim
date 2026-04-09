@@ -63,19 +63,25 @@ from ..estimators.error_state_ins import (
     ERR_POS,
     ERR_VEL,
     ErrorStateINS,
+    ErrorStateINSState,
+    ErrorStatePropagationMatrices,
     ErrorStateINSProcessNoise,
 )
 from ..estimators.feedback_policy import (
     DirectionalFeedbackController,
     DirectionalFeedbackSpec,
+    SequenceLagSmootherController,
+    SequenceLagSmootherSpec,
     SequenceFeedbackController,
     SequenceFeedbackSpec,
     summarize_directional_feedback,
+    summarize_sequence_lag_smoother,
     summarize_sequence_feedback,
 )
 from ..estimators.gravity_sequence_match import (
     GravitySequenceMatcher,
     GravitySequenceMatcherSpec,
+    SequenceAnchorEstimate,
 )
 from ..estimators.fusion import (
     apply_depth_sensor_measurement,
@@ -180,6 +186,43 @@ def _should_use_sensor_turn_on_bias(
     """
     arr = _axis3(configured_std, name="configured_std")
     return bool(np.all(arr == 0.0))
+
+
+def _resolve_sequence_lag_output_steps(
+    smoother_spec: SequenceLagSmootherSpec,
+    sequence_spec: GravitySequenceMatcherSpec,
+    *,
+    update_stride_steps: int = 1,
+) -> int:
+    """
+    Resolve the configured lag-smoothed output delay in steps.
+    """
+    if smoother_spec.output_lag_steps is not None:
+        return max(0, int(smoother_spec.output_lag_steps))
+    return max(0, int(sequence_spec.window_size // 2) * max(1, int(update_stride_steps)))
+
+
+def _sequence_anchor_max_horizontal_std_m(anchor: SequenceAnchorEstimate) -> float:
+    """
+    Conservative horizontal-std proxy for ranking overlapping anchors.
+    """
+    P_h = np.asarray(anchor.covariance_ned_m2[:2, :2], dtype=np.float64)
+    diag = np.maximum(np.diag(0.5 * (P_h + P_h.T)), 0.0)
+    return float(np.sqrt(np.max(diag)))
+
+
+def _sequence_anchor_quality_key(anchor: SequenceAnchorEstimate) -> tuple[float, float, float]:
+    """
+    Sort key for choosing the strongest anchor per delayed step.
+
+    Higher peak probability wins, then lower entropy, then lower horizontal
+    standard deviation.
+    """
+    return (
+        -float(anchor.marginal_peak_probability),
+        float(anchor.posterior_entropy_nats),
+        _sequence_anchor_max_horizontal_std_m(anchor),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -407,6 +450,11 @@ class MapMatchFeedbackConfig:
         the live INS. Only valid when ``matcher="sequence"``.
     sequence_feedback_spec : SequenceFeedbackSpec
         Configuration for delayed sequence feedback.
+    use_sequence_lag_smoother : bool, default=False
+        Whether to publish a separate bounded-lag navigation track driven by
+        sequence anchors. This path does not mutate the live INS.
+    sequence_lag_smoother_spec : SequenceLagSmootherSpec
+        Configuration for the bounded-lag sequence smoother.
     """
 
     enabled: bool = True
@@ -423,11 +471,15 @@ class MapMatchFeedbackConfig:
     inject_position_to_ins: bool = False
     use_directional_feedback: bool = False
     use_sequence_feedback: bool = False
+    use_sequence_lag_smoother: bool = False
     directional_feedback_spec: DirectionalFeedbackSpec = field(
         default_factory=DirectionalFeedbackSpec
     )
     sequence_feedback_spec: SequenceFeedbackSpec = field(
         default_factory=SequenceFeedbackSpec
+    )
+    sequence_lag_smoother_spec: SequenceLagSmootherSpec = field(
+        default_factory=SequenceLagSmootherSpec
     )
     feedback_covariance_inflation: float = 1.0
     feedback_min_std_geodetic: ArrayLike | float = (0.0, 0.0, 0.0)
@@ -464,6 +516,7 @@ class MapMatchFeedbackConfig:
             )
         self.use_gradiometer = bool(self.use_gradiometer)
         self.use_sequence_feedback = bool(self.use_sequence_feedback)
+        self.use_sequence_lag_smoother = bool(self.use_sequence_lag_smoother)
         if self.gradient_meas_std_per_s2 is not None:
             self.gradient_meas_std_per_s2 = _positive_scalar(
                 self.gradient_meas_std_per_s2,
@@ -1015,6 +1068,9 @@ class ScenarioSimulationRunner:
         velocity_measurements_by_step: list[Optional[VelocityAidMeasurement]],
         depth_variance_m2: float,
         velocity_R: FloatArray,
+        sequence_lag_smoother_ctrl: Optional[SequenceLagSmootherController] = None,
+        anchors_by_step: Optional[dict[int, list[SequenceAnchorEstimate]]] = None,
+        lag_smoother_log: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[ErrorStateINS, list[Any]]:
         """
         Replay one lag segment from a corrected historical INS state.
@@ -1038,6 +1094,15 @@ class ScenarioSimulationRunner:
             )
 
         replay_ins = ErrorStateINS(initial_state.copy())
+
+        if sequence_lag_smoother_ctrl is not None and anchors_by_step is not None:
+            for anchor in anchors_by_step.get(start_index, []):
+                lag_result = sequence_lag_smoother_ctrl.evaluate_anchor(anchor, replay_ins)
+                if lag_smoother_log is not None:
+                    row = summarize_sequence_lag_smoother(lag_result)
+                    row["replay_step_index"] = int(start_index)
+                    lag_smoother_log.append(row)
+
         replayed_states = [replay_ins.state.copy()]
 
         for step_idx in range(start_index + 1, end_index + 1):
@@ -1065,6 +1130,14 @@ class ScenarioSimulationRunner:
                     vel_meas,
                     velocity_R=velocity_R,
                 )
+
+            if sequence_lag_smoother_ctrl is not None and anchors_by_step is not None:
+                for anchor in anchors_by_step.get(step_idx, []):
+                    lag_result = sequence_lag_smoother_ctrl.evaluate_anchor(anchor, replay_ins)
+                    if lag_smoother_log is not None:
+                        row = summarize_sequence_lag_smoother(lag_result)
+                        row["replay_step_index"] = int(step_idx)
+                        lag_smoother_log.append(row)
 
             replayed_states.append(replay_ins.state.copy())
 
@@ -1130,6 +1203,7 @@ class ScenarioSimulationRunner:
         pf: Optional[GravityMapParticleFilter] = None
         sequence_matcher: Optional[GravitySequenceMatcher] = None
         sequence_feedback_ctrl: Optional[SequenceFeedbackController] = None
+        sequence_lag_smoother_ctrl: Optional[SequenceLagSmootherController] = None
         directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
         observability: Optional[ObservabilityAnalyzer] = None
         resolved_map = resolve_map_model(map_model)
@@ -1171,6 +1245,11 @@ class ScenarioSimulationRunner:
                     sequence_feedback_ctrl = SequenceFeedbackController(
                         cfg.map_match.sequence_feedback_spec,
                     )
+                if cfg.map_match.use_sequence_lag_smoother:
+                    cfg.map_match.sequence_lag_smoother_spec.enabled = True
+                    sequence_lag_smoother_ctrl = SequenceLagSmootherController(
+                        cfg.map_match.sequence_lag_smoother_spec,
+                    )
 
         integrity = self._make_integrity_monitor()
 
@@ -1194,6 +1273,306 @@ class ScenarioSimulationRunner:
         last_depth_sample_time_s: Optional[float] = None
         depth_measurements_by_step: list[Optional[DepthMeasurement]] = [None] * len(truth)
         velocity_measurements_by_step: list[Optional[VelocityAidMeasurement]] = [None] * len(truth)
+        prediction_mats_by_step: list[Optional[ErrorStatePropagationMatrices]] = [None] * max(0, len(truth) - 1)
+        sequence_anchor_candidates_by_step: dict[int, list[SequenceAnchorEstimate]] = {}
+        sequence_updates_by_step: dict[int, Any] = {}
+        truth_time_s = np.asarray(truth.time_s, dtype=np.float64)
+        if truth_time_s.size >= 2:
+            min_truth_dt_s = float(np.min(np.diff(truth_time_s)))
+        else:
+            min_truth_dt_s = 1.0
+        time_alignment_tol_s = max(1.0e-9, 0.25 * min_truth_dt_s)
+        if cfg.map_match.schedule.every_steps is not None:
+            sequence_update_stride_steps = max(1, int(cfg.map_match.schedule.every_steps))
+        elif cfg.map_match.schedule.period_s is not None:
+            sequence_update_stride_steps = max(
+                1,
+                int(round(float(cfg.map_match.schedule.period_s) / min_truth_dt_s)),
+            )
+        else:
+            sequence_update_stride_steps = 1
+        sequence_window_span_steps = max(
+            1,
+            int(cfg.map_match.sequence_spec.window_size) * sequence_update_stride_steps,
+        )
+        lag_output_lag_steps = _resolve_sequence_lag_output_steps(
+            cfg.map_match.sequence_lag_smoother_spec,
+            cfg.map_match.sequence_spec,
+            update_stride_steps=sequence_update_stride_steps,
+        )
+        lag_buffer_steps = max(
+            lag_output_lag_steps,
+            sequence_window_span_steps,
+        ) + sequence_window_span_steps
+        last_published_lag_smoothed_step = -1
+
+        def _record_sequence_match_outputs(
+            seq_updates: list[Any],
+        ) -> None:
+            if sequence_lag_smoother_ctrl is None:
+                return
+
+            def _truth_step_from_time(time_s: float) -> int:
+                t = float(time_s)
+                idx = int(np.searchsorted(truth_time_s, t, side="left"))
+                candidate_indices: list[int] = []
+                if idx < len(truth_time_s):
+                    candidate_indices.append(idx)
+                if idx > 0:
+                    candidate_indices.append(idx - 1)
+                if len(candidate_indices) == 0:
+                    raise ValueError("Truth trajectory is empty.")
+                best_idx = min(
+                    candidate_indices,
+                    key=lambda i: abs(float(truth_time_s[i]) - t),
+                )
+                if abs(float(truth_time_s[best_idx]) - t) > time_alignment_tol_s:
+                    raise ValueError(
+                        "Sequence output time cannot be aligned to the truth grid: "
+                        f"time_s={t:.9f}, nearest_truth_time_s={float(truth_time_s[best_idx]):.9f}, "
+                        f"tol_s={time_alignment_tol_s:.9f}."
+                    )
+                return int(best_idx)
+
+            for update in seq_updates:
+                update_step = _truth_step_from_time(float(update.time_s))
+                sequence_updates_by_step[update_step] = update
+                for anchor in update.anchor_estimates:
+                    anchor_step = _truth_step_from_time(float(anchor.time_s))
+                    sequence_anchor_candidates_by_step.setdefault(
+                        anchor_step,
+                        [],
+                    ).append(anchor)
+
+        def _select_lag_anchor_measurements(
+            start_index: int,
+            end_index: int,
+        ) -> dict[int, list[SequenceAnchorEstimate]]:
+            if sequence_lag_smoother_ctrl is None:
+                return {}
+
+            best_by_step: dict[int, SequenceAnchorEstimate] = {}
+            for step_index, anchors in sequence_anchor_candidates_by_step.items():
+                if step_index < start_index or step_index > end_index or len(anchors) == 0:
+                    continue
+                best_by_step[int(step_index)] = min(
+                    anchors,
+                    key=_sequence_anchor_quality_key,
+                )
+
+            if len(best_by_step) == 0:
+                return {}
+
+            priority_step = max(start_index, end_index - lag_output_lag_steps)
+            selected_steps: list[int] = []
+            if priority_step in best_by_step:
+                selected_steps.append(int(priority_step))
+
+            max_offset = max(priority_step - start_index, end_index - priority_step)
+            for offset in range(1, max_offset + 1):
+                if len(selected_steps) >= sequence_lag_smoother_ctrl.spec.max_anchor_count:
+                    break
+                left = priority_step - offset
+                if left in best_by_step and left not in selected_steps:
+                    selected_steps.append(int(left))
+                    if len(selected_steps) >= sequence_lag_smoother_ctrl.spec.max_anchor_count:
+                        break
+                right = priority_step + offset
+                if right in best_by_step and right not in selected_steps:
+                    selected_steps.append(int(right))
+                    if len(selected_steps) >= sequence_lag_smoother_ctrl.spec.max_anchor_count:
+                        break
+
+            if len(selected_steps) < sequence_lag_smoother_ctrl.spec.max_anchor_count:
+                remaining = sorted(
+                    (
+                        step_index,
+                        anchor,
+                    )
+                    for step_index, anchor in best_by_step.items()
+                    if step_index not in selected_steps
+                )
+                remaining.sort(key=lambda item: _sequence_anchor_quality_key(item[1]))
+                for step_index, _ in remaining:
+                    selected_steps.append(int(step_index))
+                    if len(selected_steps) >= sequence_lag_smoother_ctrl.spec.max_anchor_count:
+                        break
+
+            selected: dict[int, list[SequenceAnchorEstimate]] = {}
+            for step_index in sorted(selected_steps):
+                anchor = best_by_step[step_index]
+                selected.setdefault(int(step_index), []).append(anchor)
+            return selected
+
+        def _publish_lag_smoothed_states(
+            current_step: int,
+            *,
+            final_flush: bool = False,
+        ) -> None:
+            nonlocal last_published_lag_smoothed_step
+
+            if (
+                sequence_lag_smoother_ctrl is None
+                or len(estimators.ins_states) == 0
+                or len(sequence_anchor_candidates_by_step) == 0
+            ):
+                return
+
+            end_index = int(current_step)
+            start_index = max(0, end_index - lag_buffer_steps)
+            anchors_by_step = _select_lag_anchor_measurements(start_index, end_index)
+            lag_log_rows: list[dict[str, Any]] = []
+
+            replay_ins, replayed_states = self._replay_ins_segment(
+                truth=truth,
+                start_index=start_index,
+                end_index=end_index,
+                initial_state=estimators.ins_states[start_index],
+                imu_samples=sensors.imu_samples,
+                depth_measurements_by_step=depth_measurements_by_step,
+                velocity_measurements_by_step=velocity_measurements_by_step,
+                depth_variance_m2=depth_variance_m2,
+                velocity_R=velocity_R,
+                sequence_lag_smoother_ctrl=sequence_lag_smoother_ctrl,
+                anchors_by_step=anchors_by_step,
+                lag_smoother_log=lag_log_rows,
+            )
+
+            for row in lag_log_rows:
+                estimators.add_custom_sample(
+                    "sequence_lag_smoother_anchors",
+                    row,
+                )
+
+            if sequence_lag_smoother_ctrl.spec.publish_current_replayed_state:
+                estimators.add_custom_sample(
+                    "sequence_lag_smoother_preview",
+                    {
+                        "time_s": float(truth.time_s[end_index]),
+                        "step_index": int(end_index),
+                        "start_index": int(start_index),
+                        "end_index": int(end_index),
+                        "num_anchor_steps": int(len(anchors_by_step)),
+                        "lat_rad": float(replay_ins.state.nominal.lat_rad),
+                        "lon_rad": float(replay_ins.state.nominal.lon_rad),
+                        "height_m": float(replay_ins.state.nominal.height_m),
+                    },
+                )
+
+            publish_upto = end_index if final_flush else max(
+                -1,
+                end_index - lag_output_lag_steps,
+            )
+            publish_start = max(last_published_lag_smoothed_step + 1, start_index)
+
+            for step_index in range(publish_start, publish_upto + 1):
+                local_index = step_index - start_index
+                if local_index < 0 or local_index >= len(replayed_states):
+                    continue
+                replayed_state = replayed_states[local_index].copy()
+                published_state = replayed_state.copy()
+
+                publish_anchor_applied = False
+                publish_source = "replay"
+                publish_anchor = None
+                direct_update = sequence_updates_by_step.get(step_index)
+                if direct_update is not None:
+                    P_pos = np.asarray(
+                        direct_update.estimate.covariance_geodetic,
+                        dtype=np.float64,
+                    )
+                    P_pos = 0.5 * (P_pos + P_pos.T)
+                    P_pos += np.diag(np.full(3, 1.0e-12, dtype=np.float64))
+                    published_state.nominal.lat_rad = float(direct_update.estimate.lat_rad)
+                    published_state.nominal.lon_rad = float(direct_update.estimate.lon_rad)
+                    published_state.nominal.height_m = float(direct_update.estimate.height_m)
+                    published_state.P[ERR_POS, :] = 0.0
+                    published_state.P[:, ERR_POS] = 0.0
+                    published_state.P[ERR_POS, ERR_POS] = P_pos
+                    publish_anchor_applied = True
+                    publish_source = "sequence_update"
+                else:
+                    anchor_candidates = sequence_anchor_candidates_by_step.get(step_index, [])
+                    if len(anchor_candidates) > 0:
+                        publish_anchor = min(
+                            anchor_candidates,
+                            key=_sequence_anchor_quality_key,
+                        )
+                        publish_anchor_std = _sequence_anchor_max_horizontal_std_m(
+                            publish_anchor
+                        )
+                        if (
+                            float(publish_anchor.marginal_peak_probability)
+                            >= sequence_lag_smoother_ctrl.spec.min_peak_probability
+                            and publish_anchor_std
+                            <= sequence_lag_smoother_ctrl.spec.max_horizontal_std_m
+                        ):
+                            P_pos = np.asarray(
+                                publish_anchor.covariance_geodetic,
+                                dtype=np.float64,
+                            )
+                            P_pos = 0.5 * (P_pos + P_pos.T)
+                            P_pos += np.diag(np.full(3, 1.0e-12, dtype=np.float64))
+                            published_state.nominal.lat_rad = float(publish_anchor.lat_rad)
+                            published_state.nominal.lon_rad = float(publish_anchor.lon_rad)
+                            published_state.nominal.height_m = float(publish_anchor.height_m)
+                            published_state.P[ERR_POS, :] = 0.0
+                            published_state.P[:, ERR_POS] = 0.0
+                            published_state.P[ERR_POS, ERR_POS] = P_pos
+                            publish_anchor_applied = True
+                            publish_source = "sequence_anchor"
+
+                estimators.append_lag_smoothed_state(published_state)
+
+                if integrity is not None:
+                    snap = integrity_snapshot_from_ins(
+                        published_state,
+                        true_lat_rad=float(truth.lat_rad[step_index]),
+                        true_lon_rad=float(truth.lon_rad[step_index]),
+                        true_height_m=float(truth.height_m[step_index]),
+                        horizontal_alert_limit_m=integrity.horizontal_alert_limit_m,
+                        vertical_alert_limit_m=integrity.vertical_alert_limit_m,
+                        horizontal_k_sigma=integrity.horizontal_k_sigma,
+                        vertical_k_sigma=integrity.vertical_k_sigma,
+                        radial_k_sigma=integrity.radial_k_sigma,
+                        consistency_confidence=integrity.consistency_confidence,
+                        time_s=float(truth.time_s[step_index]),
+                    )
+                    estimators.lag_smoothed_integrity_snapshots.append(snap)
+
+                applied_here = [
+                    row
+                    for row in lag_log_rows
+                    if int(row["replay_step_index"]) == int(step_index) and bool(row.get("applied"))
+                ]
+                estimators.add_custom_sample(
+                    "sequence_lag_smoothed_publish",
+                    {
+                        "step_index": int(step_index),
+                        "time_s": float(truth.time_s[step_index]),
+                        "start_index": int(start_index),
+                        "end_index": int(end_index),
+                        "num_anchor_steps_considered": int(len(anchors_by_step)),
+                        "num_anchor_updates_applied_here": int(len(applied_here)),
+                        "publish_anchor_applied": bool(publish_anchor_applied),
+                        "publish_source": publish_source,
+                        "publish_anchor_peak_probability": (
+                            None
+                            if publish_anchor is None
+                            else float(publish_anchor.marginal_peak_probability)
+                        ),
+                    },
+                )
+                last_published_lag_smoothed_step = int(step_index)
+
+            stale_keys = [
+                step_index
+                for step_index in sequence_anchor_candidates_by_step
+                if step_index <= last_published_lag_smoothed_step
+            ]
+            for step_index in stale_keys:
+                sequence_anchor_candidates_by_step.pop(step_index, None)
+                sequence_updates_by_step.pop(step_index, None)
 
         for k in range(1, len(truth)):
             t_now = float(truth.time_s[k])
@@ -1239,7 +1618,7 @@ class ScenarioSimulationRunner:
             )
             sensors.imu_samples.append(imu_meas)
 
-            ins.predict(
+            prediction_mats_by_step[k - 1] = ins.predict(
                 imu_meas.omega_ib_b_radps,
                 imu_meas.f_ib_b_mps2,
                 dt,
@@ -1485,6 +1864,7 @@ class ScenarioSimulationRunner:
                     )
                     if len(seq_updates) > 0:
                         estimators.sequence_updates.extend(seq_updates)
+                        _record_sequence_match_outputs(seq_updates)
                         if sequence_feedback_ctrl is not None:
                             selected_update = seq_updates[-1]
                             seq_fb_summary: dict[str, Any]
@@ -1599,8 +1979,16 @@ class ScenarioSimulationRunner:
                 )
                 estimators.integrity_snapshots.append(snap)
 
+            if sequence_lag_smoother_ctrl is not None and sequence_matcher is not None:
+                _publish_lag_smoothed_states(k, final_flush=False)
+
         if sequence_matcher is not None:
-            estimators.sequence_updates.extend(sequence_matcher.finalize())
+            final_seq_updates = sequence_matcher.finalize()
+            if len(final_seq_updates) > 0:
+                estimators.sequence_updates.extend(final_seq_updates)
+                _record_sequence_match_outputs(final_seq_updates)
+            if sequence_lag_smoother_ctrl is not None:
+                _publish_lag_smoothed_states(len(truth) - 1, final_flush=True)
 
         return ScenarioSimulationResult(
             truth=truth.copy(),

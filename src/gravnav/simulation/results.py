@@ -392,6 +392,8 @@ class ScenarioSimulationSummary:
         Number of velocity-aid samples.
     num_ins_states : int
         Number of INS states logged.
+    num_lag_smoothed_states : int
+        Number of delayed lag-smoothed navigation states logged.
     num_pf_updates : int
         Number of PF updates logged.
     num_sequence_updates : int
@@ -409,6 +411,7 @@ class ScenarioSimulationSummary:
     num_depth_samples: int
     num_velocity_aid_samples: int
     num_ins_states: int
+    num_lag_smoothed_states: int
     num_pf_updates: int
     num_sequence_updates: int
     num_integrity_snapshots: int
@@ -686,6 +689,8 @@ class SimulationEstimatorLog:
     ----------
     ins_states : list[ErrorStateINSState]
         Logged INS states.
+    lag_smoothed_states : list[ErrorStateINSState]
+        Logged delayed lag-smoothed navigation states.
     pf_updates : list[MapMatchPFUpdateResult]
         Logged gravity-map PF updates.
     sequence_updates : list[SequenceMatchUpdateResult]
@@ -697,9 +702,11 @@ class SimulationEstimatorLog:
     """
 
     ins_states: list[ErrorStateINSState] = field(default_factory=list)
+    lag_smoothed_states: list[ErrorStateINSState] = field(default_factory=list)
     pf_updates: list[MapMatchPFUpdateResult] = field(default_factory=list)
     sequence_updates: list[SequenceMatchUpdateResult] = field(default_factory=list)
     integrity_snapshots: list[IntegritySnapshot] = field(default_factory=list)
+    lag_smoothed_integrity_snapshots: list[IntegritySnapshot] = field(default_factory=list)
     custom_streams: dict[str, list[Any]] = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
@@ -708,9 +715,11 @@ class SimulationEstimatorLog:
         """
         out = {
             "ins_states": len(self.ins_states),
+            "lag_smoothed_states": len(self.lag_smoothed_states),
             "pf_updates": len(self.pf_updates),
             "sequence_updates": len(self.sequence_updates),
             "integrity_snapshots": len(self.integrity_snapshots),
+            "lag_smoothed_integrity_snapshots": len(self.lag_smoothed_integrity_snapshots),
         }
         for key, value in self.custom_streams.items():
             out[f"custom:{key}"] = len(value)
@@ -731,6 +740,15 @@ class SimulationEstimatorLog:
         """
         key = str(name)
         self.custom_streams.setdefault(key, []).append(sample)
+
+    def append_lag_smoothed_state(
+        self,
+        ins_or_state: ErrorStateINS | ErrorStateINSState,
+    ) -> None:
+        """
+        Append one delayed lag-smoothed navigation state.
+        """
+        self.lag_smoothed_states.append(_state_from_filter_or_state(ins_or_state).copy())
 
     def ins_history_arrays(self) -> dict[str, np.ndarray]:
         """
@@ -849,12 +867,61 @@ class SimulationEstimatorLog:
 
         return out
 
+    def lag_smoothed_history_arrays(self) -> dict[str, np.ndarray]:
+        """
+        Extract lag-smoothed navigation history arrays.
+        """
+        n = len(self.lag_smoothed_states)
+        out: dict[str, np.ndarray] = {
+            "lag_smoothed_time_s": np.full(n, np.nan, dtype=np.float64),
+            "lag_smoothed_lat_rad": np.empty(n, dtype=np.float64),
+            "lag_smoothed_lon_rad": np.empty(n, dtype=np.float64),
+            "lag_smoothed_height_m": np.empty(n, dtype=np.float64),
+            "lag_smoothed_v_ned_mps": np.empty((n, 3), dtype=np.float64),
+            "lag_smoothed_C_n_b": np.empty((n, 3, 3), dtype=np.float64),
+            "lag_smoothed_gyro_bias_radps": np.empty((n, 3), dtype=np.float64),
+            "lag_smoothed_accel_bias_mps2": np.empty((n, 3), dtype=np.float64),
+            "lag_smoothed_P": np.empty((n, 15, 15), dtype=np.float64),
+        }
+
+        for k, state in enumerate(self.lag_smoothed_states):
+            nom = state.nominal
+            out["lag_smoothed_time_s"][k] = _safe_float_attr(nom, "time_s", np.nan)
+            out["lag_smoothed_lat_rad"][k] = float(_get_required_attr(nom, "lat_rad"))
+            out["lag_smoothed_lon_rad"][k] = float(_get_required_attr(nom, "lon_rad"))
+            out["lag_smoothed_height_m"][k] = float(_get_required_attr(nom, "height_m"))
+            out["lag_smoothed_v_ned_mps"][k] = _vec3(
+                _get_required_attr(nom, "v_ned_mps"),
+                name="v_ned_mps",
+            )
+            out["lag_smoothed_C_n_b"][k] = _mat3(
+                _get_required_attr(nom, "C_n_b"),
+                name="C_n_b",
+            )
+            out["lag_smoothed_gyro_bias_radps"][k] = _vec3(
+                _get_required_attr(nom, "gyro_bias_radps"),
+                name="gyro_bias_radps",
+            )
+            out["lag_smoothed_accel_bias_mps2"][k] = _vec3(
+                _get_required_attr(nom, "accel_bias_mps2"),
+                name="accel_bias_mps2",
+            )
+            P = _as_float_array(state.P)
+            if P.shape != (15, 15):
+                raise ValueError(
+                    f"Lag-smoothed covariance must be (15, 15), got {P.shape}."
+                )
+            out["lag_smoothed_P"][k] = P
+
+        return out
+
     def sequence_history_arrays(self) -> dict[str, np.ndarray]:
         """
         Extract sequence-matcher update history arrays.
         """
         n = len(self.sequence_updates)
         out: dict[str, np.ndarray] = {
+            "sequence_global_index": np.empty(n, dtype=np.int64),
             "sequence_time_s": np.full(n, np.nan, dtype=np.float64),
             "sequence_lat_rad": np.empty(n, dtype=np.float64),
             "sequence_lon_rad": np.empty(n, dtype=np.float64),
@@ -876,6 +943,7 @@ class SimulationEstimatorLog:
 
         for k, upd in enumerate(self.sequence_updates):
             est = upd.estimate
+            out["sequence_global_index"][k] = int(_get_required_attr(upd, "global_index"))
             out["sequence_time_s"][k] = float(_get_required_attr(upd, "time_s"))
             out["sequence_lat_rad"][k] = float(_get_required_attr(est, "lat_rad"))
             out["sequence_lon_rad"][k] = float(_get_required_attr(est, "lon_rad"))
@@ -1078,6 +1146,7 @@ class ScenarioSimulationResult:
             num_depth_samples=int(sensor_counts.get("depth", 0)),
             num_velocity_aid_samples=int(sensor_counts.get("velocity_aid", 0)),
             num_ins_states=int(estimator_counts.get("ins_states", 0)),
+            num_lag_smoothed_states=int(estimator_counts.get("lag_smoothed_states", 0)),
             num_pf_updates=int(estimator_counts.get("pf_updates", 0)),
             num_sequence_updates=int(estimator_counts.get("sequence_updates", 0)),
             num_integrity_snapshots=int(
@@ -1125,6 +1194,8 @@ class ScenarioSimulationResult:
 
         if len(self.estimators.ins_states) > 0:
             out.update(self.estimators.ins_history_arrays())
+        if len(self.estimators.lag_smoothed_states) > 0:
+            out.update(self.estimators.lag_smoothed_history_arrays())
         if len(self.estimators.pf_updates) > 0:
             out.update(self.estimators.pf_history_arrays())
         if len(self.estimators.sequence_updates) > 0:

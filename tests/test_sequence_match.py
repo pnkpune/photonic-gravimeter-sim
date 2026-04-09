@@ -17,9 +17,14 @@ from gravnav.estimators.map_match_pf import (
 )
 from gravnav.sensors.depth import DepthSensorSpec
 from gravnav.sensors.gravimeter import GravimeterSpec
+from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
 from gravnav.sensors.imu import IMUSpec
 from gravnav.sensors.velocity_aid import VelocityAidSpec
-from gravnav.simulation.metrics import sequence_position_error_metrics_from_result
+from gravnav.simulation.metrics import (
+    ins_position_error_metrics_from_result,
+    lag_smoothed_position_error_metrics_from_result,
+    sequence_position_error_metrics_from_result,
+)
 from gravnav.simulation.runner import ScenarioSimulationRunner, SimulationRunnerConfig
 from gravnav.truth.scenarios import build_truth_trajectory_from_scenario, get_named_scenario
 
@@ -165,6 +170,75 @@ def test_sequence_matcher_recovers_constant_ins_offset_on_quadratic_map() -> Non
     assert outputs[-1].window_size_used <= matcher.spec.window_size
 
 
+def test_sequence_matcher_emits_deterministic_anchor_estimates() -> None:
+    lat0 = np.deg2rad(18.25)
+    lon0 = np.deg2rad(72.75)
+    h0 = 0.0
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+
+    matcher = GravitySequenceMatcher(
+        GravitySequenceMatcherSpec(
+            window_size=7,
+            grid_half_span_m=(80.0, 80.0),
+            grid_spacing_m=(10.0, 10.0),
+            transition_std_m=(8.0, 8.0),
+            center_prior_std_m=(60.0, 60.0),
+            gravity_meas_std_mps2=2.0e-7,
+            height_std_m=1.0,
+        ),
+        map_fn,
+    )
+
+    truth_offsets = np.array(
+        [[20.0 * k, 8.0 * k, 0.0] for k in range(9)],
+        dtype=np.float64,
+    )
+    ins_bias = np.array([30.0, -18.0, 0.0], dtype=np.float64)
+    outputs = []
+    for k, offset in enumerate(truth_offsets):
+        lat_true, lon_true, h_true = apply_ned_offsets_to_geodetic(
+            np.array([lat0], dtype=np.float64),
+            np.array([lon0], dtype=np.float64),
+            np.array([h0], dtype=np.float64),
+            offset.reshape(1, 3),
+        )
+        lat_ins, lon_ins, h_ins = apply_ned_offsets_to_geodetic(
+            np.array([lat0], dtype=np.float64),
+            np.array([lon0], dtype=np.float64),
+            np.array([h0], dtype=np.float64),
+            (offset + ins_bias).reshape(1, 3),
+        )
+        g_meas = float(
+            map_fn(
+                np.array([lat_true[0]], dtype=np.float64),
+                np.array([lon_true[0]], dtype=np.float64),
+                np.array([h_true[0]], dtype=np.float64),
+            )[0]
+        )
+        outputs.extend(
+            matcher.update(
+                g_meas,
+                gravity_meas_std_mps2=2.0e-7,
+                ins_or_state=_make_state(
+                    time_s=float(k),
+                    lat_rad=float(lat_ins[0]),
+                    lon_rad=float(lon_ins[0]),
+                    height_m=float(h_ins[0]),
+                ),
+                time_s=float(k),
+            )
+        )
+    outputs.extend(matcher.finalize())
+
+    mid_result = outputs[4]
+    assert len(mid_result.anchor_estimates) == 3
+    anchor_times = [float(anchor.time_s) for anchor in mid_result.anchor_estimates]
+    assert anchor_times == sorted(anchor_times)
+    assert any(abs(float(mid_result.time_s) - t) < 1.0e-12 for t in anchor_times)
+    assert all(anchor.covariance_ned_m2.shape == (3, 3) for anchor in mid_result.anchor_estimates)
+    assert all(anchor.global_index >= 0 for anchor in mid_result.anchor_estimates)
+
+
 def test_runner_sequence_matcher_logs_updates_and_metrics() -> None:
     scenario = get_named_scenario("maritime_baseline")
     truth = build_truth_trajectory_from_scenario(scenario, dt_s=5.0)
@@ -280,3 +354,82 @@ def test_runner_sequence_feedback_path_executes_and_logs() -> None:
     assert "target_step_index" in first
     assert "replayed_steps" in first
     assert "matcher_reset" in first
+
+
+def test_runner_sequence_lag_smoother_improves_output_without_mutating_live_ins() -> None:
+    scenario = get_named_scenario("maritime_baseline")
+    truth = build_truth_trajectory_from_scenario(scenario, dt_s=5.0)
+    lat0 = float(truth.lat_rad[0])
+    lon0 = float(truth.lon_rad[0])
+    h0 = float(truth.height_m[0])
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+
+    def _run(use_lag_smoother: bool):
+        cfg = SimulationRunnerConfig()
+        cfg.map_match.matcher = "sequence"
+        cfg.map_match.use_gradiometer = True
+        cfg.map_match.use_sequence_lag_smoother = use_lag_smoother
+        cfg.map_match.sequence_spec = GravitySequenceMatcherSpec(
+            window_size=7,
+            grid_half_span_m=(120.0, 120.0),
+            grid_spacing_m=(20.0, 20.0),
+            transition_std_m=(18.0, 18.0),
+            center_prior_std_m=(70.0, 70.0),
+            gravity_meas_std_mps2=5.0e-7,
+            gradient_meas_std_per_s2=5.0e-9,
+            height_std_m=1.0,
+        )
+        cfg.map_match.gravity_meas_std_mps2 = 5.0e-7
+        cfg.map_match.gradient_meas_std_per_s2 = 5.0e-9
+        cfg.map_match.depth_meas_std_m = 0.1
+        cfg.map_match.schedule.every_steps = 2
+        cfg.map_match.sequence_lag_smoother_spec.measurement_geometry = "directional_horizontal"
+        cfg.map_match.sequence_lag_smoother_spec.min_peak_probability = 0.02
+        cfg.map_match.sequence_lag_smoother_spec.min_horizontal_eigenvalue_ratio = 1.0
+        cfg.map_match.sequence_lag_smoother_spec.max_horizontal_std_m = 160.0
+        cfg.map_match.sequence_lag_smoother_spec.max_correction_norm_m = 80.0
+        cfg.map_match.sequence_lag_smoother_spec.covariance_inflation = 6.0
+        cfg.map_match.sequence_lag_smoother_spec.max_anchor_count = 3
+        cfg.observability.enabled = False
+
+        runner = ScenarioSimulationRunner(cfg)
+        return runner.run_with_specs(
+            scenario_or_truth=truth,
+            imu_spec=IMUSpec(
+                gyro_fixed_bias_radps=(4.0e-4, -2.0e-4, 3.0e-4),
+                accel_fixed_bias_mps2=(1.5e-3, -1.0e-3, 8.0e-4),
+                name="biased_test_imu",
+            ),
+            gravimeter_spec=GravimeterSpec.perfect_relative(),
+            depth_spec=DepthSensorSpec.perfect(),
+            velocity_aid_spec=VelocityAidSpec.perfect(),
+            gradiometer_spec=GravityGradiometerSpec(
+                noise_density_per_s2_per_sqrt_hz=0.0,
+                bias_random_walk_per_s2_per_sqrt_s=0.0,
+                turn_on_bias_std_per_s2=0.0,
+                fixed_bias_per_s2=0.0,
+            ),
+            map_model=map_fn,
+            dt_s=5.0,
+            seed=222,
+        )
+
+    baseline = _run(False)
+    smoothed = _run(True)
+
+    baseline_ins = baseline.estimators.ins_history_arrays()
+    smoothed_ins = smoothed.estimators.ins_history_arrays()
+    assert np.allclose(baseline_ins["ins_lat_rad"], smoothed_ins["ins_lat_rad"])
+    assert np.allclose(baseline_ins["ins_lon_rad"], smoothed_ins["ins_lon_rad"])
+    assert np.allclose(baseline_ins["ins_height_m"], smoothed_ins["ins_height_m"])
+
+    lag_metrics = lag_smoothed_position_error_metrics_from_result(smoothed)
+    live_ins_metrics = ins_position_error_metrics_from_result(baseline)
+    assert lag_metrics is not None
+    assert live_ins_metrics is not None
+    assert len(smoothed.estimators.lag_smoothed_states) > 0
+    publish_rows = smoothed.estimators.custom_streams.get("sequence_lag_smoothed_publish")
+    assert publish_rows is not None
+    assert sum(row["publish_source"] == "sequence_update" for row in publish_rows) > 10
+    assert lag_metrics.horizontal_rmse_m < live_ins_metrics.horizontal_rmse_m
+    assert lag_metrics.cep95_m <= live_ins_metrics.cep95_m

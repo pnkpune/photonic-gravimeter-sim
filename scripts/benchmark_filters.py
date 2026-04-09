@@ -44,9 +44,11 @@ def _run_one(
     archive_path = output_dir / f"{scenario}_{label}.npz"
     metrics = json.loads(metrics_path.read_text())
     pos = metrics["ins_position_error"]
+    lag = metrics.get("lag_smoothed_position_error") or {}
     pf = metrics.get("pf_position_error") or {}
     seq = metrics.get("sequence_position_error") or {}
     integrity = metrics.get("integrity") or {}
+    lag_integrity = metrics.get("lag_smoothed_integrity") or {}
     directional_applied = None
     directional_allowed = None
     sequence_applied = None
@@ -69,11 +71,15 @@ def _run_one(
         "cep95_m": pos["cep95_m"],
         "horizontal_max_m": pos["horizontal_max_m"],
         "vertical_rmse_m": pos["vertical_rmse_m"],
+        "lag_smoothed_horizontal_rmse_m": lag.get("horizontal_rmse_m"),
+        "lag_smoothed_cep95_m": lag.get("cep95_m"),
+        "lag_smoothed_vertical_rmse_m": lag.get("vertical_rmse_m"),
         "pf_horizontal_rmse_m": pf.get("horizontal_rmse_m"),
         "pf_cep95_m": pf.get("cep95_m"),
         "sequence_horizontal_rmse_m": seq.get("horizontal_rmse_m"),
         "sequence_cep95_m": seq.get("cep95_m"),
         "hmi_horizontal": integrity.get("fraction_hazardously_misleading_horizontal"),
+        "lag_hmi_horizontal": lag_integrity.get("fraction_hazardously_misleading_horizontal"),
         "directional_allowed_updates": directional_allowed,
         "directional_applied_updates": directional_applied,
         "sequence_allowed_updates": sequence_allowed,
@@ -102,6 +108,14 @@ def main() -> int:
         {
             "label": "sequence_plus_gradient",
             "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
+        },
+        {
+            "label": "sequence_plus_gradient_lag_smoothed",
+            "extra_flags": [
+                "--map-matcher", "sequence",
+                "--use-gradiometer",
+                "--use-sequence-lag-smoother",
+            ],
         },
         {
             "label": "sequence_plus_gradient_replay_feedback",
@@ -172,12 +186,17 @@ def main() -> int:
 
     print("\n=== SUMMARY ===")
     print(
-        f"{'label':<28} {'INS_RMSE':>10} {'PF_RMSE':>10} {'SEQ_RMSE':>10} "
-        f"{'INS_CEP95':>10} {'PF_CEP95':>10} {'SEQ_CEP95':>10} {'HMI%':>10} {'PF_APPLY':>10} {'SEQ_APPLY':>10}"
+        f"{'label':<34} {'INS_RMSE':>10} {'LAG_RMSE':>10} {'PF_RMSE':>10} {'SEQ_RMSE':>10} "
+        f"{'INS_CEP95':>10} {'LAG_CEP95':>10} {'PF_CEP95':>10} {'SEQ_CEP95':>10} "
+        f"{'HMI%':>10} {'LAG_HMI%':>10} {'PF_APPLY':>10} {'SEQ_APPLY':>10}"
     )
     for row in rows:
         hmi = row["hmi_horizontal"]
         hmi_pct = float('nan') if hmi is None else 100.0 * float(hmi)
+        lag_hmi = row["lag_hmi_horizontal"]
+        lag_hmi_pct = float('nan') if lag_hmi is None else 100.0 * float(lag_hmi)
+        lag_rmse = float("nan") if row["lag_smoothed_horizontal_rmse_m"] is None else float(row["lag_smoothed_horizontal_rmse_m"])
+        lag_cep95 = float("nan") if row["lag_smoothed_cep95_m"] is None else float(row["lag_smoothed_cep95_m"])
         pf_rmse = float("nan") if row["pf_horizontal_rmse_m"] is None else float(row["pf_horizontal_rmse_m"])
         pf_cep95 = float("nan") if row["pf_cep95_m"] is None else float(row["pf_cep95_m"])
         seq_rmse = float("nan") if row["sequence_horizontal_rmse_m"] is None else float(row["sequence_horizontal_rmse_m"])
@@ -185,8 +204,9 @@ def main() -> int:
         pf_applied = float("nan") if row["directional_applied_updates"] is None else float(row["directional_applied_updates"])
         seq_applied = float("nan") if row["sequence_applied_updates"] is None else float(row["sequence_applied_updates"])
         print(
-            f"{row['label']:<28} {row['horizontal_rmse_m']:10.3f} {pf_rmse:10.3f} {seq_rmse:10.3f} "
-            f"{row['cep95_m']:10.3f} {pf_cep95:10.3f} {seq_cep95:10.3f} {hmi_pct:10.3f} {pf_applied:10.0f} {seq_applied:10.0f}"
+            f"{row['label']:<34} {row['horizontal_rmse_m']:10.3f} {lag_rmse:10.3f} {pf_rmse:10.3f} {seq_rmse:10.3f} "
+            f"{row['cep95_m']:10.3f} {lag_cep95:10.3f} {pf_cep95:10.3f} {seq_cep95:10.3f} "
+            f"{hmi_pct:10.3f} {lag_hmi_pct:10.3f} {pf_applied:10.0f} {seq_applied:10.0f}"
         )
     print(f"\nSaved summary: {summary_path}")
     return 0
