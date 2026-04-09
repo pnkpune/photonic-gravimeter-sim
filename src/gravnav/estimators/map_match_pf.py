@@ -938,6 +938,14 @@ class MapMatchPFUpdateResult:
         Weighted mean predicted map disturbance before update result packaging.
     predicted_disturbance_std_mps2 : float
         Weighted standard deviation of predicted map disturbance.
+    ned_eigenvalues_m2 : np.ndarray, shape (3,)
+        Eigenvalues of the posterior NED covariance, sorted ascending.
+        The smallest eigenvalue corresponds to the best-constrained direction.
+    ned_eigenvectors : np.ndarray, shape (3, 3)
+        Eigenvectors as columns, sorted by eigenvalue (ascending).
+    eigenvalue_ratio : float
+        Ratio of largest to smallest eigenvalue.  A large ratio indicates
+        a well-defined ridge posterior (good for directional feedback).
     time_s : float or None
         Optional timestamp.
     """
@@ -948,6 +956,9 @@ class MapMatchPFUpdateResult:
     resampled: bool
     predicted_disturbance_mean_mps2: float
     predicted_disturbance_std_mps2: float
+    ned_eigenvalues_m2: FloatArray = None  # type: ignore[assignment]
+    ned_eigenvectors: FloatArray = None  # type: ignore[assignment]
+    eigenvalue_ratio: float = 1.0
     time_s: Optional[float] = None
 
 
@@ -1382,6 +1393,14 @@ class GravityMapParticleFilter:
         g_var = float(np.sum(self.weights * (self._last_predicted_disturbance_mps2 - g_mean) ** 2))
         g_std = float(np.sqrt(max(g_var, 0.0)))
 
+        # Eigendecompose NED covariance for directional feedback
+        P_ned = _symmetrize(estimate.covariance_ned_m2)
+        eigvals, eigvecs = np.linalg.eigh(P_ned)
+        idx = np.argsort(eigvals)
+        eigvals = np.maximum(eigvals[idx], 1.0e-10)
+        eigvecs = eigvecs[:, idx]
+        eig_ratio = float(eigvals[2] / eigvals[0]) if eigvals[0] > 0 else 1.0
+
         return MapMatchPFUpdateResult(
             estimate=estimate,
             effective_sample_size_before=float(ess_before),
@@ -1389,6 +1408,9 @@ class GravityMapParticleFilter:
             resampled=bool(resampled),
             predicted_disturbance_mean_mps2=g_mean,
             predicted_disturbance_std_mps2=g_std,
+            ned_eigenvalues_m2=eigvals.astype(np.float64),
+            ned_eigenvectors=eigvecs.astype(np.float64),
+            eigenvalue_ratio=eig_ratio,
             time_s=None if time_s is None else float(time_s),
         )
 

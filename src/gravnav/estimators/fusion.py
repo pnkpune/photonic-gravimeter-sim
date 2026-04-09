@@ -1420,6 +1420,109 @@ def summarize_update_result(result: FusionUpdateResult) -> dict[str, object]:
     return out
 
 
+# -----------------------------------------------------------------------------
+# Directional pseudo-measurement from PF posterior
+# -----------------------------------------------------------------------------
+
+
+def make_directional_position_measurement(
+    ins_or_state: ErrorStateINS | ErrorStateINSState,
+    direction_ned: ArrayLike,
+    projected_offset_m: float,
+    projected_variance_m2: float,
+    *,
+    label: str = "pf_directional",
+    time_s: Optional[float] = None,
+) -> LinearMeasurement:
+    r"""
+    Build a rank-1 directional position measurement for PF-to-INS feedback.
+
+    Instead of injecting the full 3D PF posterior as a pseudo-position
+    measurement (which fails when the posterior is ridge-shaped), this
+    injects a scalar measurement along the well-constrained direction only.
+
+    Parameters
+    ----------
+    ins_or_state : ErrorStateINS or ErrorStateINSState
+        Current INS state.
+    direction_ned : array-like, shape (3,)
+        Unit vector in NED indicating the well-constrained direction
+        (typically the smallest-eigenvalue eigenvector of the PF posterior
+        NED covariance).
+    projected_offset_m : float
+        Scalar offset = direction^T @ (PF_mean_ned - INS_pos_ned).
+        Positive means the PF thinks the true position is displaced in the
+        positive direction.
+    projected_variance_m2 : float
+        PF posterior variance along this direction [m^2], typically the
+        smallest eigenvalue of the PF NED covariance times an inflation
+        factor.
+    label : str
+        Human-readable label.
+    time_s : float, optional
+        Timestamp.
+
+    Returns
+    -------
+    LinearMeasurement
+        A scalar measurement suitable for `apply_linear_measurement(...)`.
+
+    Measurement model
+    -----------------
+    The measurement is:
+
+        z = e^T @ (true_pos_ned - INS_pos_ned) + eps
+        h = 0  (predicted under zero error assumption)
+        H[ERR_POS] = e^T @ J_{ned->geo}  (maps NED direction to geodetic pos block)
+        R = [[projected_variance_m2]]
+
+    where e is the direction vector and J_{ned->geo} maps geodetic position
+    errors to NED offsets.
+    """
+    from ..physics.earth import meridian_radius, prime_vertical_radius
+
+    state = _state_from_filter_or_state(ins_or_state)
+    e = _vec3(direction_ned, name="direction_ned")
+    e_norm = float(np.linalg.norm(e))
+    if e_norm < 1.0e-12:
+        raise ValueError("direction_ned must be a non-zero vector.")
+    e = e / e_norm
+
+    phi = state.nominal.lat_rad
+    h = state.nominal.height_m
+    M = float(meridian_radius(phi))
+    N_pv = float(prime_vertical_radius(phi))
+    cos_phi = max(abs(float(np.cos(phi))), 1.0e-8)
+
+    # Jacobian mapping geodetic pos errors to NED:
+    #   dN = d_lat * (M + h)
+    #   dE = d_lon * (N + h) * cos(phi)
+    #   dD = -d_h
+    J_ned_geo = np.array([
+        [M + h, 0.0, 0.0],
+        [0.0, (N_pv + h) * cos_phi, 0.0],
+        [0.0, 0.0, -1.0],
+    ], dtype=np.float64)
+
+    # H row: z = e^T @ J_ned_geo @ delta_pos_geo
+    H_row = np.zeros(ERROR_STATE_SIZE, dtype=np.float64)
+    H_row[ERR_POS] = e @ J_ned_geo
+
+    z = np.array([float(projected_offset_m)], dtype=np.float64)
+    h_pred = np.zeros(1, dtype=np.float64)
+    H = H_row.reshape(1, ERROR_STATE_SIZE)
+    R = np.array([[float(projected_variance_m2)]], dtype=np.float64)
+
+    return LinearMeasurement(
+        label=label,
+        z=z,
+        h=h_pred,
+        H=H,
+        R=R,
+        time_s=time_s,
+    )
+
+
 __all__ = [
     "FloatArray",
     "FusionUpdateResult",
@@ -1446,6 +1549,7 @@ __all__ = [
     "make_custom_scalar_measurement",
     "make_custom_vector_measurement",
     "make_depth_measurement",
+    "make_directional_position_measurement",
     "make_geodetic_position_measurement",
     "make_linear_measurement",
     "make_velocity_body_measurement",

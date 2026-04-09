@@ -61,6 +61,11 @@ from ..estimators.error_state_ins import (
     ErrorStateINS,
     ErrorStateINSProcessNoise,
 )
+from ..estimators.feedback_policy import (
+    DirectionalFeedbackController,
+    DirectionalFeedbackSpec,
+    summarize_directional_feedback,
+)
 from ..estimators.fusion import (
     apply_depth_sensor_measurement,
     apply_depth_sensor_measurement_height_only,
@@ -357,13 +362,24 @@ class MapMatchFeedbackConfig:
         Optional depth measurement standard deviation override for the PF.
     inject_position_to_ins : bool, default=False
         Whether PF mean/covariance are converted into a geodetic pseudo-measurement
-        and fused back into the INS.
+        and fused back into the INS.  This is the **legacy** full-3D feedback mode.
+    use_directional_feedback : bool, default=False
+        Whether to use observability-aware directional feedback instead of
+        full-3D position feedback.  When True, ``inject_position_to_ins`` is
+        ignored and the ``directional_feedback_spec`` controls all feedback
+        behavior.  This is the **recommended** feedback mode.
+    directional_feedback_spec : DirectionalFeedbackSpec
+        Configuration for directional feedback.  Only used when
+        ``use_directional_feedback=True``.
     feedback_covariance_inflation : float, default=1.0
-        Scalar inflation applied to PF covariance before INS feedback.
+        Scalar inflation applied to PF covariance before INS feedback
+        (legacy mode only).
     feedback_min_std_geodetic : scalar or shape (3,), default=(0, 0, 0)
-        Lower bound on PF-derived geodetic standard deviations before feedback.
+        Lower bound on PF-derived geodetic standard deviations before feedback
+        (legacy mode only).
     feedback_nis_threshold : float, optional
-        Optional gate threshold for the PF pseudo-measurement update.
+        Optional gate threshold for the PF pseudo-measurement update
+        (legacy mode only).
     """
 
     enabled: bool = True
@@ -374,6 +390,10 @@ class MapMatchFeedbackConfig:
     use_last_depth_measurement: bool = True
     depth_meas_std_m: Optional[float] = None
     inject_position_to_ins: bool = False
+    use_directional_feedback: bool = False
+    directional_feedback_spec: DirectionalFeedbackSpec = field(
+        default_factory=DirectionalFeedbackSpec
+    )
     feedback_covariance_inflation: float = 1.0
     feedback_min_std_geodetic: ArrayLike | float = (0.0, 0.0, 0.0)
     feedback_nis_threshold: Optional[float] = None
@@ -825,10 +845,15 @@ class ScenarioSimulationRunner:
         ins = self._build_initial_ins(truth, imu_sensor)
 
         pf: Optional[GravityMapParticleFilter] = None
+        directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
         resolved_map = resolve_map_model(map_model)
         if cfg.map_match.enabled and gravimeter_sensor is not None and resolved_map is not None:
             pf = GravityMapParticleFilter(cfg.map_match.pf_spec, resolved_map)
             pf.reset_from_ins(ins)
+            if cfg.map_match.use_directional_feedback:
+                directional_feedback_ctrl = DirectionalFeedbackController(
+                    cfg.map_match.directional_feedback_spec,
+                )
 
         integrity = self._make_integrity_monitor()
 
@@ -1039,7 +1064,21 @@ class ScenarioSimulationRunner:
                     )
                     estimators.pf_updates.append(pf_update)
 
-                    if cfg.map_match.inject_position_to_ins:
+                    # --- Directional feedback (new, recommended) ---
+                    if directional_feedback_ctrl is not None:
+                        df_result = directional_feedback_ctrl.evaluate(
+                            pf_update,
+                            ins,
+                            num_particles=cfg.map_match.pf_spec.num_particles,
+                            time_s=t_now,
+                        )
+                        estimators.add_custom_sample(
+                            "pf_directional_feedback",
+                            summarize_directional_feedback(df_result),
+                        )
+
+                    # --- Legacy full-3D position feedback ---
+                    elif cfg.map_match.inject_position_to_ins:
                         z_pf, R_pf = pf.as_geodetic_pseudo_measurement(
                             min_std_geodetic=cfg.map_match.feedback_min_std_geodetic,
                             covariance_inflation=cfg.map_match.feedback_covariance_inflation,
