@@ -132,6 +132,7 @@ from ..sensors.velocity_aid import VelocityAidMeasurement
 from .error_state_ins import (
     ERROR_STATE_SIZE,
     ERR_ATT,
+    ERR_POS,
     ERR_VEL,
     ErrorStateINS,
     ErrorStateINSState,
@@ -935,6 +936,61 @@ def make_custom_vector_measurement(
     )
 
 
+def make_horizontal_ned_position_measurement(
+    ins_or_state: ErrorStateINS | ErrorStateINSState,
+    measured_horizontal_offset_ned_m: ArrayLike,
+    R_horizontal_m2: ArrayLike,
+    *,
+    label: str = "position_ned_horizontal",
+    time_s: Optional[float] = None,
+) -> LinearMeasurement:
+    r"""
+    Build a horizontal local-NED position measurement.
+
+    The measurement model is:
+
+        z = [dN, dE]^T
+        h = 0
+        z = H delta_x + eps
+
+    where the error-state position block is geodetic `[d_lat, d_lon, d_h]` and
+    the local horizontal mapping is:
+
+        dN = (R_M + h) d_lat
+        dE = (R_N + h) cos(lat) d_lon
+    """
+    from ..physics.earth import meridian_radius, prime_vertical_radius
+
+    state = _state_from_filter_or_state(ins_or_state)
+    z = _as_float_array(measured_horizontal_offset_ned_m).reshape(-1)
+    if z.shape != (2,):
+        raise ValueError(
+            "measured_horizontal_offset_ned_m must have shape (2,), "
+            f"got {z.shape}."
+        )
+
+    Rm = _mat(R_horizontal_m2, name="R_horizontal_m2", rows=2, cols=2)
+
+    phi = float(state.nominal.lat_rad)
+    h = float(state.nominal.height_m)
+    M = float(meridian_radius(phi))
+    N_pv = float(prime_vertical_radius(phi))
+    cos_phi = max(abs(float(np.cos(phi))), 1.0e-8)
+
+    H = np.zeros((2, ERROR_STATE_SIZE), dtype=np.float64)
+    H[0, ERR_POS.start + 0] = M + h
+    H[1, ERR_POS.start + 1] = (N_pv + h) * cos_phi
+
+    return LinearMeasurement(
+        label=label,
+        z=z.astype(np.float64),
+        h=np.zeros(2, dtype=np.float64),
+        H=H,
+        R=Rm,
+        time_s=time_s,
+    )
+
+
 # -----------------------------------------------------------------------------
 # Common measurement application wrappers
 # -----------------------------------------------------------------------------
@@ -1549,6 +1605,7 @@ __all__ = [
     "make_custom_scalar_measurement",
     "make_custom_vector_measurement",
     "make_depth_measurement",
+    "make_horizontal_ned_position_measurement",
     "make_directional_position_measurement",
     "make_geodetic_position_measurement",
     "make_linear_measurement",

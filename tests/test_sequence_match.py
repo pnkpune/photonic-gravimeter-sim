@@ -214,3 +214,55 @@ def test_runner_sequence_matcher_logs_updates_and_metrics() -> None:
     assert metrics is not None
     assert np.isfinite(metrics.horizontal_rmse_m)
     assert metrics.horizontal_rmse_m >= 0.0
+
+
+def test_runner_sequence_feedback_path_executes_and_logs() -> None:
+    scenario = get_named_scenario("maritime_baseline")
+    truth = build_truth_trajectory_from_scenario(scenario, dt_s=5.0)
+    lat0 = float(truth.lat_rad[0])
+    lon0 = float(truth.lon_rad[0])
+    h0 = float(truth.height_m[0])
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+
+    cfg = SimulationRunnerConfig()
+    cfg.map_match.matcher = "sequence"
+    cfg.map_match.use_gradiometer = True
+    cfg.map_match.use_sequence_feedback = True
+    cfg.map_match.sequence_spec = GravitySequenceMatcherSpec(
+        window_size=7,
+        grid_half_span_m=(100.0, 100.0),
+        grid_spacing_m=(20.0, 20.0),
+        transition_std_m=(15.0, 15.0),
+        center_prior_std_m=(60.0, 60.0),
+        gravity_meas_std_mps2=1.0e-6,
+        gradient_meas_std_per_s2=1.0e-8,
+        height_std_m=1.0,
+    )
+    cfg.map_match.sequence_feedback_spec.min_peak_probability = 0.05
+    cfg.map_match.sequence_feedback_spec.max_horizontal_std_m = 100.0
+    cfg.map_match.sequence_feedback_spec.max_correction_norm_m = 200.0
+    cfg.map_match.gravity_meas_std_mps2 = 1.0e-6
+    cfg.map_match.gradient_meas_std_per_s2 = 1.0e-8
+    cfg.map_match.depth_meas_std_m = 0.1
+    cfg.observability.enabled = False
+
+    runner = ScenarioSimulationRunner(cfg)
+    result = runner.run_with_specs(
+        scenario_or_truth=truth,
+        imu_spec=IMUSpec.perfect(),
+        gravimeter_spec=GravimeterSpec.perfect_relative(),
+        depth_spec=DepthSensorSpec.perfect(),
+        velocity_aid_spec=VelocityAidSpec.perfect(),
+        map_model=map_fn,
+        dt_s=5.0,
+        seed=777,
+        gradiometer_spec=None,
+    )
+
+    rows = result.estimators.custom_streams.get("sequence_feedback")
+    assert rows is not None
+    assert len(rows) > 0
+    first = rows[0]
+    assert "feedback_allowed" in first
+    assert "horizontal_offset_ned_m" in first
+    assert "horizontal_std_m" in first

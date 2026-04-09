@@ -86,6 +86,13 @@ Important interpretation:
 - sequence matching with gradient is the best current map-matching estimator on this benchmark
 - this means Priority 4 is worth keeping as a first-class estimator path before attempting any delayed feedback design
 
+Delayed sequence-feedback status:
+
+- the repo now contains an experimental delayed sequence-to-INS horizontal feedback controller
+- the default policy is intentionally conservative and currently fires zero updates on the maritime baseline
+- a bounded tuning pass showed that simple current-state bias transfer from delayed sequence estimates is not safe enough yet: active variants degraded INS RMSE from `103.5 m` to roughly `214.6 m`, `828.2 m`, and `7.2 km`
+- the correct next closed-loop design is therefore not more gain tuning; it is a replay/smoother-aware delayed-update architecture
+
 The full saved report is:
 
 - [validated_maritime_baseline_report.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/validated_maritime_baseline_report.md)
@@ -174,7 +181,7 @@ These conventions are used across the physics and navigation layers:
 - [map_match_pf.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/map_match_pf.py)
   Particle-filter gravity map matching with INS-prior coupling, geodetic/NED particle-cloud utilities, and posterior eigenstructure extraction for directional feedback.
 - [feedback_policy.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/feedback_policy.py)
-  Observability-aware directional PF-to-INS feedback gating, covariance inflation, persistence logic, and feedback diagnostics.
+  Observability-aware directional PF-to-INS feedback gating, experimental delayed sequence-feedback gating, covariance inflation, persistence logic, and feedback diagnostics.
 - [integrity.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/integrity.py)
   NIS/NEES checks, protection-level calculations, alert-limit evaluation, and history monitoring.
 - [gravity_sequence_match.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/estimators/gravity_sequence_match.py)

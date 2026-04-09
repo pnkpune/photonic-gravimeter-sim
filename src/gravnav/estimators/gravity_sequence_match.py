@@ -207,6 +207,7 @@ class SequenceMatchUpdateResult:
     used_gradient: bool
     viterbi_log_score: float
     viterbi_offset_ned_m: FloatArray
+    posterior_mean_offset_ned_m: FloatArray
 
 
 @dataclass
@@ -498,6 +499,10 @@ class GravitySequenceMatcher:
             np.sum(weights * (obs.predicted_disturbance_mps2 - pred_g_mean) ** 2)
         )
         pred_g_std = float(np.sqrt(max(pred_g_var, 0.0)))
+        mean_offset_ned = np.sum(
+            weights[:, None] * obs.candidate_offsets_ned_m,
+            axis=0,
+        ).astype(np.float64)
 
         peak_prob = float(np.max(weights))
         entropy = float(-np.sum(weights * np.log(np.maximum(weights, 1.0e-300))))
@@ -534,6 +539,7 @@ class GravitySequenceMatcher:
             used_gradient=bool(obs.used_gradient),
             viterbi_log_score=float(delta[-1, best_last]),
             viterbi_offset_ned_m=np.asarray(best_offset, dtype=np.float64),
+            posterior_mean_offset_ned_m=mean_offset_ned,
         )
 
     def update(

@@ -49,6 +49,8 @@ def _run_one(
     integrity = metrics.get("integrity") or {}
     directional_applied = None
     directional_allowed = None
+    sequence_applied = None
+    sequence_allowed = None
 
     if archive_path.exists():
         with np.load(archive_path, allow_pickle=False) as data:
@@ -57,6 +59,9 @@ def _run_one(
                 rows = streams.get("pf_directional_feedback", [])
                 directional_allowed = sum(1 for row in rows if row.get("feedback_allowed"))
                 directional_applied = sum(1 for row in rows if row.get("applied"))
+                seq_rows = streams.get("sequence_feedback", [])
+                sequence_allowed = sum(1 for row in seq_rows if row.get("feedback_allowed"))
+                sequence_applied = sum(1 for row in seq_rows if row.get("applied"))
 
     return {
         "label": label,
@@ -71,6 +76,8 @@ def _run_one(
         "hmi_horizontal": integrity.get("fraction_hazardously_misleading_horizontal"),
         "directional_allowed_updates": directional_allowed,
         "directional_applied_updates": directional_applied,
+        "sequence_allowed_updates": sequence_allowed,
+        "sequence_applied_updates": sequence_applied,
         "metrics_path": str(metrics_path),
     }
 
@@ -96,6 +103,14 @@ def main() -> int:
             "label": "sequence_plus_gradient",
             "extra_flags": ["--map-matcher", "sequence", "--use-gradiometer"],
         },
+        {
+            "label": "sequence_plus_gradient_feedback",
+            "extra_flags": [
+                "--map-matcher", "sequence",
+                "--use-gradiometer",
+                "--use-sequence-feedback",
+            ],
+        },
     ]
 
     rows: list[dict[str, Any]] = []
@@ -117,7 +132,7 @@ def main() -> int:
     print("\n=== SUMMARY ===")
     print(
         f"{'label':<28} {'INS_RMSE':>10} {'PF_RMSE':>10} {'SEQ_RMSE':>10} "
-        f"{'INS_CEP95':>10} {'PF_CEP95':>10} {'SEQ_CEP95':>10} {'HMI%':>10} {'PF_APPLY':>10}"
+        f"{'INS_CEP95':>10} {'PF_CEP95':>10} {'SEQ_CEP95':>10} {'HMI%':>10} {'PF_APPLY':>10} {'SEQ_APPLY':>10}"
     )
     for row in rows:
         hmi = row["hmi_horizontal"]
@@ -127,9 +142,10 @@ def main() -> int:
         seq_rmse = float("nan") if row["sequence_horizontal_rmse_m"] is None else float(row["sequence_horizontal_rmse_m"])
         seq_cep95 = float("nan") if row["sequence_cep95_m"] is None else float(row["sequence_cep95_m"])
         pf_applied = float("nan") if row["directional_applied_updates"] is None else float(row["directional_applied_updates"])
+        seq_applied = float("nan") if row["sequence_applied_updates"] is None else float(row["sequence_applied_updates"])
         print(
             f"{row['label']:<28} {row['horizontal_rmse_m']:10.3f} {pf_rmse:10.3f} {seq_rmse:10.3f} "
-            f"{row['cep95_m']:10.3f} {pf_cep95:10.3f} {seq_cep95:10.3f} {hmi_pct:10.3f} {pf_applied:10.0f}"
+            f"{row['cep95_m']:10.3f} {pf_cep95:10.3f} {seq_cep95:10.3f} {hmi_pct:10.3f} {pf_applied:10.0f} {seq_applied:10.0f}"
         )
     print(f"\nSaved summary: {summary_path}")
     return 0

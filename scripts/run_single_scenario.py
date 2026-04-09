@@ -318,6 +318,27 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
             if getattr(args, "pf_gradient_std_per_s2", None) is None
             else float(args.pf_gradient_std_per_s2)
         ),
+        use_sequence_feedback=bool(getattr(args, "use_sequence_feedback", False)),
+    )
+    map_match.sequence_feedback_spec.min_peak_probability = (
+        float(args.sequence_feedback_min_peak_prob)
+    )
+    map_match.sequence_feedback_spec.max_horizontal_std_m = (
+        float(args.sequence_feedback_max_horizontal_std_m)
+    )
+    map_match.sequence_feedback_spec.max_correction_norm_m = (
+        float(args.sequence_feedback_max_correction_m)
+    )
+    map_match.sequence_feedback_spec.covariance_inflation = (
+        float(args.sequence_feedback_inflation)
+    )
+    map_match.sequence_feedback_spec.transfer_rw_std_mps = (
+        float(args.sequence_feedback_transfer_rw_std_mps)
+    )
+    map_match.sequence_feedback_spec.nis_threshold = (
+        None
+        if args.sequence_feedback_nis_threshold is None
+        else float(args.sequence_feedback_nis_threshold)
     )
     integrity = IntegrityMonitorConfig(
         enabled=not args.disable_integrity,
@@ -578,6 +599,50 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--use-sequence-feedback",
+        action="store_true",
+        help=(
+            "Enable conservative delayed sequence-to-INS horizontal feedback. "
+            "Only valid with --map-matcher sequence."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-min-peak-prob",
+        type=float,
+        default=0.12,
+        help="Minimum sequence posterior peak probability required for feedback.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-max-horizontal-std-m",
+        type=float,
+        default=80.0,
+        help="Maximum allowed horizontal sequence standard deviation for feedback in metres.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-max-correction-m",
+        type=float,
+        default=150.0,
+        help="Maximum allowed horizontal correction norm from sequence feedback in metres.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-inflation",
+        type=float,
+        default=3.0,
+        help="Covariance inflation applied to sequence feedback before INS fusion.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-transfer-rw-std-mps",
+        type=float,
+        default=0.6,
+        help="Delay-transfer random-walk inflation for sequence feedback in m/s.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-nis-threshold",
+        type=float,
+        default=25.0,
+        help="Optional NIS gate for delayed sequence feedback.",
+    )
+    parser.add_argument(
         "--disable-depth-aid",
         action="store_true",
         help="Disable depth aiding.",
@@ -743,6 +808,27 @@ def main() -> int:
                 ),
                 "use_gradiometer": bool(args.use_gradiometer),
                 "gradient_std_per_s2": float(args.pf_gradient_std_per_s2),
+                "use_sequence_feedback": bool(args.use_sequence_feedback),
+                "sequence_feedback_min_peak_prob": float(
+                    args.sequence_feedback_min_peak_prob
+                ),
+                "sequence_feedback_max_horizontal_std_m": float(
+                    args.sequence_feedback_max_horizontal_std_m
+                ),
+                "sequence_feedback_max_correction_m": float(
+                    args.sequence_feedback_max_correction_m
+                ),
+                "sequence_feedback_inflation": float(
+                    args.sequence_feedback_inflation
+                ),
+                "sequence_feedback_transfer_rw_std_mps": float(
+                    args.sequence_feedback_transfer_rw_std_mps
+                ),
+                "sequence_feedback_nis_threshold": (
+                    None
+                    if args.sequence_feedback_nis_threshold is None
+                    else float(args.sequence_feedback_nis_threshold)
+                ),
                 "sequence_window_size": int(args.sequence_window_size),
                 "sequence_grid_half_span_m": [
                     float(args.sequence_grid_half_span_north_m),

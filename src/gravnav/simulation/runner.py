@@ -68,7 +68,10 @@ from ..estimators.error_state_ins import (
 from ..estimators.feedback_policy import (
     DirectionalFeedbackController,
     DirectionalFeedbackSpec,
+    SequenceFeedbackController,
+    SequenceFeedbackSpec,
     summarize_directional_feedback,
+    summarize_sequence_feedback,
 )
 from ..estimators.gravity_sequence_match import (
     GravitySequenceMatcher,
@@ -398,6 +401,11 @@ class MapMatchFeedbackConfig:
     feedback_nis_threshold : float, optional
         Optional gate threshold for the PF pseudo-measurement update
         (legacy mode only).
+    use_sequence_feedback : bool, default=False
+        Whether to feed delayed sequence-matcher horizontal bias estimates into
+        the live INS. Only valid when ``matcher="sequence"``.
+    sequence_feedback_spec : SequenceFeedbackSpec
+        Configuration for delayed sequence feedback.
     """
 
     enabled: bool = True
@@ -413,8 +421,12 @@ class MapMatchFeedbackConfig:
     depth_meas_std_m: Optional[float] = None
     inject_position_to_ins: bool = False
     use_directional_feedback: bool = False
+    use_sequence_feedback: bool = False
     directional_feedback_spec: DirectionalFeedbackSpec = field(
         default_factory=DirectionalFeedbackSpec
+    )
+    sequence_feedback_spec: SequenceFeedbackSpec = field(
+        default_factory=SequenceFeedbackSpec
     )
     feedback_covariance_inflation: float = 1.0
     feedback_min_std_geodetic: ArrayLike | float = (0.0, 0.0, 0.0)
@@ -450,6 +462,7 @@ class MapMatchFeedbackConfig:
                 "feedback_nis_threshold must be nonnegative when provided."
             )
         self.use_gradiometer = bool(self.use_gradiometer)
+        self.use_sequence_feedback = bool(self.use_sequence_feedback)
         if self.gradient_meas_std_per_s2 is not None:
             self.gradient_meas_std_per_s2 = _positive_scalar(
                 self.gradient_meas_std_per_s2,
@@ -464,6 +477,10 @@ class MapMatchFeedbackConfig:
                 raise ValueError(
                     "use_directional_feedback is only supported with matcher='pf'."
                 )
+        if self.matcher != "sequence" and self.use_sequence_feedback:
+            raise ValueError(
+                "use_sequence_feedback is only supported with matcher='sequence'."
+            )
 
 
 @dataclass
@@ -970,6 +987,7 @@ class ScenarioSimulationRunner:
 
         pf: Optional[GravityMapParticleFilter] = None
         sequence_matcher: Optional[GravitySequenceMatcher] = None
+        sequence_feedback_ctrl: Optional[SequenceFeedbackController] = None
         directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
         observability: Optional[ObservabilityAnalyzer] = None
         resolved_map = resolve_map_model(map_model)
@@ -1007,6 +1025,10 @@ class ScenarioSimulationRunner:
                     cfg.map_match.sequence_spec,
                     resolved_map,
                 )
+                if cfg.map_match.use_sequence_feedback:
+                    sequence_feedback_ctrl = SequenceFeedbackController(
+                        cfg.map_match.sequence_feedback_spec,
+                    )
 
         integrity = self._make_integrity_monitor()
 
@@ -1345,6 +1367,16 @@ class ScenarioSimulationRunner:
                     )
                     if len(seq_updates) > 0:
                         estimators.sequence_updates.extend(seq_updates)
+                        if sequence_feedback_ctrl is not None:
+                            seq_fb_result = sequence_feedback_ctrl.evaluate(
+                                seq_updates[-1],
+                                ins,
+                                current_time_s=t_now,
+                            )
+                            estimators.add_custom_sample(
+                                "sequence_feedback",
+                                summarize_sequence_feedback(seq_fb_result),
+                            )
 
             # ----------------------------------------------------------
             # Log estimator state after all current-step updates

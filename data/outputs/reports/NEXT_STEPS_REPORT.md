@@ -171,6 +171,19 @@ Benchmark on `maritime_baseline`:
 
 **Decision:** Priority 4 is implemented and benchmarked successfully in observe-only mode. The next work should focus on delayed feedback / smoothing-aware fusion for sequence outputs, or move in parallel on Priority 5 if sensor-physics fidelity becomes the bottleneck.
 
+**Follow-up (2026-04-09 delayed-feedback experiment):** Implemented an initial `SequenceFeedbackController` that transfers the delayed sequence-estimated horizontal INS bias to the current state with covariance inflation proportional to delay. This path is wired into `src/gravnav/estimators/feedback_policy.py`, `src/gravnav/simulation/runner.py`, `src/gravnav/estimators/fusion.py`, and the CLI/benchmark scripts.
+
+Result:
+
+| Configuration | INS horizontal RMSE | Finding |
+| --- | ---: | --- |
+| Default conservative gate | 103.5 m | Safe no-op, zero applied updates |
+| Active tune A (`peak>=0.05`, inflation 3.0, transfer RW 0.6) | 7.2 km | Catastrophic divergence |
+| Active tune B (`peak>=0.05`, inflation 6.0, transfer RW 1.0) | 828 m | Still far worse than baseline |
+| Active tune C (`peak>=0.05`, inflation 10.0, transfer RW 1.5, max corr 50 m) | 214.6 m | Less bad, still clearly worse |
+
+**Conclusion:** A simple current-state transfer of delayed sequence bias is structurally inadequate. The delayed sequence estimate is useful, but not in the form “apply this old horizontal offset to the current INS state.” The next serious closed-loop step is a replay/smoother-aware delayed-update design, not more tuning of this transfer controller.
+
 ---
 
 ### Priority 5 — Photonic gravimeter physics model (weeks 3-5, parallel with Priority 4)

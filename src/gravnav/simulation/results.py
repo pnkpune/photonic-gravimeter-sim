@@ -871,6 +871,7 @@ class SimulationEstimatorLog:
             "sequence_used_gradient": np.empty(n, dtype=bool),
             "sequence_viterbi_log_score": np.empty(n, dtype=np.float64),
             "sequence_viterbi_offset_ned_m": np.empty((n, 3), dtype=np.float64),
+            "sequence_posterior_mean_offset_ned_m": np.empty((n, 3), dtype=np.float64),
         }
 
         for k, upd in enumerate(self.sequence_updates):
@@ -917,6 +918,10 @@ class SimulationEstimatorLog:
             out["sequence_viterbi_offset_ned_m"][k] = _vec3(
                 _get_required_attr(upd, "viterbi_offset_ned_m"),
                 name="viterbi_offset_ned_m",
+            )
+            out["sequence_posterior_mean_offset_ned_m"][k] = _vec3(
+                _get_required_attr(upd, "posterior_mean_offset_ned_m"),
+                name="posterior_mean_offset_ned_m",
             )
 
         return out

@@ -52,10 +52,12 @@ from .error_state_ins import (
     ErrorStateINS,
     ErrorStateINSState,
 )
+from .gravity_sequence_match import SequenceMatchUpdateResult
 from .fusion import (
     FusionUpdateResult,
     LinearMeasurement,
     apply_linear_measurement,
+    make_horizontal_ned_position_measurement,
 )
 from .map_match_pf import (
     MapMatchPFUpdateResult,
@@ -273,6 +275,82 @@ class DirectionalFeedbackResult:
     @property
     def applied(self) -> bool:
         """True if a measurement was actually injected into the INS."""
+        return self.fusion_result is not None and self.fusion_result.accepted
+
+
+@dataclass
+class SequenceFeedbackSpec:
+    """
+    Configuration for delayed sequence-to-INS feedback.
+
+    This controller treats the delayed sequence estimate as an estimate of the
+    INS horizontal bias over the sequence window, then transfers that bias to
+    the current INS state with explicit delay inflation.
+    """
+
+    enabled: bool = True
+    min_window_size: int = 5
+    min_peak_probability: float = 0.12
+    max_horizontal_std_m: float = 80.0
+    max_correction_norm_m: float = 150.0
+    covariance_inflation: float = 3.0
+    transfer_rw_std_mps: float = 0.6
+    nis_threshold: Optional[float] = 25.0
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.min_window_size = max(1, int(self.min_window_size))
+        self.min_peak_probability = float(self.min_peak_probability)
+        self.max_horizontal_std_m = float(self.max_horizontal_std_m)
+        self.max_correction_norm_m = float(self.max_correction_norm_m)
+        self.covariance_inflation = float(self.covariance_inflation)
+        self.transfer_rw_std_mps = float(self.transfer_rw_std_mps)
+        if not (0.0 <= self.min_peak_probability <= 1.0):
+            raise ValueError("min_peak_probability must lie in [0, 1].")
+        if self.max_horizontal_std_m <= 0.0:
+            raise ValueError("max_horizontal_std_m must be positive.")
+        if self.max_correction_norm_m <= 0.0:
+            raise ValueError("max_correction_norm_m must be positive.")
+        if self.covariance_inflation <= 0.0:
+            raise ValueError("covariance_inflation must be positive.")
+        if self.transfer_rw_std_mps < 0.0:
+            raise ValueError("transfer_rw_std_mps must be nonnegative.")
+        if self.nis_threshold is not None and float(self.nis_threshold) < 0.0:
+            raise ValueError("nis_threshold must be nonnegative when provided.")
+
+
+@dataclass
+class SequenceFeedbackDiagnostics:
+    """
+    Diagnostics from one delayed sequence-feedback evaluation.
+    """
+
+    age_s: float
+    window_size_used: int
+    delayed_by_steps: int
+    horizontal_offset_ned_m: FloatArray
+    horizontal_std_m: FloatArray
+    correction_norm_m: float
+    marginal_peak_probability: float
+    posterior_entropy_nats: float
+    covariance_inflation_applied: float
+    transfer_std_m: float
+    feedback_allowed: bool
+    rejection_reason: Optional[str]
+
+
+@dataclass
+class SequenceFeedbackResult:
+    """
+    Complete result of one delayed sequence-feedback attempt.
+    """
+
+    diagnostics: SequenceFeedbackDiagnostics
+    fusion_result: Optional[FusionUpdateResult] = None
+
+    @property
+    def applied(self) -> bool:
+        """True if a sequence-derived measurement was injected into the INS."""
         return self.fusion_result is not None and self.fusion_result.accepted
 
 
@@ -745,6 +823,120 @@ class DirectionalFeedbackController:
         )
 
 
+class SequenceFeedbackController:
+    """
+    Conservative controller for delayed sequence-estimate feedback.
+
+    The controller uses the delayed sequence estimate as a horizontal INS-bias
+    estimate. That bias is transferred to the current state with covariance
+    inflation proportional to delay.
+    """
+
+    def __init__(self, spec: SequenceFeedbackSpec) -> None:
+        self.spec = spec
+
+    def evaluate(
+        self,
+        sequence_update: SequenceMatchUpdateResult,
+        ins: ErrorStateINS,
+        *,
+        current_time_s: float,
+    ) -> SequenceFeedbackResult:
+        """
+        Evaluate whether delayed sequence feedback should be applied and, if so,
+        inject a conservative horizontal pseudo-position measurement.
+        """
+        age_s = max(0.0, float(current_time_s) - float(sequence_update.time_s))
+        offset_h = np.asarray(
+            sequence_update.posterior_mean_offset_ned_m[:2],
+            dtype=np.float64,
+        )
+        P_h = _symmetrize(
+            np.asarray(
+                sequence_update.estimate.covariance_ned_m2[:2, :2],
+                dtype=np.float64,
+            )
+        )
+        std_h = np.sqrt(np.maximum(np.diag(P_h), 0.0))
+        correction_norm = float(np.linalg.norm(offset_h))
+        peak_prob = float(sequence_update.marginal_peak_probability)
+        entropy = float(sequence_update.posterior_entropy_nats)
+        transfer_std_m = float(self.spec.transfer_rw_std_mps * age_s)
+
+        feedback_allowed = True
+        rejection_reason: Optional[str] = None
+
+        if not self.spec.enabled:
+            feedback_allowed = False
+            rejection_reason = "disabled"
+        elif int(sequence_update.window_size_used) < self.spec.min_window_size:
+            feedback_allowed = False
+            rejection_reason = (
+                f"window_size={int(sequence_update.window_size_used)} < "
+                f"min={self.spec.min_window_size}"
+            )
+        elif not np.isfinite(peak_prob) or peak_prob < self.spec.min_peak_probability:
+            feedback_allowed = False
+            rejection_reason = (
+                f"peak_probability={peak_prob:.3f} < "
+                f"min={self.spec.min_peak_probability:.3f}"
+            )
+        elif np.any(~np.isfinite(std_h)) or float(np.max(std_h)) > self.spec.max_horizontal_std_m:
+            feedback_allowed = False
+            rejection_reason = (
+                f"horizontal_std_max={float(np.max(std_h)):.3f} > "
+                f"max={self.spec.max_horizontal_std_m:.3f}"
+            )
+        elif not np.isfinite(correction_norm) or correction_norm > self.spec.max_correction_norm_m:
+            feedback_allowed = False
+            rejection_reason = (
+                f"correction_norm={correction_norm:.3f} > "
+                f"max={self.spec.max_correction_norm_m:.3f}"
+            )
+
+        diagnostics = SequenceFeedbackDiagnostics(
+            age_s=age_s,
+            window_size_used=int(sequence_update.window_size_used),
+            delayed_by_steps=int(sequence_update.delayed_by_steps),
+            horizontal_offset_ned_m=offset_h.copy(),
+            horizontal_std_m=std_h.copy(),
+            correction_norm_m=correction_norm,
+            marginal_peak_probability=peak_prob,
+            posterior_entropy_nats=entropy,
+            covariance_inflation_applied=float(self.spec.covariance_inflation),
+            transfer_std_m=transfer_std_m,
+            feedback_allowed=feedback_allowed,
+            rejection_reason=rejection_reason,
+        )
+
+        if not feedback_allowed:
+            return SequenceFeedbackResult(
+                diagnostics=diagnostics,
+                fusion_result=None,
+            )
+
+        R_h = _symmetrize(P_h * float(self.spec.covariance_inflation))
+        if transfer_std_m > 0.0:
+            R_h += np.diag(np.full(2, transfer_std_m**2, dtype=np.float64))
+
+        measurement = make_horizontal_ned_position_measurement(
+            ins,
+            offset_h,
+            R_h,
+            label="sequence_horizontal_bias",
+            time_s=float(current_time_s),
+        )
+        fusion_result = apply_linear_measurement(
+            ins,
+            measurement,
+            nis_threshold=self.spec.nis_threshold,
+        )
+        return SequenceFeedbackResult(
+            diagnostics=diagnostics,
+            fusion_result=fusion_result,
+        )
+
+
 def summarize_directional_feedback(result: DirectionalFeedbackResult) -> dict:
     """
     Produce a JSON-serializable summary of a directional feedback result.
@@ -774,12 +966,43 @@ def summarize_directional_feedback(result: DirectionalFeedbackResult) -> dict:
     return summary
 
 
+def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
+    """
+    Produce a JSON-serializable summary of a sequence feedback result.
+    """
+    d = result.diagnostics
+    summary = {
+        "feedback_allowed": d.feedback_allowed,
+        "applied": result.applied,
+        "rejection_reason": d.rejection_reason,
+        "age_s": d.age_s,
+        "window_size_used": d.window_size_used,
+        "delayed_by_steps": d.delayed_by_steps,
+        "horizontal_offset_ned_m": d.horizontal_offset_ned_m.tolist(),
+        "horizontal_std_m": d.horizontal_std_m.tolist(),
+        "correction_norm_m": d.correction_norm_m,
+        "marginal_peak_probability": d.marginal_peak_probability,
+        "posterior_entropy_nats": d.posterior_entropy_nats,
+        "covariance_inflation_applied": d.covariance_inflation_applied,
+        "transfer_std_m": d.transfer_std_m,
+    }
+    if result.fusion_result is not None:
+        summary["nis"] = result.fusion_result.nis
+        summary["gate_accepted"] = result.fusion_result.accepted
+    return summary
+
+
 __all__ = [
     "DirectionalFeedbackController",
     "DirectionalFeedbackDiagnostics",
     "DirectionalFeedbackResult",
     "DirectionalFeedbackSpec",
+    "SequenceFeedbackController",
+    "SequenceFeedbackDiagnostics",
+    "SequenceFeedbackResult",
+    "SequenceFeedbackSpec",
     "compute_adaptive_inflation",
     "eigendecompose_ned_covariance",
     "summarize_directional_feedback",
+    "summarize_sequence_feedback",
 ]
