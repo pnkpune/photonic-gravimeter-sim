@@ -9,6 +9,7 @@ from gravnav.estimators.error_state_ins import (
 from gravnav.estimators.fusion import apply_depth_measurement_height_only
 from gravnav.estimators.fusion import apply_velocity_ned_measurement_velocity_only
 from gravnav.sensors.depth import DepthSensorSpec
+from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.imu import IMUSensor, IMUSpec
 from gravnav.sensors.velocity_aid import VelocityAidSpec
 from gravnav.simulation.metrics import scenario_metrics_from_result
@@ -158,3 +159,63 @@ def test_runner_nav_grade_with_perfect_aids_stays_bounded() -> None:
     assert pos is not None
     assert pos.horizontal_rmse_m < 200.0
     assert pos.vertical_rmse_m < 1.0
+
+
+def test_runner_initial_position_offset_perturbs_nominal_start() -> None:
+    scenario = get_named_scenario("maritime_baseline")
+    cfg = SimulationRunnerConfig()
+    cfg.map_match.enabled = False
+    cfg.initial_position_offset_ned_m = (75.0, -40.0, 5.0)
+
+    result = ScenarioSimulationRunner(cfg).run_with_specs(
+        scenario,
+        imu_spec=IMUSpec.perfect(),
+        gravimeter_spec=None,
+        depth_spec=None,
+        velocity_aid_spec=None,
+        map_model=None,
+        seed=123,
+        dt_s=2.0,
+    )
+
+    first_state = result.estimators.ins_states[0].nominal
+    truth = result.truth
+    assert abs(float(first_state.lat_rad) - float(truth.lat_rad[0])) > 0.0
+    assert abs(float(first_state.lon_rad) - float(truth.lon_rad[0])) > 0.0
+    assert np.isclose(float(first_state.height_m), float(truth.height_m[0] - 5.0))
+
+
+def test_optional_gravimeter_does_not_change_live_ins_when_map_match_disabled() -> None:
+    scenario = get_named_scenario("maritime_baseline")
+    cfg = SimulationRunnerConfig()
+    cfg.map_match.enabled = False
+
+    common_kwargs = dict(
+        scenario_or_truth=scenario,
+        imu_spec=IMUSpec(),
+        depth_spec=DepthSensorSpec(),
+        velocity_aid_spec=VelocityAidSpec(),
+        map_model=None,
+        seed=321,
+        dt_s=2.0,
+    )
+
+    runner = ScenarioSimulationRunner(cfg)
+    baseline = runner.run_with_specs(
+        gravimeter_spec=None,
+        **common_kwargs,
+    )
+    with_gravimeter = runner.run_with_specs(
+        gravimeter_spec=GravimeterSpec(),
+        **common_kwargs,
+    )
+
+    baseline_hist = baseline.estimators.ins_history_arrays()
+    gravimeter_hist = with_gravimeter.estimators.ins_history_arrays()
+    for key in (
+        "ins_lat_rad",
+        "ins_lon_rad",
+        "ins_height_m",
+        "ins_v_ned_mps",
+    ):
+        assert np.allclose(baseline_hist[key], gravimeter_hist[key])

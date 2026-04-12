@@ -239,6 +239,68 @@ def test_sequence_matcher_emits_deterministic_anchor_estimates() -> None:
     assert all(anchor.global_index >= 0 for anchor in mid_result.anchor_estimates)
 
 
+def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> None:
+    lat0 = np.deg2rad(18.25)
+    lon0 = np.deg2rad(72.75)
+    h0 = 0.0
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+
+    matcher = GravitySequenceMatcher(
+        GravitySequenceMatcherSpec(
+            window_size=3,
+            grid_half_span_m=(40.0, 40.0),
+            grid_spacing_m=(20.0, 20.0),
+            transition_std_m=(8.0, 8.0),
+            center_prior_std_m=(30.0, 30.0),
+            gravity_meas_std_mps2=2.0e-7,
+            height_std_m=1.0,
+        ),
+        map_fn,
+    )
+
+    obs = matcher._build_observation(
+        measured_disturbance_mps2=0.0,
+        gravity_meas_std_mps2=2.0e-7,
+        ins_or_state=_make_state(
+            time_s=0.0,
+            lat_rad=lat0,
+            lon_rad=lon0,
+            height_m=h0,
+        ),
+        measured_gradient_per_s2=None,
+        gradient_meas_std_per_s2=None,
+        measured_bathymetry_m=None,
+        bathymetry_meas_std_m=None,
+        depth_measurement=None,
+        reference_surface_height_m=0.0,
+        time_s=0.0,
+    )
+    window = [obs]
+    n = obs.candidate_offsets_ned_m.shape[0]
+    alpha = np.full((1, n), np.nan, dtype=np.float64)
+    beta = np.full((1, n), np.nan, dtype=np.float64)
+    delta = np.zeros((1, n), dtype=np.float64)
+    psi = np.zeros((1, n), dtype=np.int64)
+
+    anchor, used_gradient, used_bathymetry, pred_g_mean, pred_g_std, pred_bath = matcher._estimate_for_window_index(
+        window,
+        alpha,
+        beta,
+        delta,
+        psi,
+        0,
+    )
+
+    assert np.isfinite(anchor.lat_rad)
+    assert np.isfinite(anchor.lon_rad)
+    assert anchor.covariance_ned_m2.shape == (3, 3)
+    assert used_gradient is False
+    assert used_bathymetry is False
+    assert np.isfinite(pred_g_mean)
+    assert np.isfinite(pred_g_std)
+    assert pred_bath is None
+
+
 def test_runner_sequence_matcher_logs_updates_and_metrics() -> None:
     scenario = get_named_scenario("maritime_baseline")
     truth = build_truth_trajectory_from_scenario(scenario, dt_s=5.0)

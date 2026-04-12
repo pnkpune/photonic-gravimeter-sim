@@ -1,0 +1,7 @@
+{
+  "name": "bathymetry_sensor",
+  "noise_std_m": 2.0,
+  "turn_on_bias_std_m": 0.5,
+  "fixed_bias_m": 0.0,
+  "max_range_m": 6000.0
+}

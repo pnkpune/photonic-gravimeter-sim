@@ -116,6 +116,10 @@ class GravitySequenceMatcherSpec:
         Scalar gravity measurement standard deviation [m/s^2].
     gradient_meas_std_per_s2 : float or None, default=None
         Optional horizontal-gravity-gradient measurement standard deviation.
+    bathymetry_meas_std_m : float or None, default=None
+        Optional seabed-clearance / water-depth measurement standard deviation.
+    bathymetry_weight : float, default=1.0
+        Relative weight applied to the bathymetry log-likelihood term.
     height_std_m : float, default=2
         Vertical covariance floor used when packaging delayed estimates.
     name : str, default="gravity_sequence_match"
@@ -129,6 +133,8 @@ class GravitySequenceMatcherSpec:
     center_prior_std_m: ArrayLike | float = (80.0, 80.0)
     gravity_meas_std_mps2: float = 1.0e-5
     gradient_meas_std_per_s2: Optional[float] = None
+    bathymetry_meas_std_m: Optional[float] = None
+    bathymetry_weight: float = 1.0
     height_std_m: float = 2.0
     name: str = "gravity_sequence_match"
 
@@ -163,6 +169,15 @@ class GravitySequenceMatcherSpec:
                 self.gradient_meas_std_per_s2,
                 name="gradient_meas_std_per_s2",
             )
+        if self.bathymetry_meas_std_m is not None:
+            self.bathymetry_meas_std_m = _positive_scalar(
+                self.bathymetry_meas_std_m,
+                name="bathymetry_meas_std_m",
+            )
+        self.bathymetry_weight = _positive_scalar(
+            self.bathymetry_weight,
+            name="bathymetry_weight",
+        )
         self.height_std_m = _positive_scalar(self.height_std_m, name="height_std_m")
 
 
@@ -179,6 +194,7 @@ class SequenceMatchEstimate:
     covariance_geodetic: FloatArray
     predicted_disturbance_mps2: Optional[float] = None
     marginal_peak_probability: Optional[float] = None
+    predicted_bathymetry_m: Optional[float] = None
 
     @property
     def geodetic_vector(self) -> FloatArray:
@@ -238,6 +254,7 @@ class SequenceMatchUpdateResult:
     predicted_disturbance_mean_mps2: float
     predicted_disturbance_std_mps2: float
     used_gradient: bool
+    used_bathymetry: bool
     viterbi_log_score: float
     viterbi_offset_ned_m: FloatArray
     posterior_mean_offset_ned_m: FloatArray
@@ -261,7 +278,9 @@ class _SequenceObservation:
     candidate_height_m: FloatArray
     log_emission: FloatArray
     predicted_disturbance_mps2: FloatArray
+    predicted_bathymetry_m: Optional[FloatArray]
     used_gradient: bool
+    used_bathymetry: bool
 
 
 class GravitySequenceMatcher:
@@ -277,9 +296,12 @@ class GravitySequenceMatcher:
         self,
         spec: GravitySequenceMatcherSpec,
         map_model: Any,
+        *,
+        bathymetry_map: Any | None = None,
     ) -> None:
         self.spec = spec
         self.map_model = map_model
+        self.bathymetry_map = bathymetry_map
         self._grid_offsets_ned_m = self._build_candidate_grid_offsets()
         self._transition_log = self._build_transition_log_matrix()
         self._window: Deque[_SequenceObservation] = deque(maxlen=self.spec.window_size)
@@ -369,6 +391,37 @@ class GravitySequenceMatcher:
             return float(ins_height_m)
         return float(reference_surface_height_m) - float(depth_measurement.value_m)
 
+    def _predict_bathymetry_clearance_m(
+        self,
+        lat_deg: FloatArray,
+        lon_deg: FloatArray,
+        *,
+        depth_measurement: Optional[DepthMeasurement],
+        reference_surface_height_m: float,
+    ) -> Optional[FloatArray]:
+        if self.bathymetry_map is None:
+            return None
+        if not hasattr(self.bathymetry_map, "evaluate_water_depth_m"):
+            raise AttributeError(
+                "bathymetry_map must define evaluate_water_depth_m(lat_deg, lon_deg, ...)."
+            )
+
+        water_depth = np.asarray(
+            self.bathymetry_map.evaluate_water_depth_m(
+                lat_deg,
+                lon_deg,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        platform_depth = (
+            0.0
+            if depth_measurement is None
+            else float(depth_measurement.value_m)
+        )
+        clearance = water_depth - platform_depth
+        return np.maximum(clearance, 0.0).astype(np.float64)
+
     def _build_observation(
         self,
         *,
@@ -377,6 +430,8 @@ class GravitySequenceMatcher:
         ins_or_state: ErrorStateINS | ErrorStateINSState,
         measured_gradient_per_s2: Optional[ArrayLike],
         gradient_meas_std_per_s2: Optional[float],
+        measured_bathymetry_m: Optional[float],
+        bathymetry_meas_std_m: Optional[float],
         depth_measurement: Optional[DepthMeasurement],
         reference_surface_height_m: float,
         time_s: float,
@@ -410,16 +465,24 @@ class GravitySequenceMatcher:
             lon,
             h,
         )
-        log_emission = gaussian_log_likelihood_scalar(
-            float(measured_disturbance_mps2) - pred_g,
-            sigma=gravity_meas_std_mps2,
-        )
+        lat_deg = np.rad2deg(lat)
+        lon_deg = np.rad2deg(lon)
+        valid_g = np.isfinite(pred_g)
+        log_emission = np.zeros(pred_g.shape, dtype=np.float64)
+        if np.any(valid_g):
+            gravity_log = np.full(pred_g.shape, -1.0e12, dtype=np.float64)
+            gravity_log[valid_g] = gaussian_log_likelihood_scalar(
+                float(measured_disturbance_mps2) - pred_g[valid_g],
+                sigma=gravity_meas_std_mps2,
+            )
+            log_emission += gravity_log
         log_emission += diagonal_gaussian_log_likelihood(
             self._grid_offsets_ned_m[:, :2],
             self.spec.center_prior_std_m,
         )
 
         used_gradient = False
+        used_bathymetry = False
         if measured_gradient_per_s2 is not None:
             sigma_grad = (
                 self.spec.gradient_meas_std_per_s2
@@ -445,11 +508,46 @@ class GravitySequenceMatcher:
                 lon,
                 h,
             ).T
-            log_emission += diagonal_gaussian_log_likelihood(
-                grad_obs[None, :] - grad_pred,
-                np.array([sigma_grad, sigma_grad], dtype=np.float64),
+            valid_grad = np.all(np.isfinite(grad_pred), axis=1)
+            if np.any(valid_grad):
+                grad_log = np.full(log_emission.shape, -1.0e12, dtype=np.float64)
+                grad_log[valid_grad] = diagonal_gaussian_log_likelihood(
+                    grad_obs[None, :] - grad_pred[valid_grad],
+                    np.array([sigma_grad, sigma_grad], dtype=np.float64),
+                )
+                log_emission += grad_log
+                used_gradient = True
+
+        pred_bathymetry = self._predict_bathymetry_clearance_m(
+            lat_deg,
+            lon_deg,
+            depth_measurement=depth_measurement,
+            reference_surface_height_m=reference_surface_height_m,
+        )
+        if measured_bathymetry_m is not None:
+            sigma_bathy = (
+                self.spec.bathymetry_meas_std_m
+                if bathymetry_meas_std_m is None
+                else float(bathymetry_meas_std_m)
             )
-            used_gradient = True
+            if sigma_bathy is None or sigma_bathy <= 0.0:
+                raise ValueError(
+                    "A positive bathymetry standard deviation is required when "
+                    "measured_bathymetry_m is provided."
+                )
+            if pred_bathymetry is None:
+                raise ValueError(
+                    "measured_bathymetry_m was provided but the matcher has no bathymetry_map."
+                )
+            valid_mask = np.isfinite(pred_bathymetry)
+            if np.any(valid_mask):
+                bathy_log = np.full(pred_bathymetry.shape, -1.0e12, dtype=np.float64)
+                bathy_log[valid_mask] = gaussian_log_likelihood_scalar(
+                    float(measured_bathymetry_m) - pred_bathymetry[valid_mask],
+                    sigma=sigma_bathy,
+                )
+                log_emission += self.spec.bathymetry_weight * bathy_log
+                used_bathymetry = True
 
         obs = _SequenceObservation(
             global_index=self._next_global_index,
@@ -463,7 +561,9 @@ class GravitySequenceMatcher:
             candidate_height_m=h,
             log_emission=np.asarray(log_emission, dtype=np.float64),
             predicted_disturbance_mps2=np.asarray(pred_g, dtype=np.float64),
+            predicted_bathymetry_m=None if pred_bathymetry is None else np.asarray(pred_bathymetry, dtype=np.float64),
             used_gradient=used_gradient,
+            used_bathymetry=used_bathymetry,
         )
         self._next_global_index += 1
         return obs
@@ -479,6 +579,7 @@ class GravitySequenceMatcher:
             raise ValueError("window must be non-empty.")
 
         log_e = np.stack([obs.log_emission for obs in window], axis=0)
+        log_e = np.where(np.isfinite(log_e), log_e, -1.0e12)
         num_steps, num_candidates = log_e.shape
 
         alpha = np.empty((num_steps, num_candidates), dtype=np.float64)
@@ -504,6 +605,57 @@ class GravitySequenceMatcher:
 
         return alpha, beta, delta, psi
 
+    @staticmethod
+    def _fallback_candidate_index(
+        obs: _SequenceObservation,
+        log_posterior: FloatArray,
+    ) -> int:
+        """
+        Select a deterministic fallback candidate when posterior weights collapse.
+
+        Preference order:
+        1. highest finite log-posterior value
+        2. candidate closest to the INS-centered origin in horizontal N/E offset
+        """
+        lp = np.asarray(log_posterior, dtype=np.float64).reshape(-1)
+        finite = np.isfinite(lp)
+        if np.any(finite):
+            masked = np.where(finite, lp, -np.inf)
+            return int(np.argmax(masked))
+
+        offsets = np.asarray(obs.candidate_offsets_ned_m, dtype=np.float64)
+        horiz_norm = np.linalg.norm(offsets[:, :2], axis=1)
+        return int(np.argmin(horiz_norm))
+
+    def _stable_posterior_weights(
+        self,
+        log_posterior: FloatArray,
+        obs: _SequenceObservation,
+    ) -> FloatArray:
+        """
+        Convert log-posterior values into normalized weights with safe fallbacks.
+
+        Multi-modal likelihoods can legitimately eliminate every candidate in a
+        window if a supporting map is partly out of bounds or numerically rough.
+        In that case, degrade to a deterministic one-hot fallback instead of
+        crashing the sequence path.
+        """
+        lp = np.asarray(log_posterior, dtype=np.float64).reshape(-1)
+        finite = np.isfinite(lp)
+        if np.any(finite):
+            stable = lp[finite] - float(np.max(lp[finite]))
+            w_valid = np.exp(np.clip(stable, -700.0, 0.0))
+            total = float(np.sum(w_valid))
+            if total > 0.0 and np.isfinite(total):
+                weights = np.zeros_like(lp, dtype=np.float64)
+                weights[finite] = w_valid / total
+                return weights
+
+        fallback = self._fallback_candidate_index(obs, lp)
+        weights = np.zeros_like(lp, dtype=np.float64)
+        weights[fallback] = 1.0
+        return weights
+
     def _estimate_for_window_index(
         self,
         window: list[_SequenceObservation],
@@ -512,7 +664,7 @@ class GravitySequenceMatcher:
         delta: FloatArray,
         psi: NDArray[np.int64],
         target_local_index: int,
-    ) -> tuple[SequenceAnchorEstimate, bool, float, float]:
+    ) -> tuple[SequenceAnchorEstimate, bool, bool, float, float, Optional[float]]:
         """
         Build one posterior/viterbi estimate for a selected window index.
 
@@ -527,12 +679,9 @@ class GravitySequenceMatcher:
                 f"target_local_index {target} is out of bounds for window length {len(window)}."
             )
 
-        log_gamma = alpha[target] + beta[target]
-        log_gamma -= _logsumexp(log_gamma, axis=0)
-        weights = np.exp(log_gamma)
-        weights /= np.sum(weights)
-
         obs = window[target]
+        log_gamma = np.asarray(alpha[target] + beta[target], dtype=np.float64)
+        weights = self._stable_posterior_weights(log_gamma, obs)
         lat_hat, lon_hat, h_hat = weighted_geodetic_mean(
             obs.candidate_lat_rad,
             obs.candidate_lon_rad,
@@ -556,11 +705,23 @@ class GravitySequenceMatcher:
             ned_cov_m2=P_ned,
         )
 
-        pred_g_mean = float(np.sum(weights * obs.predicted_disturbance_mps2))
+        pred_g_values = np.asarray(obs.predicted_disturbance_mps2, dtype=np.float64)
+        pred_g_mean = float(np.sum(weights * pred_g_values))
         pred_g_var = float(
-            np.sum(weights * (obs.predicted_disturbance_mps2 - pred_g_mean) ** 2)
+            np.sum(weights * (pred_g_values - pred_g_mean) ** 2)
         )
         pred_g_std = float(np.sqrt(max(pred_g_var, 0.0)))
+        pred_bath_mean = None
+        if obs.predicted_bathymetry_m is not None:
+            pred_bath = np.asarray(obs.predicted_bathymetry_m, dtype=np.float64)
+            valid_bath = np.isfinite(pred_bath)
+            if np.any(valid_bath):
+                w_bath = weights[valid_bath]
+                w_bath_sum = float(np.sum(w_bath))
+                if w_bath_sum > 0.0 and np.isfinite(w_bath_sum):
+                    pred_bath_mean = float(
+                        np.sum((w_bath / w_bath_sum) * pred_bath[valid_bath])
+                    )
         mean_offset_ned = np.sum(
             weights[:, None] * obs.candidate_offsets_ned_m,
             axis=0,
@@ -593,7 +754,14 @@ class GravitySequenceMatcher:
             delayed_by_steps=len(window) - 1 - target,
         )
 
-        return anchor, bool(obs.used_gradient), pred_g_mean, pred_g_std
+        return (
+            anchor,
+            bool(obs.used_gradient),
+            bool(obs.used_bathymetry),
+            pred_g_mean,
+            pred_g_std,
+            pred_bath_mean,
+        )
 
     def _emit_result_for_index(
         self,
@@ -605,7 +773,14 @@ class GravitySequenceMatcher:
         """
         alpha, beta, delta, psi = self._run_window_inference(window)
         best_last = int(np.argmax(delta[-1]))
-        target_anchor, used_gradient, pred_g_mean, pred_g_std = self._estimate_for_window_index(
+        (
+            target_anchor,
+            used_gradient,
+            used_bathymetry,
+            pred_g_mean,
+            pred_g_std,
+            pred_bath_mean,
+        ) = self._estimate_for_window_index(
             window,
             alpha,
             beta,
@@ -632,6 +807,7 @@ class GravitySequenceMatcher:
             covariance_geodetic=np.asarray(target_anchor.covariance_geodetic, dtype=np.float64),
             predicted_disturbance_mps2=float(pred_g_mean),
             marginal_peak_probability=float(target_anchor.marginal_peak_probability),
+            predicted_bathymetry_m=pred_bath_mean,
         )
 
         return SequenceMatchUpdateResult(
@@ -646,6 +822,7 @@ class GravitySequenceMatcher:
             predicted_disturbance_mean_mps2=pred_g_mean,
             predicted_disturbance_std_mps2=pred_g_std,
             used_gradient=used_gradient,
+            used_bathymetry=used_bathymetry,
             viterbi_log_score=float(delta[-1, best_last]),
             viterbi_offset_ned_m=np.asarray(target_anchor.viterbi_offset_ned_m, dtype=np.float64),
             posterior_mean_offset_ned_m=np.asarray(
@@ -665,6 +842,8 @@ class GravitySequenceMatcher:
         reference_surface_height_m: float = 0.0,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
         gradient_meas_std_per_s2: Optional[float] = None,
+        measured_bathymetry_m: Optional[float] = None,
+        bathymetry_meas_std_m: Optional[float] = None,
         time_s: Optional[float] = None,
     ) -> list[SequenceMatchUpdateResult]:
         """
@@ -697,6 +876,8 @@ class GravitySequenceMatcher:
             ins_or_state=state,
             measured_gradient_per_s2=measured_gradient_per_s2,
             gradient_meas_std_per_s2=gradient_meas_std_per_s2,
+            measured_bathymetry_m=measured_bathymetry_m,
+            bathymetry_meas_std_m=bathymetry_meas_std_m,
             depth_measurement=depth_measurement,
             reference_surface_height_m=reference_surface_height_m,
             time_s=obs_time,
@@ -729,6 +910,8 @@ class GravitySequenceMatcher:
         reference_surface_height_m: Optional[float] = None,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
         gradient_meas_std_per_s2: Optional[float] = None,
+        measured_bathymetry_m: Optional[float] = None,
+        bathymetry_meas_std_m: Optional[float] = None,
     ) -> list[SequenceMatchUpdateResult]:
         """
         Convenience wrapper for disturbance-gravimeter measurements.
@@ -751,6 +934,8 @@ class GravitySequenceMatcher:
             reference_surface_height_m=href,
             measured_gradient_per_s2=measured_gradient_per_s2,
             gradient_meas_std_per_s2=gradient_meas_std_per_s2,
+            measured_bathymetry_m=measured_bathymetry_m,
+            bathymetry_meas_std_m=bathymetry_meas_std_m,
             time_s=None if measurement.time_s is None else float(measurement.time_s),
         )
 

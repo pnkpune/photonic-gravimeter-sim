@@ -1,0 +1,32 @@
+{
+  "name": "photonic_gravimeter_proto",
+  "operating_mode": "mission",
+  "noise_density_mps2_per_sqrt_hz": 4.0e-06,
+  "bias_random_walk_mps2_per_sqrt_s": 2.0e-08,
+  "turn_on_bias_std_mps2": 1.0e-06,
+  "fixed_bias_mps2": 0.0,
+  "scale_factor_error_ppm": 0.0,
+  "bandwidth_hz": 0.4,
+  "specific_force_coupling_b": [
+    1.0e-06,
+    1.0e-06,
+    1.0e-05
+  ],
+  "specific_force_reference_b_mps2": [
+    0.0,
+    0.0,
+    -9.80665
+  ],
+  "angular_rate_coupling_b_mps2_per_radps": [
+    1.5e-06,
+    1.5e-06,
+    1.5e-05
+  ],
+  "supports_absolute_mode": true,
+  "update_period_s": 1.0,
+  "warmup_time_s": 45.0,
+  "valid_duty_cycle": 1.0,
+  "degraded_noise_factor": 2.5,
+  "degraded_bias_factor": 2.0,
+  "degraded_motion_factor": 2.0
+}

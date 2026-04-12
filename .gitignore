@@ -21,4 +21,6 @@ data/gravity_maps/raw/norwegian_margin/*
 !data/gravity_maps/raw/norwegian_margin/norwegian_margin_fixture.csv
 data/gravity_maps/processed/
 data/gravity_maps/synthetic/
+data/bathymetry/raw/
+data/bathymetry/processed/
 data/trajectories/

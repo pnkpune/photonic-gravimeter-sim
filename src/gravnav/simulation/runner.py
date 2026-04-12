@@ -56,6 +56,7 @@ from ..analysis.observability import (
     ObservabilityAnalyzer,
     summarize_observability_snapshot,
 )
+from ..datasets.bathymetry_loader import BathymetryGrid
 from ..estimators.error_state_ins import (
     ERR_ATT,
     ERR_BA,
@@ -97,10 +98,16 @@ from ..estimators.integrity import integrity_snapshot_from_ins
 from ..estimators.map_match_pf import (
     GravityMapParticleFilter,
     MapMatchPFSpec,
+    apply_ned_offsets_to_geodetic,
     evaluate_gravity_map_horizontal_gradient,
     geodetic_covariance_from_ned_covariance,
 )
 from ..physics.gravity_map import GravityGridMap
+from ..sensors.bathymetry import (
+    BathymetryMeasurement,
+    BathymetrySensor,
+    BathymetrySensorSpec,
+)
 from ..sensors.depth import DepthMeasurement, DepthSensor, DepthSensorSpec
 from ..sensors.gravimeter import (
     GravimeterMeasurement,
@@ -117,6 +124,11 @@ from ..sensors.imu import (
     build_imu_truth_kinematics,
     build_interval_imu_truth_kinematics,
 )
+from ..sensors.photonic_gravimeter import (
+    PhotonicGravimeterMeasurement,
+    PhotonicGravimeterSensor,
+    PhotonicGravimeterSpec,
+)
 from ..sensors.velocity_aid import (
     VelocityAidMeasurement,
     VelocityAidSensor,
@@ -131,8 +143,20 @@ from .results import (
 from ..truth.scenarios import ScenarioSpec, build_truth_trajectory_from_scenario
 from ..truth.trajectory import TruthTrajectory
 from ..utils.config import load_scenario_spec
+from ..utils.rng import indexed_generator
 
 FloatArray = NDArray[np.float64]
+
+
+_RUN_WITH_SPECS_RNG_STREAM_INDICES = {
+    "imu": 0,
+    "gravimeter": 1,
+    "depth": 2,
+    "velocity_aid": 3,
+    "gradiometer": 4,
+    "bathymetry": 5,
+    "pf": 6,
+}
 
 
 # -----------------------------------------------------------------------------
@@ -455,6 +479,10 @@ class MapMatchFeedbackConfig:
         sequence anchors. This path does not mutate the live INS.
     sequence_lag_smoother_spec : SequenceLagSmootherSpec
         Configuration for the bounded-lag sequence smoother.
+    use_bathymetry : bool, default=False
+        Whether to include bathymetry likelihood in the sequence matcher.
+    bathymetry_meas_std_m : float, optional
+        Bathymetry measurement standard deviation used by the sequence matcher.
     """
 
     enabled: bool = True
@@ -472,6 +500,7 @@ class MapMatchFeedbackConfig:
     use_directional_feedback: bool = False
     use_sequence_feedback: bool = False
     use_sequence_lag_smoother: bool = False
+    use_bathymetry: bool = False
     directional_feedback_spec: DirectionalFeedbackSpec = field(
         default_factory=DirectionalFeedbackSpec
     )
@@ -486,6 +515,7 @@ class MapMatchFeedbackConfig:
     feedback_nis_threshold: Optional[float] = None
     use_gradiometer: bool = False
     gradient_meas_std_per_s2: Optional[float] = None
+    bathymetry_meas_std_m: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -515,12 +545,18 @@ class MapMatchFeedbackConfig:
                 "feedback_nis_threshold must be nonnegative when provided."
             )
         self.use_gradiometer = bool(self.use_gradiometer)
+        self.use_bathymetry = bool(self.use_bathymetry)
         self.use_sequence_feedback = bool(self.use_sequence_feedback)
         self.use_sequence_lag_smoother = bool(self.use_sequence_lag_smoother)
         if self.gradient_meas_std_per_s2 is not None:
             self.gradient_meas_std_per_s2 = _positive_scalar(
                 self.gradient_meas_std_per_s2,
                 name="gradient_meas_std_per_s2",
+            )
+        if self.bathymetry_meas_std_m is not None:
+            self.bathymetry_meas_std_m = _positive_scalar(
+                self.bathymetry_meas_std_m,
+                name="bathymetry_meas_std_m",
             )
         if self.matcher != "pf":
             if self.inject_position_to_ins:
@@ -677,6 +713,10 @@ class SimulationRunnerConfig:
         Initial gyroscope bias uncertainty [rad/s].
     initial_accel_bias_std_mps2 : scalar or shape (3,), default=0
         Initial accelerometer bias uncertainty [m/s^2].
+    initial_position_offset_ned_m : scalar or shape (3,), default=0
+        Deterministic initial position offset applied to the nominal INS state
+        in local NED metres. This is useful for realistic denied-navigation
+        demos where the vehicle does not start exactly on truth.
     reference_surface_height_m : float, default=0.0
         Reference surface used for signed depth.
     gravity_override_mps2 : float, optional
@@ -705,6 +745,7 @@ class SimulationRunnerConfig:
     )
     initial_gyro_bias_std_radps: ArrayLike | float = 0.0
     initial_accel_bias_std_mps2: ArrayLike | float = 0.0
+    initial_position_offset_ned_m: ArrayLike | float = 0.0
     reference_surface_height_m: float = 0.0
     gravity_override_mps2: Optional[float] = None
 
@@ -736,6 +777,10 @@ class SimulationRunnerConfig:
         self.initial_accel_bias_std_mps2 = _nonnegative_axis3(
             self.initial_accel_bias_std_mps2,
             name="initial_accel_bias_std_mps2",
+        )
+        self.initial_position_offset_ned_m = _axis3(
+            self.initial_position_offset_ned_m,
+            name="initial_position_offset_ned_m",
         )
         self.reference_surface_height_m = float(self.reference_surface_height_m)
         if self.gravity_override_mps2 is not None:
@@ -976,11 +1021,26 @@ class ScenarioSimulationRunner:
             accel_bias_std_mps2=accel_bias_std,
         )
 
-        return ErrorStateINS.from_truth_trajectory_start(
+        ins = ErrorStateINS.from_truth_trajectory_start(
             truth,
             process_noise=process_noise,
             P0=P0,
         )
+        position_offset_ned_m = np.asarray(
+            cfg.initial_position_offset_ned_m,
+            dtype=np.float64,
+        )
+        if np.any(position_offset_ned_m != 0.0):
+            lat_off, lon_off, h_off = apply_ned_offsets_to_geodetic(
+                np.asarray([ins.state.nominal.lat_rad], dtype=np.float64),
+                np.asarray([ins.state.nominal.lon_rad], dtype=np.float64),
+                np.asarray([ins.state.nominal.height_m], dtype=np.float64),
+                position_offset_ned_m.reshape(1, 3),
+            )
+            ins.state.nominal.lat_rad = float(lat_off[0])
+            ins.state.nominal.lon_rad = float(lon_off[0])
+            ins.state.nominal.height_m = float(h_off[0])
+        return ins
 
     def _apply_depth_update(
         self,
@@ -1152,10 +1212,14 @@ class ScenarioSimulationRunner:
         truth: TruthTrajectory,
         *,
         imu_sensor: IMUSensor,
-        gravimeter_sensor: Optional[ScalarGravimeterSensor] = None,
+        gravimeter_sensor: Optional[
+            ScalarGravimeterSensor | PhotonicGravimeterSensor
+        ] = None,
         depth_sensor: Optional[DepthSensor] = None,
         velocity_aid_sensor: Optional[VelocityAidSensor] = None,
         gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
+        bathymetry_sensor: Optional[BathymetrySensor] = None,
+        bathymetry_map: Optional[BathymetryGrid] = None,
         pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
@@ -1169,12 +1233,16 @@ class ScenarioSimulationRunner:
             Truth trajectory to simulate.
         imu_sensor : IMUSensor
             IMU simulator used for every propagation step.
-        gravimeter_sensor : ScalarGravimeterSensor, optional
+        gravimeter_sensor : ScalarGravimeterSensor or PhotonicGravimeterSensor, optional
             Scalar gravimeter simulator used for map matching.
         depth_sensor : DepthSensor, optional
             Depth-aiding sensor simulator.
         velocity_aid_sensor : VelocityAidSensor, optional
             External velocity-aid simulator.
+        bathymetry_sensor : BathymetrySensor, optional
+            Seabed-clearance / echo-sounder simulator.
+        bathymetry_map : BathymetryGrid, optional
+            Regional bathymetry grid used to synthesize truth bathymetry.
         pf_rng : numpy.random.Generator, optional
             Optional RNG for the PF. Supply this when reproducible PF histories
             are required across repeated runs.
@@ -1240,6 +1308,9 @@ class ScenarioSimulationRunner:
                 sequence_matcher = GravitySequenceMatcher(
                     cfg.map_match.sequence_spec,
                     resolved_map,
+                    bathymetry_map=(
+                        bathymetry_map if cfg.map_match.use_bathymetry else None
+                    ),
                 )
                 if cfg.map_match.use_sequence_feedback:
                     sequence_feedback_ctrl = SequenceFeedbackController(
@@ -1701,7 +1772,7 @@ class ScenarioSimulationRunner:
             # ----------------------------------------------------------
             gravimeter_meas: Optional[GravimeterMeasurement] = None
             if gravimeter_sensor is not None:
-                gravimeter_meas = gravimeter_sensor.measure_disturbance_from_specific_force_body(
+                gravimeter_candidate = gravimeter_sensor.measure_disturbance_from_specific_force_body(
                     specific_force_body_mps2=kin_point.f_b_mps2,
                     C_n_b=truth.C_n_b[k],
                     v_dot_ned_mps2=truth.v_dot_ned_mps2[k],
@@ -1712,7 +1783,25 @@ class ScenarioSimulationRunner:
                     body_angular_rate_b_radps=truth.omega_nb_b_radps[k],
                     time_s=t_now,
                 )
-                sensors.gravimeter_samples.append(gravimeter_meas)
+                if isinstance(gravimeter_candidate, PhotonicGravimeterMeasurement):
+                    sensors.add_custom_sample("photonic_gravimeter", gravimeter_candidate)
+                    if gravimeter_candidate.is_valid:
+                        gravimeter_meas = GravimeterMeasurement(
+                            kind=gravimeter_candidate.kind,
+                            time_s=gravimeter_candidate.time_s,
+                            value_mps2=gravimeter_candidate.value_mps2,
+                            ideal_value_mps2=gravimeter_candidate.ideal_value_mps2,
+                            motion_residual_mps2=gravimeter_candidate.motion_residual_mps2,
+                            filtered_input_mps2=gravimeter_candidate.filtered_input_mps2,
+                            bias_used_mps2=gravimeter_candidate.bias_used_mps2,
+                            white_noise_mps2=gravimeter_candidate.white_noise_mps2,
+                            saturated=gravimeter_candidate.saturated,
+                        )
+                else:
+                    gravimeter_meas = gravimeter_candidate
+
+                if gravimeter_meas is not None:
+                    sensors.gravimeter_samples.append(gravimeter_meas)
 
             # ----------------------------------------------------------
             # Gravity gradiometer sampling
@@ -1737,6 +1826,35 @@ class ScenarioSimulationRunner:
                     time_s=t_now,
                 )
                 sensors.add_custom_sample("gradiometer", gradiometer_meas)
+
+            # ----------------------------------------------------------
+            # Bathymetry sampling
+            # ----------------------------------------------------------
+            current_bathymetry_measurement: Optional[BathymetryMeasurement] = None
+            if (
+                bathymetry_sensor is not None
+                and bathymetry_map is not None
+                and cfg.map_match.use_bathymetry
+            ):
+                water_depth_true = float(
+                    bathymetry_map.evaluate_water_depth_m(
+                        np.array([float(np.rad2deg(truth.lat_rad[k]))], dtype=np.float64),
+                        np.array([float(np.rad2deg(truth.lon_rad[k]))], dtype=np.float64),
+                        reference_surface_height_m=cfg.reference_surface_height_m,
+                    )[0]
+                )
+                platform_depth_true = float(
+                    cfg.reference_surface_height_m - float(truth.height_m[k])
+                )
+                ideal_clearance_m = max(0.0, water_depth_true - platform_depth_true)
+                current_bathymetry_measurement = (
+                    bathymetry_sensor.measure_seafloor_clearance(
+                        ideal_clearance_m,
+                        time_s=t_now,
+                        reference_surface_height_m=cfg.reference_surface_height_m,
+                    )
+                )
+                sensors.add_custom_sample("bathymetry", current_bathymetry_measurement)
 
             # ----------------------------------------------------------
             # Gravity map matching and optional PF feedback
@@ -1860,6 +1978,12 @@ class ScenarioSimulationRunner:
                             else np.asarray(gradiometer_meas.value_per_s2, dtype=np.float64)
                         ),
                         gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
+                        measured_bathymetry_m=(
+                            None
+                            if current_bathymetry_measurement is None
+                            else float(current_bathymetry_measurement.value_m)
+                        ),
+                        bathymetry_meas_std_m=cfg.map_match.bathymetry_meas_std_m,
                         reference_surface_height_m=cfg.reference_surface_height_m,
                     )
                     if len(seq_updates) > 0:
@@ -1940,6 +2064,12 @@ class ScenarioSimulationRunner:
                                                 )
                                             ),
                                             gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
+                                            measured_bathymetry_m=(
+                                                None
+                                                if current_bathymetry_measurement is None
+                                                else float(current_bathymetry_measurement.value_m)
+                                            ),
+                                            bathymetry_meas_std_m=cfg.map_match.bathymetry_meas_std_m,
                                             reference_surface_height_m=cfg.reference_surface_height_m,
                                         )
                                         matcher_reset = True
@@ -2002,10 +2132,14 @@ class ScenarioSimulationRunner:
         scenario_or_truth: TruthTrajectory | ScenarioSpec | str | Path,
         *,
         imu_sensor: IMUSensor,
-        gravimeter_sensor: Optional[ScalarGravimeterSensor] = None,
+        gravimeter_sensor: Optional[
+            ScalarGravimeterSensor | PhotonicGravimeterSensor
+        ] = None,
         depth_sensor: Optional[DepthSensor] = None,
         velocity_aid_sensor: Optional[VelocityAidSensor] = None,
         gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
+        bathymetry_sensor: Optional[BathymetrySensor] = None,
+        bathymetry_map: Optional[BathymetryGrid] = None,
         pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
@@ -2049,6 +2183,8 @@ class ScenarioSimulationRunner:
             depth_sensor=depth_sensor,
             velocity_aid_sensor=velocity_aid_sensor,
             gradiometer_sensor=gradiometer_sensor,
+            bathymetry_sensor=bathymetry_sensor,
+            bathymetry_map=bathymetry_map,
             pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
@@ -2060,9 +2196,12 @@ class ScenarioSimulationRunner:
         *,
         imu_spec: IMUSpec,
         gravimeter_spec: Optional[GravimeterSpec] = None,
+        photonic_gravimeter_spec: Optional[PhotonicGravimeterSpec] = None,
         depth_spec: Optional[DepthSensorSpec] = None,
         velocity_aid_spec: Optional[VelocityAidSpec] = None,
         gradiometer_spec: Optional[GravityGradiometerSpec] = None,
+        bathymetry_spec: Optional[BathymetrySensorSpec] = None,
+        bathymetry_map: Optional[BathymetryGrid] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
         dt_s: Optional[float] = None,
@@ -2078,13 +2217,20 @@ class ScenarioSimulationRunner:
         imu_spec : IMUSpec
             IMU spec used to instantiate the IMU simulator.
         gravimeter_spec : GravimeterSpec, optional
-            Gravimeter spec.
+            Surrogate scalar gravimeter spec.
+        photonic_gravimeter_spec : PhotonicGravimeterSpec, optional
+            Photonic gravimeter spec. When provided, it takes precedence over
+            ``gravimeter_spec``.
         depth_spec : DepthSensorSpec, optional
             Depth-sensor spec.
         velocity_aid_spec : VelocityAidSpec, optional
             Velocity-aid spec.
         gradiometer_spec : GravityGradiometerSpec, optional
             Horizontal gravity-gradiometer spec.
+        bathymetry_spec : BathymetrySensorSpec, optional
+            Bathymetry / seabed-clearance sensor spec.
+        bathymetry_map : BathymetryGrid, optional
+            Regional bathymetry grid used for truth sampling.
         map_model : object, path, or None, optional
             Gravity-map backend or NPZ path.
         metadata : SimulationMetadata, optional
@@ -2099,43 +2245,68 @@ class ScenarioSimulationRunner:
         ScenarioSimulationResult
             Full typed run result.
         """
-        root_rng = np.random.default_rng(seed)
+        def child_rng(stream_name: str) -> np.random.Generator:
+            if seed is None:
+                return np.random.default_rng()
+            try:
+                stream_index = _RUN_WITH_SPECS_RNG_STREAM_INDICES[stream_name]
+            except KeyError as exc:
+                raise KeyError(
+                    f"Unknown child RNG stream name {stream_name!r}."
+                ) from exc
+            return indexed_generator(int(seed), stream_index)
 
-        def child_rng() -> np.random.Generator:
-            child_seed = int(
-                root_rng.integers(
-                    0,
-                    np.iinfo(np.uint64).max,
-                    dtype=np.uint64,
+        imu_sensor = IMUSensor(imu_spec, rng=child_rng("imu"))
+        if photonic_gravimeter_spec is not None:
+            gravimeter_sensor = PhotonicGravimeterSensor(
+                photonic_gravimeter_spec,
+                rng=child_rng("gravimeter"),
+            )
+        else:
+            gravimeter_sensor = (
+                None
+                if gravimeter_spec is None
+                else ScalarGravimeterSensor(
+                    gravimeter_spec,
+                    rng=child_rng("gravimeter"),
                 )
             )
-            return np.random.default_rng(child_seed)
-
-        imu_sensor = IMUSensor(imu_spec, rng=child_rng())
-        gravimeter_sensor = (
-            None
-            if gravimeter_spec is None
-            else ScalarGravimeterSensor(gravimeter_spec, rng=child_rng())
-        )
         depth_sensor = (
             None
             if depth_spec is None
-            else DepthSensor(depth_spec, rng=child_rng())
+            else DepthSensor(depth_spec, rng=child_rng("depth"))
         )
         velocity_aid_sensor = (
             None
             if velocity_aid_spec is None
-            else VelocityAidSensor(velocity_aid_spec, rng=child_rng())
+            else VelocityAidSensor(
+                velocity_aid_spec,
+                rng=child_rng("velocity_aid"),
+            )
         )
         gradiometer_sensor = (
             None
             if gradiometer_spec is None
-            else GravityGradiometerSensor(gradiometer_spec, rng=child_rng())
+            else GravityGradiometerSensor(
+                gradiometer_spec,
+                rng=child_rng("gradiometer"),
+            )
         )
-        pf_rng = child_rng()
+        bathymetry_sensor = (
+            None
+            if bathymetry_spec is None
+            else BathymetrySensor(
+                bathymetry_spec,
+                rng=child_rng("bathymetry"),
+            )
+        )
+        pf_rng = child_rng("pf")
 
         meta = SimulationMetadata() if metadata is None else metadata.copy()
-        meta.rng_state = {"seed": None if seed is None else int(seed)}
+        meta.rng_state = {
+            "seed": None if seed is None else int(seed),
+            "streams": dict(_RUN_WITH_SPECS_RNG_STREAM_INDICES),
+        }
 
         return self.run_scenario(
             scenario_or_truth,
@@ -2144,6 +2315,8 @@ class ScenarioSimulationRunner:
             depth_sensor=depth_sensor,
             velocity_aid_sensor=velocity_aid_sensor,
             gradiometer_sensor=gradiometer_sensor,
+            bathymetry_sensor=bathymetry_sensor,
+            bathymetry_map=bathymetry_map,
             pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
@@ -2159,8 +2332,10 @@ __all__ = [
     "ScenarioSimulationRunner",
     "SimulationRunnerConfig",
     "VelocityAidFusionConfig",
+    "BathymetrySensorSpec",
     "GravityGradiometerSpec",
     "GravitySequenceMatcherSpec",
+    "PhotonicGravimeterSpec",
     "build_initial_covariance_geodetic",
     "process_noise_from_imu_spec",
     "resolve_map_model",
