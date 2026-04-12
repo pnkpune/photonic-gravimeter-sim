@@ -1,12 +1,75 @@
 # Next-Steps Report: From Gravity-Aided INS to Earth-Signature Navigator
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
-**Date: 2026-04-10**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, PF feedback disabled, 36 tests passing**
+**Date: 2026-04-12**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, PF feedback disabled, 44 tests passing**
 
 ---
 
-## Current baseline (where we are)
+## Current top-line milestone (where we are)
+
+The repo now has a **realistic off-grid maritime demo** that clears the actual product bar:
+
+- live INS remains the real-time backbone
+- gravity remains the primary passive Earth-signature
+- gradient likelihood and bathymetry reduce ambiguity
+- the winning navigation product is a **bounded-lag Earth-signature output**, not a hidden GNSS substitute
+- the promoted output beats INS-only across all acceptance seeds with **0.0% horizontal HMI**
+
+Promoted demo:
+
+- theater: Norwegian margin
+- scenario: `norwegian_margin_maritime`
+- mission: `1.25 h` multi-leg off-grid maritime survey
+- speed: `4.0 m/s`
+- turn bank angle: `8 deg`
+- sample period: `2.0 s`
+- deterministic initial INS offset: `[60.0, -30.0, 0.0] m` NED
+- seeds: `42`, `123`, `777`
+
+Promoted frozen sequence profile:
+
+- `window_size = 11`
+- `grid_half_span_m = [120.0, 120.0]`
+- `grid_spacing_m = [20.0, 20.0]`
+- `transition_std_m = [20.0, 20.0]`
+- `center_prior_std_m = [80.0, 80.0]`
+- `bathymetry_meas_std_m = 2.0`
+- `bathymetry_weight = 3.5`
+- `map_match_every_steps = 1`
+
+Promoted hardware-tied passive stack:
+
+- live INS + depth + velocity
+- mission-mode photonic gravimeter
+- gravity gradiometer likelihood
+- bathymetry as supporting passive context
+- observe-only sequence matcher
+- bounded-lag Earth-signature output
+
+Median result across acceptance seeds:
+
+| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
+| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
+| `photonic_gravity` | `sequence` | 241.526 | 216.118 | 427.030 | 388.292 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 197.839 | 427.030 | 375.991 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 197.371 | 427.030 | 374.722 | 0.000 |
+
+Per-seed promoted output result:
+
+| Seed | Live INS RMSE [m] | Lag-smoothed RMSE [m] | Improvement [m] | HMI horiz |
+| --- | ---: | ---: | ---: | ---: |
+| `42` | 241.526 | 197.371 | 44.155 | 0.000 |
+| `123` | 135.255 | 133.763 | 1.492 | 0.000 |
+| `777` | 364.901 | 306.314 | 58.587 | 0.000 |
+
+This is the first in-repo result that is both technically defensible and operationally relevant to the actual goal: **reducing denied-mission INS drift without GNSS by using gravity-led passive Earth-signature aiding.**
+
+---
+
+## Current baseline and why it still matters
 
 The repo is a real, working gravity-aided navigation simulator. The validated maritime baseline proves:
 
@@ -22,11 +85,15 @@ The stack includes: WGS84 geodesy, nav-grade IMU model, scalar gravimeter with m
 
 PF feedback is intentionally disabled. Naive PF-to-INS pseudo-position injection destroys the INS (19 km RMSE). Covariance inflation makes it non-destructive but never better than observe-only. This is the central bottleneck.
 
-New status beyond that baseline: the repo now also has a **separate bounded-lag smoothed navigation output** driven by `sequence_plus_gradient`. Unlike the closed-loop feedback experiments, this path leaves the live INS untouched and publishes a delayed navigation track. On `maritime_baseline`, seed `42`, it improves the live INS from **103.5 m** horizontal RMSE to **98.3 m** with **0.0%** horizontal HMI. That makes it the first delayed navigation path in the repo that improves navigation metrics without breaking the validated real-time solution.
+That older synthetic baseline still matters because it established three things that remained true all the way through the more realistic demo work:
+
+- gravity helps only as an aiding source inside an INS-centered stack
+- sequence matching beats PF as the main Earth-signature estimator
+- the safe architecture is a separate delayed-output path, not naive closed-loop feedback into the live INS
 
 ---
 
-## Regional benchmark update (2026-04-10)
+## Regional and public benchmark checkpoints
 
 The repo now has a **gravity-first Norwegian-margin regional benchmark path** that keeps the estimator stack unchanged and swaps only the map source:
 
@@ -52,11 +119,11 @@ What this means:
 - the gains shrink sharply relative to the synthetic maritime benchmark, which means the earlier synthetic map materially overstated regional gravity distinctiveness
 - the current regional path is a realism check, not yet a benchmark on a full public Norwegian-margin survey product
 
-**Decision:** before adding more estimator complexity, the next highest-impact step is to replace the in-repo fixture with a full public regional product and rerun the exact same benchmark stack. The algorithm question is no longer “can sequence beat PF on synthetic maps?” It already can. The real question is how much of that survives once the map realism improves further.
+This stage was valuable because it showed that synthetic maps had overstated the distinctiveness of the signal. That realism penalty is exactly what pushed the work toward longer missions and multi-modal passive context.
 
 ---
 
-## Public-product benchmark update (2026-04-10)
+## Public-product benchmark checkpoint
 
 That next step is now partly complete. The repo can ingest the public NAG-TEC Bouguer anomaly export (`bouguer_anomaly_geo.xyz`, DOI `10.22008/FK2/AQ38FS`) by binning the scattered geographic XYZ product into the existing `GravityGridMap` interface, then generating a regional maritime scenario inside the processed map bounds.
 
@@ -91,7 +158,29 @@ Interpretation:
 - the public-product result survives only after retuning the sequence priors to stay much closer to the INS than the default synthetic-benchmark settings did
 - that means the next high-impact work is not more PF feedback machinery; it is **productizing public-product preparation and sequence-configuration benchmarking by map regime**
 
-**Decision:** the current strongest gravity-aided result on the public product is now the tuned observe-only sequence matcher. The next work should preserve that gain and make it reproducible across public regional products, rather than pushing closed-loop gravity feedback before the public-map tuning story is stable.
+This stage was valuable because it showed the first real public-product sequence win, but also made clear that a short-route gravity-only story was still too fragile. The promoted 2026-04-12 maritime demo moved beyond that by using a longer denied mission and a gravity-led multi-modal passive stack.
+
+---
+
+## Current recommended product framing
+
+The correct product claim is now much clearer than it was when this report began.
+
+Do not frame the system as:
+
+- a standalone gravimeter replacing GNSS
+- a universal global navigator
+- a closed-loop gravity-feedback INS already ready for production
+
+Do frame it as:
+
+- a **GPS-denied passive navigation subsystem**
+- with **INS as the real-time propagator**
+- **gravity as the primary non-GNSS Earth-signature**
+- **gradient and bathymetry as ambiguity-reducing passive context**
+- and a **bounded-lag Earth-signature output** as the currently promotable improvement path
+
+This is the first framing that matches both the physics and the results.
 
 ---
 

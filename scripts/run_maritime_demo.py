@@ -228,6 +228,32 @@ def _metrics_row(label: str, metrics: ScenarioMetricsSummary) -> dict[str, float
     lag = metrics.lag_smoothed_position_error
     integ = metrics.integrity
     lag_integ = metrics.lag_smoothed_integrity
+    earth_rmse = (
+        None
+        if lag is None and seq is None and ins is None
+        else float(lag.horizontal_rmse_m if lag is not None else seq.horizontal_rmse_m if seq is not None else ins.horizontal_rmse_m)
+    )
+    earth_cep95 = (
+        None
+        if lag is None and seq is None and ins is None
+        else float(lag.cep95_m if lag is not None else seq.cep95_m if seq is not None else ins.cep95_m)
+    )
+    earth_hmi = (
+        None
+        if lag_integ is None and integ is None
+        else float(
+            lag_integ.fraction_hazardously_misleading_horizontal
+            if lag_integ is not None
+            else integ.fraction_hazardously_misleading_horizontal
+        )
+    )
+    earth_mode = (
+        "lag_smoothed"
+        if lag is not None
+        else "sequence"
+        if seq is not None
+        else "live_ins"
+    )
     return {
         "label": label,
         "ins_horizontal_rmse_m": None if ins is None else float(ins.horizontal_rmse_m),
@@ -238,6 +264,10 @@ def _metrics_row(label: str, metrics: ScenarioMetricsSummary) -> dict[str, float
         "lag_cep95_m": None if lag is None else float(lag.cep95_m),
         "hmi_horizontal": None if integ is None else float(integ.fraction_hazardously_misleading_horizontal),
         "lag_hmi_horizontal": None if lag_integ is None else float(lag_integ.fraction_hazardously_misleading_horizontal),
+        "earth_signature_horizontal_rmse_m": earth_rmse,
+        "earth_signature_cep95_m": earth_cep95,
+        "earth_signature_hmi_horizontal": earth_hmi,
+        "earth_signature_mode": earth_mode,
     }
 
 
@@ -247,16 +277,13 @@ def _make_summary_plot(
     out_path: Path,
 ) -> None:
     labels = [row["label"] for row in rows]
-    seq_rmse = [
-        row["ins_horizontal_rmse_m"] if row["sequence_horizontal_rmse_m"] is None else row["sequence_horizontal_rmse_m"]
-        for row in rows
-    ]
+    earth_rmse = [row["earth_signature_horizontal_rmse_m"] for row in rows]
     ins_rmse = [row["ins_horizontal_rmse_m"] for row in rows]
     x = np.arange(len(labels))
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.bar(x - 0.18, ins_rmse, width=0.36, label="live INS")
-    ax.bar(x + 0.18, seq_rmse, width=0.36, label="Earth-signature estimate")
+    ax.bar(x + 0.18, earth_rmse, width=0.36, label="reported Earth-signature output")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=15, ha="right")
     ax.set_ylabel("horizontal RMSE [m]")
@@ -289,6 +316,13 @@ def _write_report(
         vals = [float(r[key]) for r in by_label[label] if r[key] is not None]
         return float(np.median(vals))
 
+    ordered_labels = [
+        "live_ins",
+        "surrogate_gravity",
+        "photonic_gravity",
+        "photonic_gravity_bathymetry",
+        "photonic_gravity_bathymetry_lag",
+    ]
     lines = [
         "# Hardware-Tied Maritime Demo Report",
         "",
@@ -311,25 +345,31 @@ def _write_report(
         f"- grid_spacing_m: `{profile['grid_spacing_m']}`",
         f"- transition_std_m: `{profile['transition_std_m']}`",
         f"- center_prior_std_m: `{profile['center_prior_std_m']}`",
+        f"- bathymetry_meas_std_m: `{profile['bathymetry_meas_std_m']}`",
+        f"- bathymetry_weight: `{profile['bathymetry_weight']}`",
+        f"- map_match_every_steps: `{profile['map_match_every_steps']}`",
         "",
         "## Median Results Across Seeds",
         "",
-        "| Mode | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | Reported Earth-signature output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for label in ("live_ins", "surrogate_gravity", "photonic_gravity", "photonic_gravity_bathymetry"):
+    for label in ordered_labels:
+        if label not in by_label:
+            continue
         lines.append(
-            f"| `{label}` | {median(label, 'ins_horizontal_rmse_m'):.3f} | "
-            f"{median(label, 'sequence_horizontal_rmse_m') if label != 'live_ins' else median(label, 'ins_horizontal_rmse_m'):.3f} | "
+            f"| `{label}` | `{by_label[label][0]['earth_signature_mode']}` | "
+            f"{median(label, 'ins_horizontal_rmse_m'):.3f} | "
+            f"{median(label, 'earth_signature_horizontal_rmse_m'):.3f} | "
             f"{median(label, 'ins_cep95_m'):.3f} | "
-            f"{median(label, 'sequence_cep95_m') if label != 'live_ins' else median(label, 'ins_cep95_m'):.3f} | "
-            f"{median(label, 'hmi_horizontal'):.3f} |"
+            f"{median(label, 'earth_signature_cep95_m'):.3f} | "
+            f"{median(label, 'earth_signature_hmi_horizontal'):.3f} |"
         )
     if "photonic_gravity_bathymetry_lag" in by_label:
         lines.extend(
             [
                 "",
-                "## Lag-Smoother Diagnostic",
+                "## Lag-Smoother Result",
                 "",
                 f"- median lag-smoothed RMSE: `{median('photonic_gravity_bathymetry_lag', 'lag_horizontal_rmse_m'):.3f} m`",
                 f"- median lag-smoothed CEP95: `{median('photonic_gravity_bathymetry_lag', 'lag_cep95_m'):.3f} m`",
@@ -344,8 +384,11 @@ def _write_report(
             "",
             f"- photonic gravity beats live INS on median RMSE: `{median('photonic_gravity', 'sequence_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
             f"- photonic gravity plus bathymetry beats photonic gravity on median RMSE: `{median('photonic_gravity_bathymetry', 'sequence_horizontal_rmse_m') < median('photonic_gravity', 'sequence_horizontal_rmse_m')}`",
+            f"- lag-smoothed photonic gravity plus bathymetry beats live INS on median RMSE: `{median('photonic_gravity_bathymetry_lag', 'lag_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
+            f"- lag-smoothed photonic gravity plus bathymetry beats live INS on median CEP95: `{median('photonic_gravity_bathymetry_lag', 'lag_cep95_m') < median('live_ins', 'ins_cep95_m')}`",
             "- gravity remains the primary discriminator because the photonic-gravity path is compared directly against live INS before bathymetry is added.",
             "- bathymetry is treated as supporting passive context, not as a replacement for the gravity signature.",
+            "- the recommended demo output is the bounded-lag Earth-signature track when it retains zero horizontal HMI.",
             "",
         ]
     )
