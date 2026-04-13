@@ -53,7 +53,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -360,6 +360,20 @@ class PhotonicGravimeterTelemetry:
     absolute_gravity_estimate_mps2: float
     disturbance_estimate_mps2: float
     validity_reason: str
+
+
+@dataclass
+class PhotonicTelemetrySummary:
+    sample_count: int
+    valid_sample_fraction: float
+    rejection_reason_counts: dict[str, int]
+    dominant_rejection_reason: Optional[str]
+    median_fringe_contrast: float
+    p95_fringe_contrast: float
+    rms_vibration_residual_phase_rad: float
+    rms_disturbance_residual_mps2: float
+    tilt_exceedance_fraction: float
+    median_estimated_measurement_variance_mps4: float
 
 
 @dataclass
@@ -1256,6 +1270,142 @@ class PhotonicGravimeterSensor:
         )
 
 
+def _measurement_field(sample: PhotonicGravimeterMeasurement | Mapping[str, Any], name: str, default: Any = None) -> Any:
+    if isinstance(sample, Mapping):
+        return sample.get(name, default)
+    return getattr(sample, name, default)
+
+
+def _telemetry_field(
+    sample: PhotonicGravimeterMeasurement | Mapping[str, Any],
+    name: str,
+    default: Any = None,
+) -> Any:
+    telemetry = _measurement_field(sample, "telemetry", None)
+    if telemetry is None:
+        return default
+    if isinstance(telemetry, Mapping):
+        return telemetry.get(name, default)
+    return getattr(telemetry, name, default)
+
+
+def summarize_photonic_measurements(
+    samples: Sequence[PhotonicGravimeterMeasurement | Mapping[str, Any]],
+) -> PhotonicTelemetrySummary:
+    """
+    Aggregate photonic measurement telemetry into one run-level summary.
+
+    The input may be the in-memory dataclass samples emitted by the runner or
+    JSON-like dictionaries loaded back from an archive.
+    """
+    sample_count = len(samples)
+    if sample_count == 0:
+        return PhotonicTelemetrySummary(
+            sample_count=0,
+            valid_sample_fraction=float("nan"),
+            rejection_reason_counts={},
+            dominant_rejection_reason=None,
+            median_fringe_contrast=float("nan"),
+            p95_fringe_contrast=float("nan"),
+            rms_vibration_residual_phase_rad=float("nan"),
+            rms_disturbance_residual_mps2=float("nan"),
+            tilt_exceedance_fraction=float("nan"),
+            median_estimated_measurement_variance_mps4=float("nan"),
+        )
+
+    valid_mask = np.asarray(
+        [bool(_measurement_field(sample, "is_valid", False)) for sample in samples],
+        dtype=bool,
+    )
+
+    rejection_counts: dict[str, int] = {}
+    for sample in samples:
+        if bool(_measurement_field(sample, "is_valid", False)):
+            continue
+        reason = _measurement_field(sample, "rejection_reason", None)
+        if reason is None:
+            reason = _telemetry_field(sample, "validity_reason", None)
+        reason_key = "unknown" if reason is None else str(reason)
+        rejection_counts[reason_key] = rejection_counts.get(reason_key, 0) + 1
+
+    dominant_rejection_reason = None
+    if rejection_counts:
+        dominant_rejection_reason = max(
+            sorted(rejection_counts),
+            key=lambda key: rejection_counts[key],
+        )
+
+    fringe_contrast = np.asarray(
+        [
+            float(_telemetry_field(sample, "fringe_contrast", np.nan))
+            for sample in samples
+        ],
+        dtype=np.float64,
+    )
+    vibration_residual_phase_rad = np.asarray(
+        [
+            float(_telemetry_field(sample, "vibration_residual_phase_rad", np.nan))
+            for sample in samples
+        ],
+        dtype=np.float64,
+    )
+    disturbance_residual_mps2 = np.asarray(
+        [
+            float(_measurement_field(sample, "motion_residual_mps2", np.nan))
+            for sample in samples
+        ],
+        dtype=np.float64,
+    )
+    tilt_exceeded = np.asarray(
+        [
+            bool(_telemetry_field(sample, "recommended_tilt_exceeded", False))
+            for sample in samples
+        ],
+        dtype=bool,
+    )
+    measurement_std_mps2 = np.asarray(
+        [
+            float(_telemetry_field(sample, "estimated_measurement_std_mps2", np.nan))
+            for sample in samples
+        ],
+        dtype=np.float64,
+    )
+
+    finite_contrast = fringe_contrast[np.isfinite(fringe_contrast)]
+    finite_vibration = vibration_residual_phase_rad[np.isfinite(vibration_residual_phase_rad)]
+    finite_disturbance = disturbance_residual_mps2[np.isfinite(disturbance_residual_mps2)]
+    finite_variance = (measurement_std_mps2[np.isfinite(measurement_std_mps2)]) ** 2
+
+    return PhotonicTelemetrySummary(
+        sample_count=sample_count,
+        valid_sample_fraction=float(np.mean(valid_mask)),
+        rejection_reason_counts=rejection_counts,
+        dominant_rejection_reason=dominant_rejection_reason,
+        median_fringe_contrast=(
+            float(np.median(finite_contrast)) if finite_contrast.size > 0 else float("nan")
+        ),
+        p95_fringe_contrast=(
+            float(np.percentile(finite_contrast, 95.0))
+            if finite_contrast.size > 0
+            else float("nan")
+        ),
+        rms_vibration_residual_phase_rad=(
+            float(np.sqrt(np.mean(finite_vibration**2)))
+            if finite_vibration.size > 0
+            else float("nan")
+        ),
+        rms_disturbance_residual_mps2=(
+            float(np.sqrt(np.mean(finite_disturbance**2)))
+            if finite_disturbance.size > 0
+            else float("nan")
+        ),
+        tilt_exceedance_fraction=float(np.mean(tilt_exceeded)),
+        median_estimated_measurement_variance_mps4=(
+            float(np.median(finite_variance)) if finite_variance.size > 0 else float("nan")
+        ),
+    )
+
+
 __all__ = [
     "AtomEnsembleSpec",
     "InterferometerSequenceSpec",
@@ -1263,8 +1413,10 @@ __all__ = [
     "PhotonicGravimeterSensor",
     "PhotonicGravimeterSpec",
     "PhotonicGravimeterTelemetry",
+    "PhotonicTelemetrySummary",
     "PhotonicOperatingMode",
     "PhotonicPhysicsModel",
     "PhotonicSystematicsSpec",
     "VibrationCompensationSpec",
+    "summarize_photonic_measurements",
 ]

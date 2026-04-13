@@ -6,7 +6,7 @@ Run the Norwegian maritime photonic demo and write a compact report.
 from __future__ import annotations
 
 import argparse
-from dataclasses import fields
+from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
@@ -42,6 +42,7 @@ from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
 from gravnav.sensors.imu import IMUSpec
 from gravnav.sensors.photonic_gravimeter import PhotonicGravimeterSpec
+from gravnav.sensors.photonic_gravimeter import summarize_photonic_measurements
 from gravnav.sensors.velocity_aid import VelocityAidSpec
 from gravnav.simulation.metrics import (
     ScenarioMetricsSummary,
@@ -65,7 +66,7 @@ DEFAULT_SCENARIO = PROJECT_ROOT / "configs/scenarios/norwegian_margin_maritime.j
 DEFAULT_SEQUENCE_PROFILE = PROJECT_ROOT / "configs/sequence_profiles/norwegian_margin_maritime_demo.json"
 DEFAULT_IMU_CONFIG = PROJECT_ROOT / "configs/sensors/imu_nav_grade.json"
 DEFAULT_GRAVIMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravimeter_proto.json"
-DEFAULT_PHOTONIC_CONFIG = PROJECT_ROOT / "configs/sensors/photonic_gravimeter_proto.json"
+DEFAULT_PHOTONIC_CONFIG = PROJECT_ROOT / "configs/sensors/photonic_gravimeter_maritime_benign.json"
 DEFAULT_DEPTH_CONFIG = PROJECT_ROOT / "configs/sensors/depth_sensor.json"
 DEFAULT_VELOCITY_CONFIG = PROJECT_ROOT / "configs/sensors/velocity_aid.json"
 DEFAULT_GRADIOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravity_gradiometer_proto.json"
@@ -276,6 +277,13 @@ def _metrics_row(label: str, metrics: ScenarioMetricsSummary) -> dict[str, float
     }
 
 
+def _photonic_summary_from_result(result: Any) -> dict[str, Any] | None:
+    samples = result.sensors.custom_streams.get("photonic_gravimeter", [])
+    if len(samples) == 0:
+        return None
+    return asdict(summarize_photonic_measurements(samples))
+
+
 def _make_summary_plot(
     rows: list[dict[str, Any]],
     *,
@@ -314,18 +322,40 @@ def _write_report(
     profile_path: Path,
     profile: dict[str, Any],
     rows: list[dict[str, Any]],
+    photonic_rows: list[dict[str, Any]] | None = None,
     seeds: list[int],
     lag_validated: bool,
     dt_s: float,
     initial_position_offset_ned_m: tuple[float, float, float],
 ) -> None:
+    if photonic_rows is None:
+        photonic_rows = []
     by_label: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_label.setdefault(str(row["label"]), []).append(row)
+    photonic_by_label: dict[str, list[dict[str, Any]]] = {}
+    for row in photonic_rows:
+        photonic_by_label.setdefault(str(row["label"]), []).append(row)
 
     def median(label: str, key: str) -> float:
         vals = [float(r[key]) for r in by_label[label] if r[key] is not None]
         return float(np.median(vals))
+
+    def photonic_median(label: str, key: str) -> float | None:
+        entries = photonic_by_label.get(label, [])
+        vals = [float(r[key]) for r in entries if r.get(key) is not None]
+        if len(vals) == 0:
+            return None
+        return float(np.median(vals))
+
+    def photonic_top_rejection_reason(label: str) -> str | None:
+        counts: dict[str, int] = {}
+        for row in photonic_by_label.get(label, []):
+            for reason, count in row.get("rejection_reason_counts", {}).items():
+                counts[str(reason)] = counts.get(str(reason), 0) + int(count)
+        if not counts:
+            return None
+        return max(sorted(counts), key=lambda key: counts[key])
 
     ordered_labels = [
         "live_ins",
@@ -391,6 +421,36 @@ def _write_report(
                 f"- lag-smoothed validated: `{lag_validated}`",
             ]
         )
+
+    photonic_labels = [label for label in ordered_labels if label in photonic_by_label]
+    if photonic_labels:
+        lines.extend(
+            [
+                "",
+                "## Photonic Sensor Diagnostics",
+                "",
+                "| Mode | Valid fraction | Median contrast | P95 contrast | RMS vibration residual phase [rad] | RMS disturbance residual [m/s^2] | Tilt exceedance fraction | Dominant rejection |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for label in photonic_labels:
+            valid_fraction = photonic_median(label, "valid_sample_fraction")
+            median_contrast = photonic_median(label, "median_fringe_contrast")
+            p95_contrast = photonic_median(label, "p95_fringe_contrast")
+            rms_phase = photonic_median(label, "rms_vibration_residual_phase_rad")
+            rms_residual = photonic_median(label, "rms_disturbance_residual_mps2")
+            tilt_fraction = photonic_median(label, "tilt_exceedance_fraction")
+            dominant_reason = photonic_top_rejection_reason(label)
+            lines.append(
+                f"| `{label}` | "
+                f"{'n/a' if valid_fraction is None else f'{valid_fraction:.3f}'} | "
+                f"{'n/a' if median_contrast is None else f'{median_contrast:.3f}'} | "
+                f"{'n/a' if p95_contrast is None else f'{p95_contrast:.3f}'} | "
+                f"{'n/a' if rms_phase is None else f'{rms_phase:.3e}'} | "
+                f"{'n/a' if rms_residual is None else f'{rms_residual:.3e}'} | "
+                f"{'n/a' if tilt_fraction is None else f'{tilt_fraction:.3f}'} | "
+                f"`{dominant_reason or 'none'}` |"
+            )
 
     lines.extend(
         [
@@ -494,6 +554,7 @@ def main() -> int:
     bathymetry_spec = _load_spec(Path(args.bathymetry_config).expanduser().resolve(), BathymetrySensorSpec)
 
     rows: list[dict[str, Any]] = []
+    photonic_rows: list[dict[str, Any]] = []
     representative_result = None
     representative_label = None
     lag_validated = True
@@ -530,6 +591,30 @@ def main() -> int:
             )
             row = _metrics_row(label, metrics)
             row["seed"] = seed
+            photonic_summary = _photonic_summary_from_result(result)
+            if photonic_summary is not None:
+                row.update(
+                    {
+                        "photonic_valid_sample_fraction": float(photonic_summary["valid_sample_fraction"]),
+                        "photonic_median_fringe_contrast": float(photonic_summary["median_fringe_contrast"]),
+                        "photonic_p95_fringe_contrast": float(photonic_summary["p95_fringe_contrast"]),
+                        "photonic_rms_vibration_residual_phase_rad": float(
+                            photonic_summary["rms_vibration_residual_phase_rad"]
+                        ),
+                        "photonic_rms_disturbance_residual_mps2": float(
+                            photonic_summary["rms_disturbance_residual_mps2"]
+                        ),
+                        "photonic_tilt_exceedance_fraction": float(
+                            photonic_summary["tilt_exceedance_fraction"]
+                        ),
+                        "photonic_median_estimated_measurement_variance_mps4": float(
+                            photonic_summary["median_estimated_measurement_variance_mps4"]
+                        ),
+                    }
+                )
+                photonic_summary["label"] = label
+                photonic_summary["seed"] = seed
+                photonic_rows.append(photonic_summary)
             rows.append(row)
             if label == "photonic_gravity_bathymetry" and representative_result is None:
                 representative_result = result
@@ -540,6 +625,11 @@ def main() -> int:
 
     summary_json_path = output_dir / "hardware_tied_maritime_demo_summary.json"
     summary_json_path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    photonic_summary_json_path = output_dir / "hardware_tied_maritime_demo_photonic_summary.json"
+    photonic_summary_json_path.write_text(
+        json.dumps(photonic_rows, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     _make_summary_plot(rows, out_path=output_dir / "hardware_tied_maritime_demo_summary.png")
 
@@ -564,6 +654,7 @@ def main() -> int:
         profile_path=profile_path,
         profile=profile,
         rows=rows,
+        photonic_rows=photonic_rows,
         seeds=[int(s) for s in args.seeds],
         lag_validated=lag_validated,
         dt_s=float(args.dt_s),

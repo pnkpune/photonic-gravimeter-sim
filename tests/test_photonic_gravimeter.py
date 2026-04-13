@@ -9,6 +9,7 @@ from gravnav.sensors.photonic_gravimeter import (
     PhotonicGravimeterSpec,
     PhotonicSystematicsSpec,
     VibrationCompensationSpec,
+    summarize_photonic_measurements,
 )
 
 
@@ -312,3 +313,36 @@ def test_nested_config_blocks_are_coerced_into_dataclasses() -> None:
     assert spec.interferometer.interrogation_time_s == 0.2
     assert spec.atom_ensemble.detection_noise_std_probability == 0.02
     assert spec.vibration_compensation.residual_correction_fraction == 0.9
+
+
+def test_photonic_measurement_summary_aggregates_validity_and_telemetry() -> None:
+    sensor = PhotonicGravimeterSensor(
+        PhotonicGravimeterSpec(
+            operating_mode="mission",
+            warmup_time_s=1.0,
+            update_period_s=1.0,
+            noise_density_mps2_per_sqrt_hz=0.0,
+            bias_random_walk_mps2_per_sqrt_s=0.0,
+            turn_on_bias_std_mps2=0.0,
+            fixed_bias_mps2=0.0,
+        ),
+        rng=np.random.default_rng(5),
+    )
+
+    samples = [
+        _measure(sensor, time_s=0.0, dt_s=1.0),
+        _measure(sensor, time_s=1.0, dt_s=1.0),
+        _measure(sensor, time_s=1.5, dt_s=0.5),
+        _measure(sensor, time_s=2.0, dt_s=0.5),
+    ]
+
+    summary = summarize_photonic_measurements(samples)
+
+    assert summary.sample_count == 4
+    assert np.isclose(summary.valid_sample_fraction, 0.5)
+    assert summary.rejection_reason_counts == {"warmup": 1, "cadence": 1}
+    assert summary.dominant_rejection_reason == "cadence"
+    assert 0.0 <= summary.median_fringe_contrast <= summary.p95_fringe_contrast <= 1.0
+    assert summary.rms_vibration_residual_phase_rad >= 0.0
+    assert summary.rms_disturbance_residual_mps2 >= 0.0
+    assert summary.median_estimated_measurement_variance_mps4 >= 0.0
