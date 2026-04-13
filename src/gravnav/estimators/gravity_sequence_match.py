@@ -78,6 +78,17 @@ def _axis2(x: ArrayLike | float, *, name: str) -> FloatArray:
     return arr.astype(np.float64)
 
 
+def _axis3(x: ArrayLike | float, *, name: str) -> FloatArray:
+    """Convert a scalar or length-3 vector into a float64 3-vector."""
+    arr = _as_float_array(x)
+    if arr.ndim == 0:
+        return np.full(3, float(arr), dtype=np.float64)
+    arr = arr.reshape(-1)
+    if arr.shape != (3,):
+        raise ValueError(f"{name} must be scalar or shape (3,), got {arr.shape}.")
+    return arr.astype(np.float64)
+
+
 def _logsumexp(x: FloatArray, axis: int) -> FloatArray:
     """
     Stable log-sum-exp reduction.
@@ -463,7 +474,6 @@ class GravitySequenceMatcher:
                 grid["half_span_m"],
                 grid["spacing_m"],
             )
-        self._transition_log_cache: dict[tuple[str, str], FloatArray] = {}
         self._window: Deque[_SequenceObservation] = deque(maxlen=self.spec.window_size)
         self._next_global_index = 0
         self._last_emitted_global_index = -1
@@ -530,25 +540,18 @@ class GravitySequenceMatcher:
         therefore penalizes changes in local grid offset from one step to the
         next.
         """
-        cache_key = (str(prev_obs.grid_mode), str(curr_obs.grid_mode))
-        cached = self._transition_log_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         prev_offsets = np.asarray(prev_obs.candidate_offsets_ned_m[:, :2], dtype=np.float64)
         curr_offsets = np.asarray(curr_obs.candidate_offsets_ned_m[:, :2], dtype=np.float64)
         delta = curr_offsets[None, :, :] - prev_offsets[:, None, :]
         sigma = self.spec.transition_std_m
         var = sigma**2
-        log_t = (
+        return (
             -0.5
             * np.sum(
                 (delta**2) / var[None, None, :] + np.log(2.0 * np.pi * var[None, None, :]),
                 axis=2,
             )
         ).astype(np.float64)
-        self._transition_log_cache[cache_key] = log_t
-        return log_t
 
     @staticmethod
     def _horizontal_axis_edge_mask(
@@ -806,6 +809,7 @@ class GravitySequenceMatcher:
         measured_disturbance_mps2: float,
         gravity_meas_std_mps2: float,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
+        search_center_offset_ned_m: Optional[ArrayLike] = None,
         measured_gradient_per_s2: Optional[ArrayLike],
         gradient_meas_std_per_s2: Optional[float],
         measured_bathymetry_m: Optional[float],
@@ -819,9 +823,16 @@ class GravitySequenceMatcher:
         """
         state = _state_from_filter_or_state(ins_or_state)
         grid_mode = str(self._active_grid_mode)
-        candidate_offsets, grid_half_span_m, grid_spacing_m = self._grid_definition(
+        local_offsets, grid_half_span_m, grid_spacing_m = self._grid_definition(
             grid_mode
         )
+        center_offset = (
+            np.zeros(3, dtype=np.float64)
+            if search_center_offset_ned_m is None
+            else _axis3(search_center_offset_ned_m, name="search_center_offset_ned_m")
+        )
+        center_offset[2] = 0.0
+        candidate_offsets = local_offsets + center_offset[None, :]
         lat_c = float(state.nominal.lat_rad)
         lon_c = float(wrap_angle_pi(state.nominal.lon_rad))
         h_c = self._center_height_from_measurements(
@@ -859,7 +870,7 @@ class GravitySequenceMatcher:
             )
             log_emission += gravity_log
         log_emission += diagonal_gaussian_log_likelihood(
-            candidate_offsets[:, :2],
+            local_offsets[:, :2],
             self.spec.center_prior_std_m,
         )
 
@@ -1263,6 +1274,7 @@ class GravitySequenceMatcher:
         *,
         gravity_meas_std_mps2: Optional[float] = None,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
+        search_center_offset_ned_m: Optional[ArrayLike] = None,
         depth_measurement: Optional[DepthMeasurement] = None,
         reference_surface_height_m: float = 0.0,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
@@ -1299,6 +1311,7 @@ class GravitySequenceMatcher:
             measured_disturbance_mps2=float(measured_disturbance_mps2),
             gravity_meas_std_mps2=sigma_g,
             ins_or_state=state,
+            search_center_offset_ned_m=search_center_offset_ned_m,
             measured_gradient_per_s2=measured_gradient_per_s2,
             gradient_meas_std_per_s2=gradient_meas_std_per_s2,
             measured_bathymetry_m=measured_bathymetry_m,
@@ -1331,6 +1344,7 @@ class GravitySequenceMatcher:
         *,
         gravity_meas_std_mps2: Optional[float] = None,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
+        search_center_offset_ned_m: Optional[ArrayLike] = None,
         depth_measurement: Optional[DepthMeasurement] = None,
         reference_surface_height_m: Optional[float] = None,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
@@ -1355,6 +1369,7 @@ class GravitySequenceMatcher:
             measured_disturbance_mps2=float(measurement.value_mps2),
             gravity_meas_std_mps2=gravity_meas_std_mps2,
             ins_or_state=ins_or_state,
+            search_center_offset_ned_m=search_center_offset_ned_m,
             depth_measurement=depth_measurement,
             reference_surface_height_m=href,
             measured_gradient_per_s2=measured_gradient_per_s2,

@@ -186,6 +186,33 @@ def _build_runner_config(
             None if not use_bathymetry else float(profile["bathymetry_meas_std_m"])
         ),
         use_sequence_lag_smoother=bool(use_lag_smoother),
+        use_sequence_search_centering=bool(
+            profile.get("use_sequence_search_centering", False)
+        ),
+        sequence_search_center_gain=float(
+            profile.get("sequence_search_center_gain", 0.35)
+        ),
+        sequence_search_center_max_norm_m=float(
+            profile.get("sequence_search_center_max_norm_m", 250.0)
+        ),
+        sequence_search_center_max_step_m=float(
+            profile.get("sequence_search_center_max_step_m", 60.0)
+        ),
+        sequence_search_center_min_peak_probability=float(
+            profile.get("sequence_search_center_min_peak_probability", 0.15)
+        ),
+        sequence_search_center_max_horizontal_std_m=float(
+            profile.get("sequence_search_center_max_horizontal_std_m", 120.0)
+        ),
+        sequence_search_center_min_ess_fraction=float(
+            profile.get("sequence_search_center_min_ess_fraction", 0.02)
+        ),
+        sequence_search_center_max_edge_mass_fraction=float(
+            profile.get("sequence_search_center_max_edge_mass_fraction", 0.12)
+        ),
+        sequence_search_center_max_support_radius_fraction=float(
+            profile.get("sequence_search_center_max_support_radius_fraction", 0.75)
+        ),
     )
     return SimulationRunnerConfig(
         initial_position_offset_ned_m=initial_position_offset_ned_m,
@@ -384,6 +411,7 @@ def _metrics_row(
     metrics: ScenarioMetricsSummary,
     *,
     ambiguity: dict[str, Any] | None,
+    search_center: dict[str, Any] | None = None,
 ) -> dict[str, float | str | None]:
     ins = metrics.ins_position_error
     seq = metrics.sequence_position_error
@@ -474,6 +502,21 @@ def _metrics_row(
         "ambiguity_grid_mode_counts": None
         if ambiguity is None
         else dict(ambiguity["grid_mode_counts"]),
+        "search_center_accepted_count": None
+        if search_center is None
+        else float(search_center["accepted_count"]),
+        "search_center_accepted_fraction": None
+        if search_center is None
+        else float(search_center["accepted_fraction"]),
+        "search_center_final_offset_norm_m": None
+        if search_center is None
+        else float(search_center["final_offset_horizontal_norm_m"]),
+        "search_center_reason_counts": None
+        if search_center is None
+        else dict(search_center["reason_counts"]),
+        "search_center_proposal_mode_counts": None
+        if search_center is None
+        else dict(search_center["proposal_mode_counts"]),
     }
 
 
@@ -482,6 +525,35 @@ def _photonic_summary_from_result(result: Any) -> dict[str, Any] | None:
     if len(samples) == 0:
         return None
     return asdict(summarize_photonic_measurements(samples))
+
+
+def _search_center_summary_from_result(result: Any) -> dict[str, Any] | None:
+    rows = result.estimators.custom_streams.get("sequence_search_center_offset", [])
+    if len(rows) == 0:
+        return None
+    accepted = [row for row in rows if bool(row.get("accepted", False))]
+    reason_counts: dict[str, int] = {}
+    proposal_mode_counts: dict[str, int] = {}
+    for row in rows:
+        reason = str(row.get("reason", "unknown"))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        proposal_mode = str(row.get("proposal_mode", "unknown"))
+        proposal_mode_counts[proposal_mode] = (
+            proposal_mode_counts.get(proposal_mode, 0) + 1
+        )
+    final_offset = (
+        np.zeros(3, dtype=np.float64)
+        if len(accepted) == 0
+        else np.asarray(accepted[-1]["updated_offset_ned_m"], dtype=np.float64)
+    )
+    final_offset[2] = 0.0
+    return {
+        "accepted_count": len(accepted),
+        "accepted_fraction": len(accepted) / float(len(rows)),
+        "final_offset_horizontal_norm_m": float(np.linalg.norm(final_offset[:2])),
+        "reason_counts": reason_counts,
+        "proposal_mode_counts": proposal_mode_counts,
+    }
 
 
 def _make_summary_plot(
@@ -562,6 +634,16 @@ def _write_report(
         if not counts:
             return None
         return max(sorted(counts), key=lambda key: counts[key])
+
+    def search_center_median(label: str, key: str) -> float | None:
+        vals = [
+            float(r[key])
+            for r in by_label.get(label, [])
+            if r.get(key) is not None
+        ]
+        if len(vals) == 0:
+            return None
+        return float(np.median(vals))
 
     ordered_labels = [
         "live_ins",
@@ -656,6 +738,34 @@ def _write_report(
                 f"- lag-smoothed validated: `{lag_validated}`",
             ]
         )
+    if any(row.get("search_center_accepted_count") is not None for row in rows):
+        lines.extend(
+            [
+                "",
+                "## Search-Center Summary",
+                "",
+                "| Mode | Accepted count | Accepted fraction | Final offset norm [m] |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
+        for label in ordered_labels:
+            if label not in by_label:
+                continue
+            accepted_count = search_center_median(label, "search_center_accepted_count")
+            accepted_fraction = search_center_median(
+                label,
+                "search_center_accepted_fraction",
+            )
+            final_norm = search_center_median(
+                label,
+                "search_center_final_offset_norm_m",
+            )
+            lines.append(
+                f"| `{label}` | "
+                f"{'n/a' if accepted_count is None else f'{accepted_count:.1f}'} | "
+                f"{'n/a' if accepted_fraction is None else f'{accepted_fraction:.3f}'} | "
+                f"{'n/a' if final_norm is None else f'{final_norm:.3f}'} |"
+            )
 
     photonic_labels = [label for label in ordered_labels if label in photonic_by_label]
     if photonic_labels:
@@ -825,10 +935,12 @@ def main() -> int:
                 initial_position_offset_ned_m=initial_position_offset_ned_m,
             )
             ambiguity_summary = _sequence_ambiguity_summary_from_result(result)
+            search_center_summary = _search_center_summary_from_result(result)
             row = _metrics_row(
                 label,
                 metrics,
                 ambiguity=ambiguity_summary,
+                search_center=search_center_summary,
             )
             row["seed"] = seed
             photonic_summary = _photonic_summary_from_result(result)

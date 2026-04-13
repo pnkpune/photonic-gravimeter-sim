@@ -83,6 +83,7 @@ from ..estimators.gravity_sequence_match import (
     GravitySequenceMatcher,
     GravitySequenceMatcherSpec,
     SequenceAnchorEstimate,
+    SequenceMatchUpdateResult,
 )
 from ..estimators.fusion import (
     apply_depth_sensor_measurement,
@@ -334,6 +335,15 @@ def _sequence_anchor_quality_key(anchor: SequenceAnchorEstimate) -> tuple[float,
     )
 
 
+def _sequence_update_max_horizontal_std_m(update: SequenceMatchUpdateResult) -> float:
+    """
+    Conservative horizontal-std proxy for one sequence update.
+    """
+    P_h = np.asarray(update.estimate.covariance_ned_m2[:2, :2], dtype=np.float64)
+    diag = np.maximum(np.diag(0.5 * (P_h + P_h.T)), 0.0)
+    return float(np.sqrt(np.max(diag)))
+
+
 # -----------------------------------------------------------------------------
 # Schedules and runner configuration
 # -----------------------------------------------------------------------------
@@ -564,6 +574,10 @@ class MapMatchFeedbackConfig:
         sequence anchors. This path does not mutate the live INS.
     sequence_lag_smoother_spec : SequenceLagSmootherSpec
         Configuration for the bounded-lag sequence smoother.
+    use_sequence_search_centering : bool, default=False
+        Whether to recenter the sequence-matcher search window using trusted
+        delayed sequence outputs. This shifts only the matcher search center,
+        not the live INS state.
     use_bathymetry : bool, default=False
         Whether to include bathymetry likelihood in the sequence matcher.
     bathymetry_meas_std_m : float, optional
@@ -585,6 +599,7 @@ class MapMatchFeedbackConfig:
     use_directional_feedback: bool = False
     use_sequence_feedback: bool = False
     use_sequence_lag_smoother: bool = False
+    use_sequence_search_centering: bool = False
     use_bathymetry: bool = False
     directional_feedback_spec: DirectionalFeedbackSpec = field(
         default_factory=DirectionalFeedbackSpec
@@ -601,6 +616,14 @@ class MapMatchFeedbackConfig:
     use_gradiometer: bool = False
     gradient_meas_std_per_s2: Optional[float] = None
     bathymetry_meas_std_m: Optional[float] = None
+    sequence_search_center_gain: float = 0.35
+    sequence_search_center_max_norm_m: float = 250.0
+    sequence_search_center_max_step_m: float = 60.0
+    sequence_search_center_min_peak_probability: float = 0.15
+    sequence_search_center_max_horizontal_std_m: float = 120.0
+    sequence_search_center_min_ess_fraction: float = 0.02
+    sequence_search_center_max_edge_mass_fraction: float = 0.12
+    sequence_search_center_max_support_radius_fraction: float = 0.75
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -633,6 +656,7 @@ class MapMatchFeedbackConfig:
         self.use_bathymetry = bool(self.use_bathymetry)
         self.use_sequence_feedback = bool(self.use_sequence_feedback)
         self.use_sequence_lag_smoother = bool(self.use_sequence_lag_smoother)
+        self.use_sequence_search_centering = bool(self.use_sequence_search_centering)
         if self.gradient_meas_std_per_s2 is not None:
             self.gradient_meas_std_per_s2 = _positive_scalar(
                 self.gradient_meas_std_per_s2,
@@ -642,6 +666,49 @@ class MapMatchFeedbackConfig:
             self.bathymetry_meas_std_m = _positive_scalar(
                 self.bathymetry_meas_std_m,
                 name="bathymetry_meas_std_m",
+            )
+        self.sequence_search_center_gain = float(self.sequence_search_center_gain)
+        self.sequence_search_center_max_norm_m = _positive_scalar(
+            self.sequence_search_center_max_norm_m,
+            name="sequence_search_center_max_norm_m",
+        )
+        self.sequence_search_center_max_step_m = _positive_scalar(
+            self.sequence_search_center_max_step_m,
+            name="sequence_search_center_max_step_m",
+        )
+        self.sequence_search_center_min_peak_probability = float(
+            self.sequence_search_center_min_peak_probability
+        )
+        self.sequence_search_center_max_horizontal_std_m = _positive_scalar(
+            self.sequence_search_center_max_horizontal_std_m,
+            name="sequence_search_center_max_horizontal_std_m",
+        )
+        self.sequence_search_center_min_ess_fraction = float(
+            self.sequence_search_center_min_ess_fraction
+        )
+        self.sequence_search_center_max_edge_mass_fraction = float(
+            self.sequence_search_center_max_edge_mass_fraction
+        )
+        self.sequence_search_center_max_support_radius_fraction = float(
+            self.sequence_search_center_max_support_radius_fraction
+        )
+        if not (0.0 < self.sequence_search_center_gain <= 1.0):
+            raise ValueError("sequence_search_center_gain must be in (0, 1].")
+        if not (0.0 <= self.sequence_search_center_min_peak_probability <= 1.0):
+            raise ValueError(
+                "sequence_search_center_min_peak_probability must be in [0, 1]."
+            )
+        if not (0.0 <= self.sequence_search_center_min_ess_fraction <= 1.0):
+            raise ValueError(
+                "sequence_search_center_min_ess_fraction must be in [0, 1]."
+            )
+        if not (0.0 <= self.sequence_search_center_max_edge_mass_fraction <= 1.0):
+            raise ValueError(
+                "sequence_search_center_max_edge_mass_fraction must be in [0, 1]."
+            )
+        if not (0.0 <= self.sequence_search_center_max_support_radius_fraction <= 1.0):
+            raise ValueError(
+                "sequence_search_center_max_support_radius_fraction must be in [0, 1]."
             )
         if self.matcher != "pf":
             if self.inject_position_to_ins:
@@ -1432,6 +1499,7 @@ class ScenarioSimulationRunner:
         prediction_mats_by_step: list[Optional[ErrorStatePropagationMatrices]] = [None] * max(0, len(truth) - 1)
         sequence_anchor_candidates_by_step: dict[int, list[SequenceAnchorEstimate]] = {}
         sequence_updates_by_step: dict[int, Any] = {}
+        sequence_search_center_offset_ned_m = np.zeros(3, dtype=np.float64)
         truth_time_s = np.asarray(truth.time_s, dtype=np.float64)
         if truth_time_s.size >= 2:
             min_truth_dt_s = float(np.min(np.diff(truth_time_s)))
@@ -1461,6 +1529,158 @@ class ScenarioSimulationRunner:
             sequence_window_span_steps,
         ) + sequence_window_span_steps
         last_published_lag_smoothed_step = -1
+
+        def _sequence_search_center_support_radius_fraction(
+            update: SequenceMatchUpdateResult,
+        ) -> float:
+            diag = update.ambiguity_diagnostics
+            return max(
+                float(diag.support_radius_n_m)
+                / max(float(diag.grid_half_span_m[0]), 1.0e-9),
+                float(diag.support_radius_e_m)
+                / max(float(diag.grid_half_span_m[1]), 1.0e-9),
+            )
+
+        def _sequence_search_center_update_allowed(
+            update: SequenceMatchUpdateResult,
+        ) -> tuple[bool, str, str, FloatArray]:
+            diag = update.ambiguity_diagnostics
+            peak_prob = float(update.marginal_peak_probability)
+            horiz_std = _sequence_update_max_horizontal_std_m(update)
+            ess_fraction = float(diag.posterior_candidate_ess_fraction)
+            edge_mass = float(diag.edge_mass_fraction)
+            support_radius = _sequence_search_center_support_radius_fraction(update)
+            failure_mode = str(diag.dominant_failure_mode)
+            raw_offset = np.asarray(
+                update.posterior_mean_offset_ned_m,
+                dtype=np.float64,
+            ).copy()
+            raw_offset[2] = 0.0
+            clipped_offset = raw_offset.copy()
+            raw_norm = float(np.linalg.norm(raw_offset[:2]))
+            if raw_norm > cfg.map_match.sequence_search_center_max_norm_m:
+                clipped_offset *= (
+                    cfg.map_match.sequence_search_center_max_norm_m
+                    / max(raw_norm, 1.0e-12)
+                )
+            if failure_mode != "informative":
+                return (
+                    False,
+                    f"dominant_failure_mode={failure_mode}",
+                    "rejected",
+                    clipped_offset,
+                )
+            if peak_prob < cfg.map_match.sequence_search_center_min_peak_probability:
+                return (
+                    False,
+                    "peak_probability="
+                    f"{peak_prob:.3f} < min="
+                    f"{cfg.map_match.sequence_search_center_min_peak_probability:.3f}",
+                    "rejected",
+                    clipped_offset,
+                )
+            if horiz_std > cfg.map_match.sequence_search_center_max_horizontal_std_m:
+                return (
+                    False,
+                    "horizontal_std="
+                    f"{horiz_std:.3f} > max="
+                    f"{cfg.map_match.sequence_search_center_max_horizontal_std_m:.3f}",
+                    "rejected",
+                    clipped_offset,
+                )
+            if ess_fraction < cfg.map_match.sequence_search_center_min_ess_fraction:
+                return (
+                    False,
+                    "ess_fraction="
+                    f"{ess_fraction:.3f} < min="
+                    f"{cfg.map_match.sequence_search_center_min_ess_fraction:.3f}",
+                    "rejected",
+                    clipped_offset,
+                )
+            if edge_mass > cfg.map_match.sequence_search_center_max_edge_mass_fraction:
+                return (
+                    False,
+                    "edge_mass="
+                    f"{edge_mass:.3f} > max="
+                    f"{cfg.map_match.sequence_search_center_max_edge_mass_fraction:.3f}",
+                    "rejected",
+                    clipped_offset,
+                )
+            if support_radius > cfg.map_match.sequence_search_center_max_support_radius_fraction:
+                return (
+                    False,
+                    "support_radius_fraction="
+                    f"{support_radius:.3f} > max="
+                    f"{cfg.map_match.sequence_search_center_max_support_radius_fraction:.3f}",
+                    "rejected",
+                    clipped_offset,
+                )
+            return True, "accepted", "informative", clipped_offset
+
+        def _update_sequence_search_center(
+            *,
+            current_step: int,
+            published_step: int,
+            direct_update: Optional[SequenceMatchUpdateResult],
+            publish_source: str,
+        ) -> None:
+            nonlocal sequence_search_center_offset_ned_m
+
+            if (
+                not cfg.map_match.use_sequence_search_centering
+                or publish_source != "sequence_update"
+                or direct_update is None
+            ):
+                return
+
+            accepted, reason, proposal_mode, target_offset = (
+                _sequence_search_center_update_allowed(direct_update)
+            )
+            raw_offset = np.asarray(
+                direct_update.posterior_mean_offset_ned_m,
+                dtype=np.float64,
+            ).copy()
+            raw_offset[2] = 0.0
+            prev_offset = sequence_search_center_offset_ned_m.copy()
+            updated_offset = prev_offset.copy()
+            if accepted:
+                delta = np.asarray(target_offset, dtype=np.float64) - prev_offset
+                delta[2] = 0.0
+                delta_norm = float(np.linalg.norm(delta[:2]))
+                if delta_norm > cfg.map_match.sequence_search_center_max_step_m:
+                    delta *= (
+                        cfg.map_match.sequence_search_center_max_step_m
+                        / max(delta_norm, 1.0e-12)
+                    )
+                updated_offset = (
+                    prev_offset + cfg.map_match.sequence_search_center_gain * delta
+                ).astype(np.float64)
+                updated_offset[2] = 0.0
+                sequence_search_center_offset_ned_m = updated_offset
+
+            estimators.add_custom_sample(
+                "sequence_search_center_offset",
+                {
+                    "time_s": float(truth.time_s[current_step]),
+                    "current_step_index": int(current_step),
+                    "published_step_index": int(published_step),
+                    "accepted": bool(accepted),
+                    "reason": reason,
+                    "proposal_mode": proposal_mode,
+                    "publish_source": str(publish_source),
+                    "raw_offset_ned_m": raw_offset.copy(),
+                    "target_offset_ned_m": np.asarray(target_offset, dtype=np.float64).copy(),
+                    "previous_offset_ned_m": prev_offset.copy(),
+                    "updated_offset_ned_m": updated_offset.copy(),
+                    "marginal_peak_probability": float(direct_update.marginal_peak_probability),
+                    "horizontal_std_m": _sequence_update_max_horizontal_std_m(direct_update),
+                    "ess_fraction": float(direct_update.ambiguity_diagnostics.posterior_candidate_ess_fraction),
+                    "edge_mass_fraction": float(direct_update.ambiguity_diagnostics.edge_mass_fraction),
+                    "support_radius_fraction": _sequence_search_center_support_radius_fraction(
+                        direct_update
+                    ),
+                },
+            )
 
         def _record_sequence_match_outputs(
             seq_updates: list[Any],
@@ -1722,7 +1942,14 @@ class ScenarioSimulationRunner:
                             if publish_anchor is None
                             else float(publish_anchor.marginal_peak_probability)
                         ),
+                        "sequence_search_center_offset_ned_m": sequence_search_center_offset_ned_m.copy(),
                     },
+                )
+                _update_sequence_search_center(
+                    current_step=int(current_step),
+                    published_step=int(step_index),
+                    direct_update=direct_update,
+                    publish_source=publish_source,
                 )
                 last_published_lag_smoothed_step = int(step_index)
 
@@ -2061,6 +2288,7 @@ class ScenarioSimulationRunner:
                         gravimeter_meas,
                         gravity_meas_std_mps2=cfg.map_match.gravity_meas_std_mps2,
                         ins_or_state=ins,
+                        search_center_offset_ned_m=sequence_search_center_offset_ned_m,
                         depth_measurement=depth_for_matcher,
                         measured_gradient_per_s2=(
                             None
@@ -2144,6 +2372,7 @@ class ScenarioSimulationRunner:
                                             gravimeter_meas,
                                             gravity_meas_std_mps2=cfg.map_match.gravity_meas_std_mps2,
                                             ins_or_state=ins,
+                                            search_center_offset_ned_m=sequence_search_center_offset_ned_m,
                                             depth_measurement=depth_for_matcher,
                                             measured_gradient_per_s2=(
                                                 None

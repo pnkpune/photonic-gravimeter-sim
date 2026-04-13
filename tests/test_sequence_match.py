@@ -244,6 +244,106 @@ def test_sequence_matcher_emits_deterministic_anchor_estimates() -> None:
     assert all(anchor.global_index >= 0 for anchor in mid_result.anchor_estimates)
 
 
+def test_sequence_matcher_respects_external_search_center_offset() -> None:
+    lat0 = np.deg2rad(18.25)
+    lon0 = np.deg2rad(72.75)
+    h0 = 0.0
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+    spec = GravitySequenceMatcherSpec(
+        window_size=5,
+        grid_half_span_m=(40.0, 40.0),
+        grid_spacing_m=(10.0, 10.0),
+        transition_std_m=(8.0, 8.0),
+        center_prior_std_m=(30.0, 30.0),
+        gravity_meas_std_mps2=2.0e-7,
+        height_std_m=1.0,
+    )
+
+    matcher_plain = GravitySequenceMatcher(spec, map_fn)
+    matcher_centered = GravitySequenceMatcher(spec, map_fn)
+
+    truth_offsets = np.array(
+        [[20.0 * k, 8.0 * k, 0.0] for k in range(7)],
+        dtype=np.float64,
+    )
+    ins_bias = np.array([75.0, -30.0, 0.0], dtype=np.float64)
+    corrective_offset = -ins_bias
+
+    plain_outputs = []
+    centered_outputs = []
+    for k, offset in enumerate(truth_offsets):
+        lat_true, lon_true, h_true = apply_ned_offsets_to_geodetic(
+            np.array([lat0], dtype=np.float64),
+            np.array([lon0], dtype=np.float64),
+            np.array([h0], dtype=np.float64),
+            offset.reshape(1, 3),
+        )
+        lat_ins, lon_ins, h_ins = apply_ned_offsets_to_geodetic(
+            np.array([lat0], dtype=np.float64),
+            np.array([lon0], dtype=np.float64),
+            np.array([h0], dtype=np.float64),
+            (offset + ins_bias).reshape(1, 3),
+        )
+        g_meas = float(
+            map_fn(
+                np.array([lat_true[0]], dtype=np.float64),
+                np.array([lon_true[0]], dtype=np.float64),
+                np.array([h_true[0]], dtype=np.float64),
+            )[0]
+        )
+        state = _make_state(
+            time_s=float(k),
+            lat_rad=float(lat_ins[0]),
+            lon_rad=float(lon_ins[0]),
+            height_m=float(h_ins[0]),
+        )
+        plain_outputs.extend(
+            matcher_plain.update(
+                g_meas,
+                gravity_meas_std_mps2=2.0e-7,
+                ins_or_state=state,
+                time_s=float(k),
+            )
+        )
+        centered_outputs.extend(
+            matcher_centered.update(
+                g_meas,
+                gravity_meas_std_mps2=2.0e-7,
+                ins_or_state=state,
+                search_center_offset_ned_m=corrective_offset,
+                time_s=float(k),
+            )
+        )
+
+    plain_outputs.extend(matcher_plain.finalize())
+    centered_outputs.extend(matcher_centered.finalize())
+
+    def _mean_horizontal_error(outputs: list) -> float:
+        errs: list[float] = []
+        for k, result in enumerate(outputs):
+            lat_true, lon_true, h_true = apply_ned_offsets_to_geodetic(
+                np.array([lat0], dtype=np.float64),
+                np.array([lon0], dtype=np.float64),
+                np.array([h0], dtype=np.float64),
+                truth_offsets[k].reshape(1, 3),
+            )
+            err_ned = geodetic_offsets_to_local_ned(
+                np.array([result.estimate.lat_rad], dtype=np.float64),
+                np.array([result.estimate.lon_rad], dtype=np.float64),
+                np.array([result.estimate.height_m], dtype=np.float64),
+                lat_ref_rad=float(lat_true[0]),
+                lon_ref_rad=float(lon_true[0]),
+                height_ref_m=float(h_true[0]),
+            )[0]
+            errs.append(float(np.linalg.norm(err_ned[:2])))
+        return float(np.mean(errs))
+
+    plain_err = _mean_horizontal_error(plain_outputs)
+    centered_err = _mean_horizontal_error(centered_outputs)
+    assert centered_err < 20.0
+    assert centered_err < plain_err
+
+
 def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> None:
     lat0 = np.deg2rad(18.25)
     lon0 = np.deg2rad(72.75)
@@ -519,6 +619,7 @@ def test_runner_sequence_lag_smoother_improves_output_without_mutating_live_ins(
         cfg.map_match.matcher = "sequence"
         cfg.map_match.use_gradiometer = True
         cfg.map_match.use_sequence_lag_smoother = use_lag_smoother
+        cfg.map_match.use_sequence_search_centering = use_lag_smoother
         cfg.map_match.sequence_spec = GravitySequenceMatcherSpec(
             window_size=7,
             grid_half_span_m=(120.0, 120.0),
@@ -540,6 +641,12 @@ def test_runner_sequence_lag_smoother_improves_output_without_mutating_live_ins(
         cfg.map_match.sequence_lag_smoother_spec.max_correction_norm_m = 80.0
         cfg.map_match.sequence_lag_smoother_spec.covariance_inflation = 6.0
         cfg.map_match.sequence_lag_smoother_spec.max_anchor_count = 3
+        cfg.map_match.sequence_search_center_gain = 0.5
+        cfg.map_match.sequence_search_center_min_peak_probability = 0.0
+        cfg.map_match.sequence_search_center_max_horizontal_std_m = 500.0
+        cfg.map_match.sequence_search_center_min_ess_fraction = 0.0
+        cfg.map_match.sequence_search_center_max_edge_mass_fraction = 1.0
+        cfg.map_match.sequence_search_center_max_support_radius_fraction = 1.0
         cfg.observability.enabled = False
 
         runner = ScenarioSimulationRunner(cfg)
@@ -579,8 +686,12 @@ def test_runner_sequence_lag_smoother_improves_output_without_mutating_live_ins(
     assert live_ins_metrics is not None
     assert len(smoothed.estimators.lag_smoothed_states) > 0
     publish_rows = smoothed.estimators.custom_streams.get("sequence_lag_smoothed_publish")
+    search_center_rows = smoothed.estimators.custom_streams.get("sequence_search_center_offset")
     assert publish_rows is not None
+    assert search_center_rows is not None
     assert sum(row["publish_source"] == "sequence_update" for row in publish_rows) > 10
+    assert any(bool(row["accepted"]) for row in search_center_rows)
+    assert any(row["proposal_mode"] == "informative" for row in search_center_rows)
     assert lag_metrics.horizontal_rmse_m < live_ins_metrics.horizontal_rmse_m
     assert lag_metrics.cep95_m <= live_ins_metrics.cep95_m
 
