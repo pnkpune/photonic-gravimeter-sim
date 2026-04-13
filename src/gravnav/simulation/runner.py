@@ -57,6 +57,8 @@ from ..analysis.observability import (
     summarize_observability_snapshot,
 )
 from ..datasets.bathymetry_loader import BathymetryGrid
+from ..datasets.current_loader import CurrentFieldGrid
+from ..datasets.magnetic_loader import MagneticGrid
 from ..estimators.error_state_ins import (
     ERR_ATT,
     ERR_BA,
@@ -102,9 +104,11 @@ from ..estimators.map_match_pf import (
     apply_ned_offsets_to_geodetic,
     evaluate_gravity_map_horizontal_gradient,
     geodetic_covariance_from_ned_covariance,
+    geodetic_offsets_to_local_ned,
 )
 from ..physics.earth import meridian_radius, prime_vertical_radius
 from ..physics.gravity_map import GravityGridMap
+from ..physics.tides import TideCorrector, TideCorrectionSample, TideCorrectionSpec
 from ..sensors.bathymetry import (
     BathymetryMeasurement,
     BathymetrySensor,
@@ -126,10 +130,20 @@ from ..sensors.imu import (
     build_imu_truth_kinematics,
     build_interval_imu_truth_kinematics,
 )
+from ..sensors.magnetometer import (
+    MagnetometerMeasurement,
+    MagnetometerSensorSpec,
+    ScalarMagnetometerSensor,
+)
 from ..sensors.photonic_gravimeter import (
     PhotonicGravimeterMeasurement,
     PhotonicGravimeterSensor,
     PhotonicGravimeterSpec,
+)
+from ..sensors.current_profile import (
+    CurrentProfileMeasurement,
+    CurrentProfileSensor,
+    CurrentProfileSensorSpec,
 )
 from ..sensors.velocity_aid import (
     VelocityAidMeasurement,
@@ -158,6 +172,8 @@ _RUN_WITH_SPECS_RNG_STREAM_INDICES = {
     "gradiometer": 4,
     "bathymetry": 5,
     "pf": 6,
+    "magnetometer": 7,
+    "current_profile": 8,
 }
 
 
@@ -286,6 +302,113 @@ def _positive_scalar(x: float, *, name: str) -> float:
     if value <= 0.0:
         raise ValueError(f"{name} must be positive, got {value}.")
     return value
+
+
+def _heading_rad_from_c_n_b(C_n_b: ArrayLike) -> float:
+    """
+    Approximate platform heading from the body->NED DCM.
+    """
+    C = _as_float_array(C_n_b)
+    if C.shape != (3, 3):
+        raise ValueError(f"C_n_b must have shape (3, 3), got {C.shape}.")
+    forward_n = C[:, 0]
+    return float(np.arctan2(forward_n[1], forward_n[0]))
+
+
+def _horizontal_track_unit_ned(v_ned_mps: ArrayLike) -> Optional[FloatArray]:
+    v = _axis3(v_ned_mps, name="v_ned_mps")
+    norm = float(np.linalg.norm(v[:2]))
+    if norm <= 1.0e-9:
+        return None
+    out = np.zeros(3, dtype=np.float64)
+    out[:2] = v[:2] / norm
+    return out
+
+
+def _geodetic_to_local_horizontal_m(
+    *,
+    lat_rad: float,
+    lon_rad: float,
+    lat_ref_rad: float,
+    lon_ref_rad: float,
+    height_ref_m: float,
+) -> FloatArray:
+    ned = geodetic_offsets_to_local_ned(
+        np.asarray([lat_rad], dtype=np.float64),
+        np.asarray([lon_rad], dtype=np.float64),
+        np.asarray([height_ref_m], dtype=np.float64),
+        lat_ref_rad=lat_ref_rad,
+        lon_ref_rad=lon_ref_rad,
+        height_ref_m=height_ref_m,
+    )
+    return np.asarray(ned[0, :2], dtype=np.float64)
+
+
+def _bathymetry_feature_estimates_from_history(
+    history: list[tuple[float, float, float, float]],
+) -> tuple[Optional[float], Optional[float]]:
+    """
+    Estimate along-track clearance gradient and local rugosity from recent
+    seabed-clearance history.
+    """
+    if len(history) < 2:
+        return None, None
+    clearance = np.asarray([row[0] for row in history], dtype=np.float64)
+    north = np.asarray([row[1] for row in history], dtype=np.float64)
+    east = np.asarray([row[2] for row in history], dtype=np.float64)
+    distance = np.sqrt((north - north[0]) ** 2 + (east - east[0]) ** 2)
+    total_distance = float(distance[-1] - distance[0])
+    alongtrack_gradient = None
+    if total_distance > 1.0:
+        alongtrack_gradient = float((clearance[-1] - clearance[0]) / total_distance)
+    if len(history) < 3:
+        return alongtrack_gradient, None
+    trend = np.interp(distance, [distance[0], distance[-1]], [clearance[0], clearance[-1]])
+    rugosity = float(np.std(clearance - trend))
+    return alongtrack_gradient, rugosity
+
+
+def _correct_velocity_measurement_for_current(
+    measurement: VelocityAidMeasurement,
+    *,
+    current_ned_mps: ArrayLike,
+) -> VelocityAidMeasurement:
+    current = _axis3(current_ned_mps, name="current_ned_mps")
+    if measurement.frame == "ned":
+        value = _axis3(measurement.value_mps, name="value_mps") + current
+        ideal = _axis3(measurement.ideal_value_mps, name="ideal_value_mps") + current
+        filtered = _axis3(measurement.filtered_input_mps, name="filtered_input_mps") + current
+        return VelocityAidMeasurement(
+            kind=measurement.kind,
+            frame=measurement.frame,
+            time_s=measurement.time_s,
+            value_mps=value,
+            ideal_value_mps=ideal,
+            filtered_input_mps=filtered,
+            bias_used_mps=_axis3(measurement.bias_used_mps, name="bias_used_mps"),
+            white_noise_mps=_axis3(measurement.white_noise_mps, name="white_noise_mps"),
+            saturated=bool(measurement.saturated),
+        )
+    return measurement
+
+
+def _correct_gravimeter_measurement_for_tide(
+    measurement: GravimeterMeasurement,
+    *,
+    gravity_correction_mps2: float,
+) -> GravimeterMeasurement:
+    correction = float(gravity_correction_mps2)
+    return GravimeterMeasurement(
+        kind=measurement.kind,
+        time_s=measurement.time_s,
+        value_mps2=float(measurement.value_mps2) - correction,
+        ideal_value_mps2=float(measurement.ideal_value_mps2) - correction,
+        motion_residual_mps2=float(measurement.motion_residual_mps2),
+        filtered_input_mps2=float(measurement.filtered_input_mps2),
+        bias_used_mps2=float(measurement.bias_used_mps2),
+        white_noise_mps2=float(measurement.white_noise_mps2),
+        saturated=bool(measurement.saturated),
+    )
 
 
 def _should_use_sensor_turn_on_bias(
@@ -448,6 +571,12 @@ class VelocityAidFusionConfig:
         Measurement standard deviation used in the fusion covariance.
     measurement_frame : {"ned", "body"}, default="ned"
         Which velocity-aid measurement interface to use.
+    measurement_mode : {"earth_relative", "water_relative"}, default="earth_relative"
+        Whether the velocity aid measures Earth-relative or water-relative
+        platform velocity.
+    use_current_correction : bool, default=False
+        Whether to use a current estimate to convert water-relative velocity
+        measurements into Earth-relative aiding updates.
     nis_threshold : float, optional
         Optional innovation gate threshold.
     velocity_only_update : bool, default=True
@@ -461,6 +590,8 @@ class VelocityAidFusionConfig:
     schedule: PeriodicUpdateSchedule = field(default_factory=PeriodicUpdateSchedule)
     measurement_std_mps: ArrayLike | float = (0.05, 0.05, 0.05)
     measurement_frame: str = "ned"
+    measurement_mode: str = "earth_relative"
+    use_current_correction: bool = False
     nis_threshold: Optional[float] = None
     velocity_only_update: bool = True
 
@@ -473,6 +604,12 @@ class VelocityAidFusionConfig:
         self.measurement_frame = str(self.measurement_frame).strip().lower()
         if self.measurement_frame not in {"ned", "body"}:
             raise ValueError("measurement_frame must be 'ned' or 'body'.")
+        self.measurement_mode = str(self.measurement_mode).strip().lower()
+        if self.measurement_mode not in {"earth_relative", "water_relative"}:
+            raise ValueError(
+                "measurement_mode must be 'earth_relative' or 'water_relative'."
+            )
+        self.use_current_correction = bool(self.use_current_correction)
         self.velocity_only_update = bool(self.velocity_only_update)
         if self.nis_threshold is not None and float(self.nis_threshold) < 0.0:
             raise ValueError("nis_threshold must be nonnegative when provided.")
@@ -582,6 +719,12 @@ class MapMatchFeedbackConfig:
         Whether to include bathymetry likelihood in the sequence matcher.
     bathymetry_meas_std_m : float, optional
         Bathymetry measurement standard deviation used by the sequence matcher.
+    use_magnetics : bool, default=False
+        Whether to include magnetic likelihood in the sequence matcher.
+    magnetic_meas_std_nt : float, optional
+        Magnetic total-field measurement standard deviation.
+    magnetic_gradient_meas_std_nt_per_m : float, optional
+        Along-track magnetic-gradient measurement standard deviation.
     """
 
     enabled: bool = True
@@ -601,6 +744,7 @@ class MapMatchFeedbackConfig:
     use_sequence_lag_smoother: bool = False
     use_sequence_search_centering: bool = False
     use_bathymetry: bool = False
+    use_magnetics: bool = False
     directional_feedback_spec: DirectionalFeedbackSpec = field(
         default_factory=DirectionalFeedbackSpec
     )
@@ -616,6 +760,8 @@ class MapMatchFeedbackConfig:
     use_gradiometer: bool = False
     gradient_meas_std_per_s2: Optional[float] = None
     bathymetry_meas_std_m: Optional[float] = None
+    magnetic_meas_std_nt: Optional[float] = None
+    magnetic_gradient_meas_std_nt_per_m: Optional[float] = None
     sequence_search_center_gain: float = 0.35
     sequence_search_center_max_norm_m: float = 250.0
     sequence_search_center_max_step_m: float = 60.0
@@ -654,6 +800,7 @@ class MapMatchFeedbackConfig:
             )
         self.use_gradiometer = bool(self.use_gradiometer)
         self.use_bathymetry = bool(self.use_bathymetry)
+        self.use_magnetics = bool(self.use_magnetics)
         self.use_sequence_feedback = bool(self.use_sequence_feedback)
         self.use_sequence_lag_smoother = bool(self.use_sequence_lag_smoother)
         self.use_sequence_search_centering = bool(self.use_sequence_search_centering)
@@ -666,6 +813,16 @@ class MapMatchFeedbackConfig:
             self.bathymetry_meas_std_m = _positive_scalar(
                 self.bathymetry_meas_std_m,
                 name="bathymetry_meas_std_m",
+            )
+        if self.magnetic_meas_std_nt is not None:
+            self.magnetic_meas_std_nt = _positive_scalar(
+                self.magnetic_meas_std_nt,
+                name="magnetic_meas_std_nt",
+            )
+        if self.magnetic_gradient_meas_std_nt_per_m is not None:
+            self.magnetic_gradient_meas_std_nt_per_m = _positive_scalar(
+                self.magnetic_gradient_meas_std_nt_per_m,
+                name="magnetic_gradient_meas_std_nt_per_m",
             )
         self.sequence_search_center_gain = float(self.sequence_search_center_gain)
         self.sequence_search_center_max_norm_m = _positive_scalar(
@@ -1200,6 +1357,7 @@ class ScenarioSimulationRunner:
         measurement: DepthMeasurement,
         *,
         depth_variance_m2: float,
+        reference_surface_height_m: Optional[float] = None,
         estimators: Optional[SimulationEstimatorLog] = None,
         stream_name: Optional[str] = None,
     ) -> Any:
@@ -1207,12 +1365,17 @@ class ScenarioSimulationRunner:
         Apply one configured depth-aiding update.
         """
         cfg = self.config
+        href = (
+            cfg.reference_surface_height_m
+            if reference_surface_height_m is None
+            else float(reference_surface_height_m)
+        )
         if cfg.depth_aid.height_only_update:
             update = apply_depth_sensor_measurement_height_only(
                 ins,
                 measurement,
                 depth_variance_m2=depth_variance_m2,
-                reference_surface_height_m=cfg.reference_surface_height_m,
+                reference_surface_height_m=href,
                 nis_threshold=cfg.depth_aid.nis_threshold,
                 label="depth_height_only",
             )
@@ -1221,7 +1384,7 @@ class ScenarioSimulationRunner:
                 ins,
                 measurement,
                 depth_variance_m2=depth_variance_m2,
-                reference_surface_height_m=cfg.reference_surface_height_m,
+                reference_surface_height_m=href,
                 nis_threshold=cfg.depth_aid.nis_threshold,
                 label="depth",
             )
@@ -1333,6 +1496,7 @@ class ScenarioSimulationRunner:
                     replay_ins,
                     depth_meas,
                     depth_variance_m2=depth_variance_m2,
+                    reference_surface_height_m=float(depth_meas.reference_surface_height_m),
                 )
 
             vel_meas = velocity_measurements_by_step[step_idx]
@@ -1372,6 +1536,11 @@ class ScenarioSimulationRunner:
         gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
         bathymetry_sensor: Optional[BathymetrySensor] = None,
         bathymetry_map: Optional[BathymetryGrid] = None,
+        magnetometer_sensor: Optional[ScalarMagnetometerSensor] = None,
+        magnetic_map: Optional[MagneticGrid] = None,
+        current_profile_sensor: Optional[CurrentProfileSensor] = None,
+        current_field: Optional[CurrentFieldGrid] = None,
+        tide_corrector: Optional[TideCorrector] = None,
         pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
@@ -1395,6 +1564,16 @@ class ScenarioSimulationRunner:
             Seabed-clearance / echo-sounder simulator.
         bathymetry_map : BathymetryGrid, optional
             Regional bathymetry grid used to synthesize truth bathymetry.
+        magnetometer_sensor : ScalarMagnetometerSensor, optional
+            Scalar magnetic sensor used for map matching.
+        magnetic_map : MagneticGrid, optional
+            Regional scalar magnetic map.
+        current_profile_sensor : CurrentProfileSensor, optional
+            ADCP-like current-profile sensor.
+        current_field : CurrentFieldGrid, optional
+            Regional current field used for water-track correction.
+        tide_corrector : TideCorrector, optional
+            Harmonic tide/datum correction model.
         pf_rng : numpy.random.Generator, optional
             Optional RNG for the PF. Supply this when reproducible PF histories
             are required across repeated runs.
@@ -1463,6 +1642,9 @@ class ScenarioSimulationRunner:
                     bathymetry_map=(
                         bathymetry_map if cfg.map_match.use_bathymetry else None
                     ),
+                    magnetic_map=(
+                        magnetic_map if cfg.map_match.use_magnetics else None
+                    ),
                 )
                 if cfg.map_match.use_sequence_feedback:
                     sequence_feedback_ctrl = SequenceFeedbackController(
@@ -1494,6 +1676,8 @@ class ScenarioSimulationRunner:
         last_depth_measurement: Optional[DepthMeasurement] = None
         last_velocity_sample_time_s: Optional[float] = None
         last_depth_sample_time_s: Optional[float] = None
+        bathymetry_feature_history: list[tuple[float, float, float, float]] = []
+        magnetic_feature_history: list[tuple[float, float, float, float]] = []
         depth_measurements_by_step: list[Optional[DepthMeasurement]] = [None] * len(truth)
         velocity_measurements_by_step: list[Optional[VelocityAidMeasurement]] = [None] * len(truth)
         prediction_mats_by_step: list[Optional[ErrorStatePropagationMatrices]] = [None] * max(0, len(truth) - 1)
@@ -1971,6 +2155,41 @@ class ScenarioSimulationRunner:
                     f"truth.time_s must be strictly increasing; got dt={dt} at index {k}."
                 )
 
+            tide_sample: Optional[TideCorrectionSample] = None
+            dynamic_reference_surface_height_m = float(cfg.reference_surface_height_m)
+            if tide_corrector is not None:
+                tide_eval = tide_corrector.evaluate(
+                    lat_deg=float(np.rad2deg(truth.lat_rad[k])),
+                    lon_deg=float(np.rad2deg(truth.lon_rad[k])),
+                    time_s=t_now,
+                )
+                if isinstance(tide_eval, list):
+                    raise TypeError("Scalar tide evaluation expected one TideCorrectionSample.")
+                tide_sample = tide_eval
+                dynamic_reference_surface_height_m = (
+                    float(cfg.reference_surface_height_m)
+                    + float(tide_sample.sea_surface_height_m)
+                )
+                sensors.add_custom_sample(
+                    "tide_correction",
+                    {
+                        "time_s": t_now,
+                        "sea_surface_height_m": float(tide_sample.sea_surface_height_m),
+                        "ocean_loading_gravity_mps2": float(
+                            tide_sample.ocean_loading_gravity_mps2
+                        ),
+                        "solid_earth_gravity_mps2": float(
+                            tide_sample.solid_earth_gravity_mps2
+                        ),
+                        "total_gravity_correction_mps2": float(
+                            tide_sample.total_gravity_correction_mps2
+                        ),
+                        "effective_reference_surface_height_m": float(
+                            dynamic_reference_surface_height_m
+                        ),
+                    },
+                )
+
             # ----------------------------------------------------------
             # Truth -> ideal inertial quantities
             # ----------------------------------------------------------
@@ -2030,7 +2249,7 @@ class ScenarioSimulationRunner:
                     current_depth_measurement = depth_sensor.measure_depth_from_height(
                         height_m=float(truth.height_m[k]),
                         dt_s=dt_depth,
-                        reference_surface_height_m=cfg.reference_surface_height_m,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                         time_s=t_now,
                     )
                     depth_measurements_by_step[k] = current_depth_measurement
@@ -2043,6 +2262,7 @@ class ScenarioSimulationRunner:
                         ins,
                         current_depth_measurement,
                         depth_variance_m2=depth_variance_m2,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                         estimators=estimators,
                         stream_name="depth_updates",
                     )
@@ -2058,18 +2278,94 @@ class ScenarioSimulationRunner:
                         else t_now - last_velocity_sample_time_s
                     )
 
+                    current_truth_ned = np.zeros(3, dtype=np.float64)
+                    current_profile_meas: Optional[CurrentProfileMeasurement] = None
+                    if current_field is not None:
+                        platform_depth_truth = float(
+                            dynamic_reference_surface_height_m - float(truth.height_m[k])
+                        )
+                        current_truth_ned = np.asarray(
+                            current_field.evaluate_current_ned_mps(
+                                float(np.rad2deg(truth.lat_rad[k])),
+                                float(np.rad2deg(truth.lon_rad[k])),
+                                max(0.0, platform_depth_truth),
+                            ),
+                            dtype=np.float64,
+                        ).reshape(3)
+                        sensors.add_custom_sample(
+                            "current_field_truth",
+                            {
+                                "time_s": t_now,
+                                "value_ned_mps": current_truth_ned.copy(),
+                                "platform_depth_m": float(platform_depth_truth),
+                            },
+                        )
+                        if current_profile_sensor is not None:
+                            current_profile_meas = (
+                                current_profile_sensor.measure_current_profile_ned(
+                                    current_truth_ned,
+                                    time_s=t_now,
+                                )
+                            )
+                            sensors.add_custom_sample(
+                                "current_profile",
+                                current_profile_meas,
+                            )
+
+                    ideal_velocity_ned = np.asarray(truth.v_ned_mps[k], dtype=np.float64)
+                    if cfg.velocity_aid.measurement_mode == "water_relative":
+                        ideal_velocity_ned = ideal_velocity_ned - current_truth_ned
+
                     if cfg.velocity_aid.measurement_frame == "body":
-                        vel_meas = velocity_aid_sensor.measure_velocity_body_from_truth(
-                            velocity_ned_mps=truth.v_ned_mps[k],
-                            C_n_b=truth.C_n_b[k],
+                        vel_meas = velocity_aid_sensor.measure_velocity_body(
+                            truth.C_n_b[k].T @ ideal_velocity_ned,
                             dt_s=dt_vel,
                             time_s=t_now,
                         )
                     else:
-                        vel_meas = velocity_aid_sensor.measure_velocity_ned_from_truth(
-                            velocity_ned_mps=truth.v_ned_mps[k],
+                        vel_meas = velocity_aid_sensor.measure_velocity_ned(
+                            ideal_velocity_ned,
                             dt_s=dt_vel,
                             time_s=t_now,
+                        )
+
+                    if (
+                        cfg.velocity_aid.measurement_mode == "water_relative"
+                        and cfg.velocity_aid.use_current_correction
+                    ):
+                        if current_profile_meas is not None:
+                            current_estimate_ned = np.asarray(
+                                current_profile_meas.value_ned_mps,
+                                dtype=np.float64,
+                            )
+                        elif current_field is not None:
+                            current_estimate_ned = np.asarray(
+                                current_field.evaluate_current_ned_mps(
+                                    float(np.rad2deg(ins.state.nominal.lat_rad)),
+                                    float(np.rad2deg(ins.state.nominal.lon_rad)),
+                                    max(
+                                        0.0,
+                                        dynamic_reference_surface_height_m
+                                        - float(ins.state.nominal.height_m),
+                                    ),
+                                ),
+                                dtype=np.float64,
+                            ).reshape(3)
+                        else:
+                            current_estimate_ned = np.zeros(3, dtype=np.float64)
+                        raw_vel_meas = vel_meas
+                        vel_meas = _correct_velocity_measurement_for_current(
+                            vel_meas,
+                            current_ned_mps=current_estimate_ned,
+                        )
+                        sensors.add_custom_sample(
+                            "velocity_current_correction",
+                            {
+                                "time_s": t_now,
+                                "raw_value_mps": np.asarray(raw_vel_meas.value_mps, dtype=np.float64).copy(),
+                                "corrected_value_mps": np.asarray(vel_meas.value_mps, dtype=np.float64).copy(),
+                                "current_estimate_ned_mps": current_estimate_ned.copy(),
+                            },
                         )
 
                     velocity_measurements_by_step[k] = vel_meas
@@ -2118,7 +2414,70 @@ class ScenarioSimulationRunner:
                     gravimeter_meas = gravimeter_candidate
 
                 if gravimeter_meas is not None:
+                    if tide_sample is not None:
+                        corrected_gravimeter_meas = _correct_gravimeter_measurement_for_tide(
+                            gravimeter_meas,
+                            gravity_correction_mps2=float(
+                                tide_sample.total_gravity_correction_mps2
+                            ),
+                        )
+                        sensors.add_custom_sample(
+                            "gravimeter_tide_correction",
+                            {
+                                "time_s": t_now,
+                                "raw_value_mps2": float(gravimeter_meas.value_mps2),
+                                "corrected_value_mps2": float(
+                                    corrected_gravimeter_meas.value_mps2
+                                ),
+                                "gravity_correction_mps2": float(
+                                    tide_sample.total_gravity_correction_mps2
+                                ),
+                            },
+                        )
+                        gravimeter_meas = corrected_gravimeter_meas
                     sensors.gravimeter_samples.append(gravimeter_meas)
+
+            # ----------------------------------------------------------
+            # Magnetic sampling
+            # ----------------------------------------------------------
+            magnetometer_meas: Optional[MagnetometerMeasurement] = None
+            if (
+                magnetometer_sensor is not None
+                and magnetic_map is not None
+                and cfg.map_match.use_magnetics
+            ):
+                total_field_truth_nt = float(
+                    np.asarray(
+                        magnetic_map.evaluate_total_field_nt(
+                            float(np.rad2deg(truth.lat_rad[k])),
+                            float(np.rad2deg(truth.lon_rad[k])),
+                        ),
+                        dtype=np.float64,
+                    )
+                )
+                magnetometer_meas = magnetometer_sensor.measure_total_field(
+                    total_field_truth_nt,
+                    heading_rad=_heading_rad_from_c_n_b(truth.C_n_b[k]),
+                    time_s=t_now,
+                )
+                sensors.add_custom_sample("magnetometer", magnetometer_meas)
+                pos_ne = _geodetic_to_local_horizontal_m(
+                    lat_rad=float(truth.lat_rad[k]),
+                    lon_rad=float(truth.lon_rad[k]),
+                    lat_ref_rad=float(truth.lat_rad[0]),
+                    lon_ref_rad=float(truth.lon_rad[0]),
+                    height_ref_m=float(truth.height_m[0]),
+                )
+                magnetic_feature_history.append(
+                    (
+                        float(magnetometer_meas.value_nt),
+                        float(pos_ne[0]),
+                        float(pos_ne[1]),
+                        float(t_now),
+                    )
+                )
+                if len(magnetic_feature_history) > 5:
+                    magnetic_feature_history.pop(0)
 
             # ----------------------------------------------------------
             # Gravity gradiometer sampling
@@ -2157,25 +2516,51 @@ class ScenarioSimulationRunner:
                     bathymetry_map.evaluate_water_depth_m(
                         np.array([float(np.rad2deg(truth.lat_rad[k]))], dtype=np.float64),
                         np.array([float(np.rad2deg(truth.lon_rad[k]))], dtype=np.float64),
-                        reference_surface_height_m=cfg.reference_surface_height_m,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                     )[0]
                 )
                 platform_depth_true = float(
-                    cfg.reference_surface_height_m - float(truth.height_m[k])
+                    dynamic_reference_surface_height_m - float(truth.height_m[k])
                 )
                 ideal_clearance_m = max(0.0, water_depth_true - platform_depth_true)
                 current_bathymetry_measurement = (
                     bathymetry_sensor.measure_seafloor_clearance(
                         ideal_clearance_m,
                         time_s=t_now,
-                        reference_surface_height_m=cfg.reference_surface_height_m,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                     )
                 )
                 sensors.add_custom_sample("bathymetry", current_bathymetry_measurement)
+                pos_ne = _geodetic_to_local_horizontal_m(
+                    lat_rad=float(truth.lat_rad[k]),
+                    lon_rad=float(truth.lon_rad[k]),
+                    lat_ref_rad=float(truth.lat_rad[0]),
+                    lon_ref_rad=float(truth.lon_rad[0]),
+                    height_ref_m=float(truth.height_m[0]),
+                )
+                bathymetry_feature_history.append(
+                    (
+                        float(current_bathymetry_measurement.value_m),
+                        float(pos_ne[0]),
+                        float(pos_ne[1]),
+                        float(t_now),
+                    )
+                )
+                if len(bathymetry_feature_history) > 5:
+                    bathymetry_feature_history.pop(0)
 
             # ----------------------------------------------------------
             # Gravity map matching and optional PF feedback
             # ----------------------------------------------------------
+            measured_bathymetry_gradient_m_per_m, measured_bathymetry_rugosity_m = (
+                _bathymetry_feature_estimates_from_history(bathymetry_feature_history)
+            )
+            measured_magnetic_gradient_nt_per_m, _ = (
+                _bathymetry_feature_estimates_from_history(magnetic_feature_history)
+            )
+            current_track_unit_ned = _horizontal_track_unit_ned(
+                ins.state.nominal.v_ned_mps
+            )
             if pf is not None and gravimeter_meas is not None:
                 if cfg.map_match.schedule.should_trigger(k, t_now, t_prev):
                     depth_for_pf: Optional[DepthMeasurement] = None
@@ -2197,7 +2582,7 @@ class ScenarioSimulationRunner:
                             else np.asarray(gradiometer_meas.value_per_s2, dtype=np.float64)
                         ),
                         gradient_meas_std_per_s2=cfg.map_match.gradient_meas_std_per_s2,
-                        reference_surface_height_m=cfg.reference_surface_height_m,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                     )
                     estimators.pf_updates.append(pf_update)
 
@@ -2289,6 +2674,7 @@ class ScenarioSimulationRunner:
                         gravity_meas_std_mps2=cfg.map_match.gravity_meas_std_mps2,
                         ins_or_state=ins,
                         search_center_offset_ned_m=sequence_search_center_offset_ned_m,
+                        current_track_unit_ned=current_track_unit_ned,
                         depth_measurement=depth_for_matcher,
                         measured_gradient_per_s2=(
                             None
@@ -2302,7 +2688,19 @@ class ScenarioSimulationRunner:
                             else float(current_bathymetry_measurement.value_m)
                         ),
                         bathymetry_meas_std_m=cfg.map_match.bathymetry_meas_std_m,
-                        reference_surface_height_m=cfg.reference_surface_height_m,
+                        measured_bathymetry_gradient_m_per_m=measured_bathymetry_gradient_m_per_m,
+                        bathymetry_gradient_meas_std_m_per_m=cfg.map_match.sequence_spec.bathymetry_gradient_meas_std_m_per_m,
+                        measured_bathymetry_rugosity_m=measured_bathymetry_rugosity_m,
+                        bathymetry_rugosity_meas_std_m=cfg.map_match.sequence_spec.bathymetry_rugosity_meas_std_m,
+                        measured_magnetic_total_nt=(
+                            None
+                            if magnetometer_meas is None
+                            else float(magnetometer_meas.value_nt)
+                        ),
+                        magnetic_meas_std_nt=cfg.map_match.magnetic_meas_std_nt,
+                        measured_magnetic_gradient_nt_per_m=measured_magnetic_gradient_nt_per_m,
+                        magnetic_gradient_meas_std_nt_per_m=cfg.map_match.magnetic_gradient_meas_std_nt_per_m,
+                        reference_surface_height_m=dynamic_reference_surface_height_m,
                     )
                     if len(seq_updates) > 0:
                         estimators.sequence_updates.extend(seq_updates)
@@ -2459,6 +2857,11 @@ class ScenarioSimulationRunner:
         gradiometer_sensor: Optional[GravityGradiometerSensor] = None,
         bathymetry_sensor: Optional[BathymetrySensor] = None,
         bathymetry_map: Optional[BathymetryGrid] = None,
+        magnetometer_sensor: Optional[ScalarMagnetometerSensor] = None,
+        magnetic_map: Optional[MagneticGrid] = None,
+        current_profile_sensor: Optional[CurrentProfileSensor] = None,
+        current_field: Optional[CurrentFieldGrid] = None,
+        tide_corrector: Optional[TideCorrector] = None,
         pf_rng: Optional[np.random.Generator] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
@@ -2504,6 +2907,11 @@ class ScenarioSimulationRunner:
             gradiometer_sensor=gradiometer_sensor,
             bathymetry_sensor=bathymetry_sensor,
             bathymetry_map=bathymetry_map,
+            magnetometer_sensor=magnetometer_sensor,
+            magnetic_map=magnetic_map,
+            current_profile_sensor=current_profile_sensor,
+            current_field=current_field,
+            tide_corrector=tide_corrector,
             pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
@@ -2521,6 +2929,11 @@ class ScenarioSimulationRunner:
         gradiometer_spec: Optional[GravityGradiometerSpec] = None,
         bathymetry_spec: Optional[BathymetrySensorSpec] = None,
         bathymetry_map: Optional[BathymetryGrid] = None,
+        magnetometer_spec: Optional[MagnetometerSensorSpec] = None,
+        magnetic_map: Optional[MagneticGrid] = None,
+        current_profile_spec: Optional[CurrentProfileSensorSpec] = None,
+        current_field: Optional[CurrentFieldGrid] = None,
+        tide_correction_spec: Optional[TideCorrectionSpec] = None,
         map_model: Any | str | Path | None = None,
         metadata: Optional[SimulationMetadata] = None,
         dt_s: Optional[float] = None,
@@ -2550,6 +2963,16 @@ class ScenarioSimulationRunner:
             Bathymetry / seabed-clearance sensor spec.
         bathymetry_map : BathymetryGrid, optional
             Regional bathymetry grid used for truth sampling.
+        magnetometer_spec : MagnetometerSensorSpec, optional
+            Scalar total-field magnetic sensor spec.
+        magnetic_map : MagneticGrid, optional
+            Regional scalar magnetic map.
+        current_profile_spec : CurrentProfileSensorSpec, optional
+            Current-profile sensor spec.
+        current_field : CurrentFieldGrid, optional
+            Regional current field.
+        tide_correction_spec : TideCorrectionSpec, optional
+            Harmonic tide/datum correction model.
         map_model : object, path, or None, optional
             Gravity-map backend or NPZ path.
         metadata : SimulationMetadata, optional
@@ -2619,6 +3042,27 @@ class ScenarioSimulationRunner:
                 rng=child_rng("bathymetry"),
             )
         )
+        magnetometer_sensor = (
+            None
+            if magnetometer_spec is None
+            else ScalarMagnetometerSensor(
+                magnetometer_spec,
+                rng=child_rng("magnetometer"),
+            )
+        )
+        current_profile_sensor = (
+            None
+            if current_profile_spec is None
+            else CurrentProfileSensor(
+                current_profile_spec,
+                rng=child_rng("current_profile"),
+            )
+        )
+        tide_corrector = (
+            None
+            if tide_correction_spec is None
+            else TideCorrector(tide_correction_spec)
+        )
         pf_rng = child_rng("pf")
 
         meta = SimulationMetadata() if metadata is None else metadata.copy()
@@ -2636,6 +3080,11 @@ class ScenarioSimulationRunner:
             gradiometer_sensor=gradiometer_sensor,
             bathymetry_sensor=bathymetry_sensor,
             bathymetry_map=bathymetry_map,
+            magnetometer_sensor=magnetometer_sensor,
+            magnetic_map=magnetic_map,
+            current_profile_sensor=current_profile_sensor,
+            current_field=current_field,
+            tide_corrector=tide_corrector,
             pf_rng=pf_rng,
             map_model=map_model,
             metadata=meta,
@@ -2652,9 +3101,12 @@ __all__ = [
     "SimulationRunnerConfig",
     "VelocityAidFusionConfig",
     "BathymetrySensorSpec",
+    "CurrentProfileSensorSpec",
     "GravityGradiometerSpec",
     "GravitySequenceMatcherSpec",
+    "MagnetometerSensorSpec",
     "PhotonicGravimeterSpec",
+    "TideCorrectionSpec",
     "build_initial_covariance_geodetic",
     "process_noise_from_imu_spec",
     "resolve_map_model",

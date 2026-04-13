@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,9 @@ from gravnav.datasets.bathymetry_loader import (
     load_bathymetry_grid_from_manifest,
     resolve_regional_demo_pack,
 )
+from gravnav.datasets.current_loader import process_regular_csv_current_field
 from gravnav.datasets.gravity_loader import RegionalGravityMapManifest
+from gravnav.datasets.magnetic_loader import process_regular_csv_magnetic_grid
 from gravnav.physics.gravity_map import GravityGridMap
 
 
@@ -73,15 +76,26 @@ def test_bathymetry_manifests_round_trip() -> None:
 def test_demo_pack_resolution_uses_manifest_relative_paths(tmp_path: Path) -> None:
     gravity_dir = tmp_path / "gravity"
     bathy_dir = tmp_path / "bathy"
+    magnetic_dir = tmp_path / "magnetic"
+    current_dir = tmp_path / "current"
     config_dir = tmp_path / "configs"
     gravity_dir.mkdir()
     bathy_dir.mkdir()
+    magnetic_dir.mkdir()
+    current_dir.mkdir()
     config_dir.mkdir()
 
     gravity_npz = gravity_dir / "gravity_map.npz"
     gravity_manifest_path = gravity_dir / "gravity_manifest.json"
     bathy_npz = bathy_dir / "bathymetry_grid.npz"
     bathy_manifest_path = bathy_dir / "bathymetry_manifest.json"
+    magnetic_csv = magnetic_dir / "magnetic.csv"
+    magnetic_npz = magnetic_dir / "magnetic_grid.npz"
+    magnetic_manifest_path = magnetic_dir / "magnetic_manifest.json"
+    current_csv = current_dir / "current.csv"
+    current_npz = current_dir / "current_grid.npz"
+    current_manifest_path = current_dir / "current_manifest.json"
+    tide_config_path = config_dir / "tide.json"
     scenario_path = config_dir / "scenario.json"
     profile_path = config_dir / "profile.json"
     demo_pack_path = tmp_path / "demo_pack.json"
@@ -145,6 +159,64 @@ def test_demo_pack_resolution_uses_manifest_relative_paths(tmp_path: Path) -> No
 
     scenario_path.write_text('{"name":"demo"}\n', encoding="utf-8")
     profile_path.write_text('{"window_size":11}\n', encoding="utf-8")
+    magnetic_csv.write_text(
+        "\n".join(
+            [
+                "lat_deg,lon_deg,total_field_nt,anomaly_nt",
+                "63.6,4.1,50100.0,20.0",
+                "63.6,4.2,50110.0,30.0",
+                "63.7,4.1,50120.0,40.0",
+                "63.7,4.2,50130.0,50.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    process_regular_csv_magnetic_grid(
+        magnetic_csv,
+        region_name="fixture_magnetic_region",
+        source_name="fixture_magnetic",
+        processed_map_path=magnetic_npz,
+        manifest_path=magnetic_manifest_path,
+        project_root=magnetic_dir,
+    )
+    current_csv.write_text(
+        "\n".join(
+            [
+                "lat_deg,lon_deg,depth_m,north_current_mps,east_current_mps",
+                "63.6,4.1,10.0,0.10,0.20",
+                "63.6,4.2,10.0,0.15,0.25",
+                "63.7,4.1,10.0,0.20,0.30",
+                "63.7,4.2,10.0,0.25,0.35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    process_regular_csv_current_field(
+        current_csv,
+        region_name="fixture_current_region",
+        source_name="fixture_current",
+        processed_grid_path=current_npz,
+        manifest_path=current_manifest_path,
+        project_root=current_dir,
+    )
+    tide_config_path.write_text(
+        json.dumps(
+            {
+                "name": "fixture_tide",
+                "sea_surface_constituents": [
+                    {
+                        "name": "M2",
+                        "angular_frequency_rad_per_s": 0.0001405189,
+                        "amplitude_at_equator": 0.5,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     RegionalDemoPackManifest(
         region_name="fixture_demo",
@@ -152,6 +224,9 @@ def test_demo_pack_resolution_uses_manifest_relative_paths(tmp_path: Path) -> No
         bathymetry_manifest_path="bathy/bathymetry_manifest.json",
         scenario_path="configs/scenario.json",
         sequence_profile_path="configs/profile.json",
+        magnetic_manifest_path="magnetic/magnetic_manifest.json",
+        current_manifest_path="current/current_manifest.json",
+        tide_config_path="configs/tide.json",
     ).write_json(demo_pack_path)
 
     bathy_loaded, bathy_manifest_loaded, bathy_grid_path, loaded_bathy_manifest_path = (
@@ -168,10 +243,15 @@ def test_demo_pack_resolution_uses_manifest_relative_paths(tmp_path: Path) -> No
     assert resolved.bathymetry_manifest.region_name == "fixture_bathy_region"
     assert resolved.gravity_map_path == gravity_npz.resolve()
     assert resolved.bathymetry_grid_path == bathy_npz.resolve()
+    assert resolved.magnetic_grid_path == magnetic_npz.resolve()
+    assert resolved.current_field_grid_path == current_npz.resolve()
+    assert resolved.tide_config_path == tide_config_path.resolve()
     assert resolved.scenario_path == scenario_path.resolve()
     assert resolved.sequence_profile_path == profile_path.resolve()
     assert resolved.gravity_map.shape == (2, 2)
     assert resolved.bathymetry_grid.shape == (2, 2)
+    assert resolved.magnetic_grid is not None
+    assert resolved.current_field is not None
 
 
 def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -> None:
@@ -191,6 +271,11 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
         gravity_manifest_path=Path("/tmp/gravity_manifest.json"),
         bathymetry_grid_path=Path("/tmp/bathy_grid.npz"),
         bathymetry_manifest_path=Path("/tmp/bathy_manifest.json"),
+        magnetic_grid_path=Path("/tmp/magnetic_grid.npz"),
+        magnetic_manifest_path=Path("/tmp/magnetic_manifest.json"),
+        current_field_grid_path=Path("/tmp/current_grid.npz"),
+        current_manifest_path=Path("/tmp/current_manifest.json"),
+        tide_config_path=Path("/tmp/tide.json"),
         profile_path=Path("/tmp/profile.json"),
         profile={
             "window_size": 11,
@@ -200,6 +285,10 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
             "center_prior_std_m": [50.0, 50.0],
             "bathymetry_meas_std_m": 2.0,
             "bathymetry_weight": 3.5,
+            "bathymetry_gradient_meas_std_m_per_m": 0.01,
+            "bathymetry_rugosity_meas_std_m": 2.0,
+            "magnetic_meas_std_nt": 8.0,
+            "magnetic_gradient_meas_std_nt_per_m": 0.02,
             "map_match_every_steps": 1,
         },
         rows=[
@@ -213,7 +302,7 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
                 "earth_signature_mode": "live_ins",
             },
             {
-                "label": "photonic_gravity",
+                "label": "photonic_gravity_baseline",
                 "ins_horizontal_rmse_m": 10.0,
                 "sequence_horizontal_rmse_m": 9.0,
                 "earth_signature_horizontal_rmse_m": 9.0,
@@ -224,7 +313,7 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
                 "earth_signature_mode": "sequence",
             },
             {
-                "label": "photonic_gravity_bathymetry",
+                "label": "photonic_gravity_tide_acoustic",
                 "ins_horizontal_rmse_m": 10.0,
                 "sequence_horizontal_rmse_m": 8.0,
                 "earth_signature_horizontal_rmse_m": 8.0,
@@ -235,7 +324,7 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
                 "earth_signature_mode": "sequence",
             },
             {
-                "label": "photonic_gravity_bathymetry_lag",
+                "label": "photonic_gravity_tide_acoustic_magnetic_current",
                 "ins_horizontal_rmse_m": 10.0,
                 "lag_horizontal_rmse_m": 7.5,
                 "earth_signature_horizontal_rmse_m": 7.5,
@@ -257,4 +346,7 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
     assert "/tmp/gravity_manifest.json" in report_text
     assert "/tmp/bathy_grid.npz" in report_text
     assert "/tmp/bathy_manifest.json" in report_text
+    assert "/tmp/magnetic_grid.npz" in report_text
+    assert "/tmp/current_grid.npz" in report_text
+    assert "/tmp/tide.json" in report_text
     assert "fixture_demo_region" in report_text

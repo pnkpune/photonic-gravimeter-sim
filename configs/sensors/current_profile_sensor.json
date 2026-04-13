@@ -1,0 +1,11 @@
+{
+  "name": "current_profile_demo",
+  "noise_std_mps": 0.05,
+  "turn_on_bias_std_mps": 0.02,
+  "fixed_bias_mps": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "max_speed_mps": 2.5
+}

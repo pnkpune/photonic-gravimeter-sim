@@ -1,0 +1,11 @@
+{
+  "name": "scalar_magnetometer_demo",
+  "noise_std_nt": 3.0,
+  "turn_on_bias_std_nt": 8.0,
+  "fixed_bias_nt": 0.0,
+  "scale_factor_error_ppm": 25.0,
+  "heading_disturbance_amplitude_nt": 12.0,
+  "heading_disturbance_harmonic": 2,
+  "hard_iron_bias_nt": 0.0,
+  "max_abs_nt": 100000.0
+}

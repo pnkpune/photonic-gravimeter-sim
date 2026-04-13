@@ -1,0 +1,69 @@
+{
+  "name": "norway_public_tide_correction",
+  "sea_surface_constituents": [
+    {
+      "name": "M2_ssh",
+      "angular_frequency_rad_per_s": 0.0001405189,
+      "amplitude_at_equator": 0.45,
+      "phase_rad": 0.1,
+      "lat_scale_sin_power": 0.4,
+      "lon_wavenumber": 0.5
+    },
+    {
+      "name": "S2_ssh",
+      "angular_frequency_rad_per_s": 0.0001454441,
+      "amplitude_at_equator": 0.14,
+      "phase_rad": -0.2,
+      "lat_scale_sin_power": 0.25,
+      "lon_wavenumber": 0.3
+    },
+    {
+      "name": "K1_ssh",
+      "angular_frequency_rad_per_s": 7.2921150e-05,
+      "amplitude_at_equator": 0.08,
+      "phase_rad": 0.35,
+      "lat_scale_sin_power": 0.1,
+      "lon_wavenumber": -0.2
+    }
+  ],
+  "ocean_loading_constituents": [
+    {
+      "name": "M2_loading",
+      "angular_frequency_rad_per_s": 0.0001405189,
+      "amplitude_at_equator": 4.5e-07,
+      "phase_rad": 0.15,
+      "lat_scale_sin_power": 0.4,
+      "lon_wavenumber": 0.5
+    },
+    {
+      "name": "S2_loading",
+      "angular_frequency_rad_per_s": 0.0001454441,
+      "amplitude_at_equator": 1.5e-07,
+      "phase_rad": -0.1,
+      "lat_scale_sin_power": 0.2,
+      "lon_wavenumber": 0.3
+    }
+  ],
+  "solid_earth_constituents": [
+    {
+      "name": "solid_diurnal",
+      "angular_frequency_rad_per_s": 7.2921150e-05,
+      "amplitude_at_equator": 8.0e-08,
+      "phase_rad": 0.0,
+      "lat_scale_sin_power": 0.5,
+      "lon_wavenumber": 0.0
+    }
+  ],
+  "notes": [
+    "Compact harmonic correction surface for Norway-first public-data demos.",
+    "This is a lightweight stand-in for FES/PyTMD-backed correction layers."
+  ],
+  "metadata": {
+    "source_family": "harmonic_stub",
+    "intended_runtime_models": [
+      "FES2022b",
+      "PyFES",
+      "pyTMD"
+    ]
+  }
+}

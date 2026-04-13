@@ -34,13 +34,17 @@ from gravnav.datasets.bathymetry_loader import (
     ensure_regional_bathymetry_grid,
     resolve_regional_demo_pack,
 )
+from gravnav.datasets.current_loader import load_current_field_from_manifest
+from gravnav.datasets.magnetic_loader import load_magnetic_grid_from_manifest
 from gravnav.physics.gravity_map import GravityGridMap
 from gravnav.plots.nav_plots import plot_ground_track_local_ned, plot_position_error_ned
 from gravnav.sensors.bathymetry import BathymetrySensorSpec
+from gravnav.sensors.current_profile import CurrentProfileSensorSpec
 from gravnav.sensors.depth import DepthSensorSpec
 from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
 from gravnav.sensors.imu import IMUSpec
+from gravnav.sensors.magnetometer import MagnetometerSensorSpec
 from gravnav.sensors.photonic_gravimeter import PhotonicGravimeterSpec
 from gravnav.sensors.photonic_gravimeter import summarize_photonic_measurements
 from gravnav.sensors.velocity_aid import VelocityAidSpec
@@ -57,6 +61,7 @@ from gravnav.simulation.runner import (
     PeriodicUpdateSchedule,
     ScenarioSimulationRunner,
     SimulationRunnerConfig,
+    TideCorrectionSpec,
     VelocityAidFusionConfig,
 )
 from gravnav.truth.scenarios import ScenarioSpec
@@ -71,6 +76,9 @@ DEFAULT_DEPTH_CONFIG = PROJECT_ROOT / "configs/sensors/depth_sensor.json"
 DEFAULT_VELOCITY_CONFIG = PROJECT_ROOT / "configs/sensors/velocity_aid.json"
 DEFAULT_GRADIOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravity_gradiometer_proto.json"
 DEFAULT_BATHY_SENSOR_CONFIG = PROJECT_ROOT / "configs/sensors/bathymetry_sensor.json"
+DEFAULT_MAGNETOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/magnetometer_scalar.json"
+DEFAULT_CURRENT_PROFILE_CONFIG = PROJECT_ROOT / "configs/sensors/current_profile_sensor.json"
+DEFAULT_TIDE_CONFIG = PROJECT_ROOT / "configs/environment/tide_correction_norway.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/outputs/reports/maritime_demo"
 DEFAULT_GRAVITY_MAP = PROJECT_ROOT / "data/gravity_maps/processed/norwegian_margin_gravity_map.npz"
 DEFAULT_DEMO_PACK = PROJECT_ROOT / "data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json"
@@ -97,6 +105,12 @@ def _load_sequence_profile(path: Path) -> dict[str, Any]:
     return dict(load_config_mapping(path))
 
 
+def _load_optional_spec(path: Path | None, cls: type[Any]) -> Any | None:
+    if path is None:
+        return None
+    return _load_spec(path, cls)
+
+
 def _ensure_demo_pack() -> None:
     if DEFAULT_DEMO_PACK.exists():
         return
@@ -111,6 +125,9 @@ def _build_runner_config(
     profile: dict[str, Any],
     *,
     use_bathymetry: bool,
+    use_acoustic_terrain: bool,
+    use_magnetics: bool,
+    use_current_correction: bool,
     use_lag_smoother: bool,
     initial_position_offset_ned_m: tuple[float, float, float],
 ) -> SimulationRunnerConfig:
@@ -134,15 +151,51 @@ def _build_runner_config(
             bathymetry_weight=(
                 1.0 if not use_bathymetry else float(profile.get("bathymetry_weight", 1.0))
             ),
+            bathymetry_gradient_meas_std_m_per_m=(
+                None
+                if not (use_bathymetry and use_acoustic_terrain)
+                else float(profile.get("bathymetry_gradient_meas_std_m_per_m", 0.01))
+            ),
+            bathymetry_gradient_weight=(
+                1.0
+                if not (use_bathymetry and use_acoustic_terrain)
+                else float(profile.get("bathymetry_gradient_weight", 1.0))
+            ),
+            bathymetry_rugosity_meas_std_m=(
+                None
+                if not (use_bathymetry and use_acoustic_terrain)
+                else float(profile.get("bathymetry_rugosity_meas_std_m", 2.0))
+            ),
+            bathymetry_rugosity_weight=(
+                1.0
+                if not (use_bathymetry and use_acoustic_terrain)
+                else float(profile.get("bathymetry_rugosity_weight", 1.0))
+            ),
+            magnetic_meas_std_nt=(
+                None if not use_magnetics else float(profile.get("magnetic_meas_std_nt", 8.0))
+            ),
+            magnetic_weight=(
+                1.0 if not use_magnetics else float(profile.get("magnetic_weight", 1.0))
+            ),
+            magnetic_gradient_meas_std_nt_per_m=(
+                None
+                if not use_magnetics
+                else float(profile.get("magnetic_gradient_meas_std_nt_per_m", 0.02))
+            ),
+            magnetic_gradient_weight=(
+                1.0
+                if not use_magnetics
+                else float(profile.get("magnetic_gradient_weight", 0.75))
+            ),
             height_std_m=float(profile.get("height_std_m", 2.0)),
             adaptive_grid_enabled=bool(profile.get("adaptive_grid_enabled", True)),
             expanded_grid_half_span_m=profile.get(
                 "expanded_grid_half_span_m",
-                [2.0 * float(v) for v in profile["grid_half_span_m"]],
+                None,
             ),
             expanded_grid_spacing_m=profile.get(
                 "expanded_grid_spacing_m",
-                list(profile["grid_spacing_m"]),
+                None,
             ),
             adaptive_expand_edge_mass_fraction=float(
                 profile.get("adaptive_expand_edge_mass_fraction", 0.20)
@@ -177,13 +230,25 @@ def _build_runner_config(
             ambiguity_min_bathymetry_information_ratio=float(
                 profile.get("ambiguity_min_bathymetry_information_ratio", 0.50)
             ),
+            ambiguity_min_magnetic_information_ratio=float(
+                profile.get("ambiguity_min_magnetic_information_ratio", 0.50)
+            ),
         ),
         gravity_meas_std_mps2=float(profile["gravity_meas_std_mps2"]),
         use_gradiometer=bool(profile.get("use_gradiometer", True)),
         gradient_meas_std_per_s2=float(profile["gradient_meas_std_per_s2"]),
         use_bathymetry=bool(use_bathymetry),
+        use_magnetics=bool(use_magnetics),
         bathymetry_meas_std_m=(
             None if not use_bathymetry else float(profile["bathymetry_meas_std_m"])
+        ),
+        magnetic_meas_std_nt=(
+            None if not use_magnetics else float(profile.get("magnetic_meas_std_nt", 8.0))
+        ),
+        magnetic_gradient_meas_std_nt_per_m=(
+            None
+            if not use_magnetics
+            else float(profile.get("magnetic_gradient_meas_std_nt_per_m", 0.02))
         ),
         use_sequence_lag_smoother=bool(use_lag_smoother),
         use_sequence_search_centering=bool(
@@ -220,6 +285,10 @@ def _build_runner_config(
             enabled=True,
             schedule=PeriodicUpdateSchedule(every_steps=1),
             measurement_frame="ned",
+            measurement_mode=(
+                "water_relative" if use_current_correction else "earth_relative"
+            ),
+            use_current_correction=bool(use_current_correction),
             measurement_std_mps=(0.05, 0.05, 0.05),
         ),
         depth_aid=DepthFusionConfig(
@@ -243,6 +312,7 @@ def _run_case(
     scenario: ScenarioSpec,
     gravity_map: GravityGridMap,
     bathymetry_map: BathymetryGrid | None,
+    magnetic_map: Any | None,
     imu_spec: IMUSpec,
     gravimeter_spec: GravimeterSpec | None,
     photonic_spec: PhotonicGravimeterSpec | None,
@@ -250,10 +320,18 @@ def _run_case(
     velocity_spec: VelocityAidSpec,
     gradiometer_spec: GravityGradiometerSpec,
     bathymetry_spec: BathymetrySensorSpec | None,
+    magnetometer_spec: MagnetometerSensorSpec | None,
+    current_profile_spec: CurrentProfileSensorSpec | None,
+    current_field: Any | None,
+    tide_correction_spec: TideCorrectionSpec | None,
     profile: dict[str, Any],
     seed: int,
     output_dir: Path,
     use_bathymetry: bool,
+    use_acoustic_terrain: bool,
+    use_magnetics: bool,
+    use_current_correction: bool,
+    use_tide_correction: bool,
     disable_map_match: bool = False,
     use_lag_smoother: bool = False,
     dt_s: float = 2.0,
@@ -262,6 +340,9 @@ def _run_case(
     cfg = _build_runner_config(
         profile,
         use_bathymetry=use_bathymetry,
+        use_acoustic_terrain=use_acoustic_terrain,
+        use_magnetics=use_magnetics,
+        use_current_correction=use_current_correction,
         use_lag_smoother=use_lag_smoother,
         initial_position_offset_ned_m=initial_position_offset_ned_m,
     )
@@ -279,6 +360,13 @@ def _run_case(
         gradiometer_spec=gradiometer_spec if not disable_map_match else None,
         bathymetry_spec=bathymetry_spec if use_bathymetry else None,
         bathymetry_map=bathymetry_map if use_bathymetry else None,
+        magnetometer_spec=(
+            magnetometer_spec if (use_magnetics and not disable_map_match) else None
+        ),
+        magnetic_map=magnetic_map if (use_magnetics and not disable_map_match) else None,
+        current_profile_spec=current_profile_spec if use_current_correction else None,
+        current_field=current_field if use_current_correction else None,
+        tide_correction_spec=tide_correction_spec if use_tide_correction else None,
         map_model=None if disable_map_match else gravity_map,
         metadata=SimulationMetadata(
             scenario_name=scenario.name,
@@ -308,6 +396,7 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
     ess_fraction: list[float] = []
     gravity_info: list[float] = []
     bathy_info: list[float] = []
+    magnetic_info: list[float] = []
     support_radius_fraction: list[float] = []
 
     for update in updates:
@@ -321,6 +410,8 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
         gravity_info.append(float(diag.gravity_information_ratio))
         if diag.bathymetry_information_ratio is not None:
             bathy_info.append(float(diag.bathymetry_information_ratio))
+        if diag.magnetic_information_ratio is not None:
+            magnetic_info.append(float(diag.magnetic_information_ratio))
         support_radius_fraction.append(
             max(
                 float(diag.support_radius_n_m) / max(float(diag.grid_half_span_m[0]), 1.0e-9),
@@ -345,6 +436,9 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
         "median_gravity_information_ratio": float(np.median(gravity_info)),
         "median_bathymetry_information_ratio": (
             None if len(bathy_info) == 0 else float(np.median(bathy_info))
+        ),
+        "median_magnetic_information_ratio": (
+            None if len(magnetic_info) == 0 else float(np.median(magnetic_info))
         ),
         "median_support_radius_fraction": float(np.median(support_radius_fraction)),
         "failure_mode_counts": failure_counts,
@@ -371,8 +465,11 @@ def _select_reported_output(
     median_ess = float(ambiguity["median_posterior_ess_fraction"])
     median_gravity_info = float(ambiguity["median_gravity_information_ratio"])
     median_bathy_info = ambiguity["median_bathymetry_information_ratio"]
+    median_magnetic_info = ambiguity.get("median_magnetic_information_ratio")
     if median_bathy_info is not None:
         median_bathy_info = float(median_bathy_info)
+    if median_magnetic_info is not None:
+        median_magnetic_info = float(median_magnetic_info)
 
     lag_allowed = (
         lag is not None
@@ -383,6 +480,7 @@ def _select_reported_output(
         and median_support_radius <= 0.75
         and median_ess >= 0.02
         and (median_bathy_info is None or median_bathy_info >= 0.10)
+        and (median_magnetic_info is None or median_magnetic_info >= 0.10)
     )
     if lag_allowed:
         return "lag_smoothed", "lag_confident"
@@ -392,14 +490,22 @@ def _select_reported_output(
         and median_edge_mass <= 0.20
         and median_support_radius <= 0.85
         and median_ess >= 0.02
-        and (median_gravity_info >= 0.10 or (median_bathy_info is not None and median_bathy_info >= 0.10))
+        and (
+            median_gravity_info >= 0.10
+            or (median_bathy_info is not None and median_bathy_info >= 0.10)
+            or (median_magnetic_info is not None and median_magnetic_info >= 0.10)
+        )
     )
     if sequence_allowed:
         return "sequence", "lag_rejected_or_unavailable"
 
     if edge_clipped > 0.35 or median_support_radius > 0.90:
         return "live_ins", "edge_coverage_limited"
-    if median_gravity_info < 0.10 and (median_bathy_info is None or median_bathy_info < 0.10):
+    if (
+        median_gravity_info < 0.10
+        and (median_bathy_info is None or median_bathy_info < 0.10)
+        and (median_magnetic_info is None or median_magnetic_info < 0.10)
+    ):
         return "live_ins", "flat_signature"
     if median_ess < 0.02:
         return "live_ins", "prior_dominated"
@@ -496,6 +602,9 @@ def _metrics_row(
         "ambiguity_median_bathymetry_information_ratio": None
         if ambiguity is None or ambiguity["median_bathymetry_information_ratio"] is None
         else float(ambiguity["median_bathymetry_information_ratio"]),
+        "ambiguity_median_magnetic_information_ratio": None
+        if ambiguity is None or ambiguity["median_magnetic_information_ratio"] is None
+        else float(ambiguity["median_magnetic_information_ratio"]),
         "ambiguity_failure_mode_counts": None
         if ambiguity is None
         else dict(ambiguity["failure_mode_counts"]),
@@ -591,6 +700,11 @@ def _write_report(
     gravity_manifest_path: Path | None,
     bathymetry_grid_path: Path | None,
     bathymetry_manifest_path: Path | None,
+    magnetic_grid_path: Path | None,
+    magnetic_manifest_path: Path | None,
+    current_field_grid_path: Path | None,
+    current_manifest_path: Path | None,
+    tide_config_path: Path | None,
     profile_path: Path,
     profile: dict[str, Any],
     rows: list[dict[str, Any]],
@@ -610,6 +724,8 @@ def _write_report(
         photonic_by_label.setdefault(str(row["label"]), []).append(row)
 
     def median(label: str, key: str) -> float:
+        if label not in by_label:
+            return float("nan")
         vals = [
             float(r[key])
             for r in by_label[label]
@@ -647,13 +763,14 @@ def _write_report(
 
     ordered_labels = [
         "live_ins",
-        "surrogate_gravity",
-        "photonic_gravity",
-        "photonic_gravity_bathymetry",
-        "photonic_gravity_bathymetry_lag",
+        "photonic_gravity_baseline",
+        "photonic_gravity_tide",
+        "photonic_gravity_tide_acoustic",
+        "photonic_gravity_tide_acoustic_magnetic",
+        "photonic_gravity_tide_acoustic_magnetic_current",
     ]
     lines = [
-        "# Hardware-Tied Maritime Demo Report",
+        "# Norway-First Multi-Modal Earth-Signature Demo Report",
         "",
         "## Scope",
         "",
@@ -664,7 +781,12 @@ def _write_report(
         f"- gravity manifest: `{gravity_manifest_path}`" if gravity_manifest_path is not None else "- gravity manifest: `n/a`",
         f"- bathymetry grid source: `{bathymetry_grid_path}`" if bathymetry_grid_path is not None else "- bathymetry grid source: `n/a`",
         f"- bathymetry manifest: `{bathymetry_manifest_path}`" if bathymetry_manifest_path is not None else "- bathymetry manifest: `n/a`",
-        "- estimator: observe-only sequence matcher with gravity always enabled",
+        f"- magnetic grid source: `{magnetic_grid_path}`" if magnetic_grid_path is not None else "- magnetic grid source: `n/a`",
+        f"- magnetic manifest: `{magnetic_manifest_path}`" if magnetic_manifest_path is not None else "- magnetic manifest: `n/a`",
+        f"- current-field grid source: `{current_field_grid_path}`" if current_field_grid_path is not None else "- current-field grid source: `n/a`",
+        f"- current-field manifest: `{current_manifest_path}`" if current_manifest_path is not None else "- current-field manifest: `n/a`",
+        f"- tide config: `{tide_config_path}`" if tide_config_path is not None else "- tide config: `n/a`",
+        "- estimator: observe-only sequence matcher with gravity mandatory and other channels additive",
         "- live INS path unchanged",
         f"- sample period: `{dt_s:.1f} s`",
         f"- initial position offset NED [m]: `{list(initial_position_offset_ned_m)}`",
@@ -680,6 +802,10 @@ def _write_report(
         f"- center_prior_std_m: `{profile['center_prior_std_m']}`",
         f"- bathymetry_meas_std_m: `{profile['bathymetry_meas_std_m']}`",
         f"- bathymetry_weight: `{profile['bathymetry_weight']}`",
+        f"- bathymetry_gradient_meas_std_m_per_m: `{profile.get('bathymetry_gradient_meas_std_m_per_m', 'default')}`",
+        f"- bathymetry_rugosity_meas_std_m: `{profile.get('bathymetry_rugosity_meas_std_m', 'default')}`",
+        f"- magnetic_meas_std_nt: `{profile.get('magnetic_meas_std_nt', 'default')}`",
+        f"- magnetic_gradient_meas_std_nt_per_m: `{profile.get('magnetic_gradient_meas_std_nt_per_m', 'default')}`",
         f"- map_match_every_steps: `{profile['map_match_every_steps']}`",
         "",
         "## Median Results Across Seeds",
@@ -709,8 +835,8 @@ def _write_report(
                 "",
                 "## Sequence Ambiguity Summary",
                 "",
-                "| Mode | Informative frac | Edge-clipped frac | Prior-dominated frac | Flat-signature frac | Expanded-grid frac | Median edge mass | Median support radius frac | Median gravity info ratio |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Mode | Informative frac | Edge-clipped frac | Prior-dominated frac | Flat-signature frac | Expanded-grid frac | Median edge mass | Median support radius frac | Median gravity info ratio | Median bathy info ratio | Median magnetic info ratio |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for label in ordered_labels:
@@ -725,17 +851,19 @@ def _write_report(
                 f"{median(label, 'ambiguity_expanded_grid_fraction'):.3f} | "
                 f"{median(label, 'ambiguity_median_edge_mass_fraction'):.3f} | "
                 f"{median(label, 'ambiguity_median_support_radius_fraction'):.3f} | "
-                f"{median(label, 'ambiguity_median_gravity_information_ratio'):.3f} |"
+                f"{median(label, 'ambiguity_median_gravity_information_ratio'):.3f} | "
+                f"{median(label, 'ambiguity_median_bathymetry_information_ratio'):.3f} | "
+                f"{median(label, 'ambiguity_median_magnetic_information_ratio'):.3f} |"
             )
-    if "photonic_gravity_bathymetry_lag" in by_label:
+    if "photonic_gravity_tide_acoustic_magnetic_current" in by_label:
         lines.extend(
             [
                 "",
-                "## Lag-Smoother Result",
+                "## Product Output Result",
                 "",
-                f"- median lag-smoothed RMSE: `{median('photonic_gravity_bathymetry_lag', 'lag_horizontal_rmse_m'):.3f} m`",
-                f"- median lag-smoothed CEP95: `{median('photonic_gravity_bathymetry_lag', 'lag_cep95_m'):.3f} m`",
-                f"- lag-smoothed validated: `{lag_validated}`",
+                f"- final multi-modal reported RMSE: `{median('photonic_gravity_tide_acoustic_magnetic_current', 'earth_signature_horizontal_rmse_m'):.3f} m`",
+                f"- final multi-modal reported CEP95: `{median('photonic_gravity_tide_acoustic_magnetic_current', 'earth_signature_cep95_m'):.3f} m`",
+                f"- lag-smoothed output validated: `{lag_validated}`",
             ]
         )
     if any(row.get("search_center_accepted_count") is not None for row in rows):
@@ -802,12 +930,15 @@ def _write_report(
             "",
             "## Conclusion",
             "",
-            f"- photonic gravity beats live INS on median RMSE: `{median('photonic_gravity', 'sequence_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
-            f"- photonic gravity plus bathymetry beats photonic gravity on median RMSE: `{median('photonic_gravity_bathymetry', 'sequence_horizontal_rmse_m') < median('photonic_gravity', 'sequence_horizontal_rmse_m')}`",
-            f"- reported output beats live INS on median RMSE: `{median('photonic_gravity_bathymetry_lag', 'earth_signature_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
-            f"- reported output beats live INS on median CEP95: `{median('photonic_gravity_bathymetry_lag', 'earth_signature_cep95_m') < median('live_ins', 'ins_cep95_m')}`",
-            "- gravity remains the primary discriminator because the photonic-gravity path is compared directly against live INS before bathymetry is added.",
-            "- bathymetry is treated as supporting passive context, not as a replacement for the gravity signature.",
+            f"- photonic gravity baseline beats live INS on median RMSE: `{median('photonic_gravity_baseline', 'earth_signature_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
+            f"- tide/datum correction improves over the gravity baseline on median RMSE: `{median('photonic_gravity_tide', 'earth_signature_horizontal_rmse_m') < median('photonic_gravity_baseline', 'earth_signature_horizontal_rmse_m')}`",
+            f"- acoustic terrain improves over tide-only on median RMSE: `{median('photonic_gravity_tide_acoustic', 'earth_signature_horizontal_rmse_m') < median('photonic_gravity_tide', 'earth_signature_horizontal_rmse_m')}`",
+            f"- scalar magnetic improves over tide+acoustic on median RMSE: `{median('photonic_gravity_tide_acoustic_magnetic', 'earth_signature_horizontal_rmse_m') < median('photonic_gravity_tide_acoustic', 'earth_signature_horizontal_rmse_m')}`",
+            f"- current-aware prior improves over tide+acoustic+magnetic on median RMSE: `{median('photonic_gravity_tide_acoustic_magnetic_current', 'earth_signature_horizontal_rmse_m') < median('photonic_gravity_tide_acoustic_magnetic', 'earth_signature_horizontal_rmse_m')}`",
+            f"- final reported output beats live INS on median RMSE: `{median('photonic_gravity_tide_acoustic_magnetic_current', 'earth_signature_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
+            f"- final reported output beats live INS on median CEP95: `{median('photonic_gravity_tide_acoustic_magnetic_current', 'earth_signature_cep95_m') < median('live_ins', 'ins_cep95_m')}`",
+            "- gravity remains mandatory and the additional channels are additive disambiguators or process corrections.",
+            "- tide is treated as correction hygiene, not as a standalone localization signature.",
             "- the recommended demo output is selected adaptively: lag when confidence is high, sequence when lag is too ambiguous, otherwise live INS.",
             "",
         ]
@@ -817,7 +948,9 @@ def _write_report(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the Norwegian maritime photonic demo.")
+    parser = argparse.ArgumentParser(
+        description="Run the Norway-first multi-modal Earth-signature demo."
+    )
     parser.add_argument(
         "--demo-pack-manifest",
         default=str(DEFAULT_DEMO_PACK),
@@ -835,7 +968,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--velocity-config", default=str(DEFAULT_VELOCITY_CONFIG))
     parser.add_argument("--gradiometer-config", default=str(DEFAULT_GRADIOMETER_CONFIG))
     parser.add_argument("--bathymetry-config", default=str(DEFAULT_BATHY_SENSOR_CONFIG))
+    parser.add_argument("--magnetometer-config", default=str(DEFAULT_MAGNETOMETER_CONFIG))
+    parser.add_argument(
+        "--current-profile-config",
+        default=str(DEFAULT_CURRENT_PROFILE_CONFIG),
+    )
+    parser.add_argument(
+        "--tide-config",
+        default=None,
+        help=(
+            "Optional tide/datum correction config. Defaults to the demo-pack path "
+            "when present, else the tracked Norway tide config."
+        ),
+    )
     parser.add_argument("--gravity-map", default=str(DEFAULT_GRAVITY_MAP))
+    parser.add_argument(
+        "--magnetic-manifest",
+        default=None,
+        help="Optional magnetic-manifest override when the demo pack does not supply one.",
+    )
+    parser.add_argument(
+        "--current-manifest",
+        default=None,
+        help="Optional current-field manifest override when the demo pack does not supply one.",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 777])
     parser.add_argument("--dt-s", type=float, default=2.0)
@@ -862,6 +1018,13 @@ def main() -> int:
     gravity_manifest_path: Path | None = None
     bathymetry_grid_path: Path | None = None
     bathymetry_manifest_path: Path | None = None
+    magnetic_map = None
+    magnetic_grid_path: Path | None = None
+    magnetic_manifest_path: Path | None = None
+    current_field = None
+    current_field_grid_path: Path | None = None
+    current_manifest_path: Path | None = None
+    tide_config_path: Path | None = None
     if demo_pack_path.exists():
         demo_pack_assets = _load_demo_pack_assets(demo_pack_path)
         scenario_path = demo_pack_assets.scenario_path
@@ -872,6 +1035,13 @@ def main() -> int:
         gravity_manifest_path = demo_pack_assets.gravity_manifest_path
         bathymetry_grid_path = demo_pack_assets.bathymetry_grid_path
         bathymetry_manifest_path = demo_pack_assets.bathymetry_manifest_path
+        magnetic_map = demo_pack_assets.magnetic_grid
+        magnetic_grid_path = demo_pack_assets.magnetic_grid_path
+        magnetic_manifest_path = demo_pack_assets.magnetic_manifest_path
+        current_field = demo_pack_assets.current_field
+        current_field_grid_path = demo_pack_assets.current_field_grid_path
+        current_manifest_path = demo_pack_assets.current_manifest_path
+        tide_config_path = demo_pack_assets.tide_config_path
     else:
         scenario_path = Path(args.scenario).expanduser().resolve()
         profile_path = Path(args.sequence_profile).expanduser().resolve()
@@ -883,6 +1053,28 @@ def main() -> int:
                 project_root=PROJECT_ROOT,
             )
         )
+    if args.magnetic_manifest:
+        (
+            magnetic_map,
+            _,
+            magnetic_grid_path,
+            magnetic_manifest_path,
+        ) = load_magnetic_grid_from_manifest(
+            Path(args.magnetic_manifest).expanduser().resolve()
+        )
+    if args.current_manifest:
+        (
+            current_field,
+            _,
+            current_field_grid_path,
+            current_manifest_path,
+        ) = load_current_field_from_manifest(
+            Path(args.current_manifest).expanduser().resolve()
+        )
+    if args.tide_config:
+        tide_config_path = Path(args.tide_config).expanduser().resolve()
+    elif tide_config_path is None:
+        tide_config_path = DEFAULT_TIDE_CONFIG.resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     initial_position_offset_ned_m = tuple(float(x) for x in args.initial_position_offset_ned_m)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -897,6 +1089,15 @@ def main() -> int:
     velocity_spec = _load_spec(Path(args.velocity_config).expanduser().resolve(), VelocityAidSpec)
     gradiometer_spec = _load_spec(Path(args.gradiometer_config).expanduser().resolve(), GravityGradiometerSpec)
     bathymetry_spec = _load_spec(Path(args.bathymetry_config).expanduser().resolve(), BathymetrySensorSpec)
+    magnetometer_spec = _load_spec(
+        Path(args.magnetometer_config).expanduser().resolve(),
+        MagnetometerSensorSpec,
+    )
+    current_profile_spec = _load_spec(
+        Path(args.current_profile_config).expanduser().resolve(),
+        CurrentProfileSensorSpec,
+    )
+    tide_correction_spec = _load_optional_spec(tide_config_path, TideCorrectionSpec)
 
     rows: list[dict[str, Any]] = []
     photonic_rows: list[dict[str, Any]] = []
@@ -906,11 +1107,90 @@ def main() -> int:
 
     for seed in [int(s) for s in args.seeds]:
         cases = [
-            ("live_ins", dict(disable_map_match=True, gravimeter_spec=None, photonic_spec=None, use_bathymetry=False, use_lag_smoother=False)),
-            ("surrogate_gravity", dict(disable_map_match=False, gravimeter_spec=gravimeter_spec, photonic_spec=None, use_bathymetry=False, use_lag_smoother=False)),
-            ("photonic_gravity", dict(disable_map_match=False, gravimeter_spec=None, photonic_spec=photonic_spec, use_bathymetry=False, use_lag_smoother=False)),
-            ("photonic_gravity_bathymetry", dict(disable_map_match=False, gravimeter_spec=None, photonic_spec=photonic_spec, use_bathymetry=True, use_lag_smoother=False)),
-            ("photonic_gravity_bathymetry_lag", dict(disable_map_match=False, gravimeter_spec=None, photonic_spec=photonic_spec, use_bathymetry=True, use_lag_smoother=True)),
+            (
+                "live_ins",
+                dict(
+                    disable_map_match=True,
+                    gravimeter_spec=None,
+                    photonic_spec=None,
+                    use_tide_correction=False,
+                    use_bathymetry=False,
+                    use_acoustic_terrain=False,
+                    use_magnetics=False,
+                    use_current_correction=False,
+                    use_lag_smoother=False,
+                ),
+            ),
+            (
+                "photonic_gravity_baseline",
+                dict(
+                    disable_map_match=False,
+                    gravimeter_spec=None,
+                    photonic_spec=photonic_spec,
+                    use_tide_correction=False,
+                    use_bathymetry=False,
+                    use_acoustic_terrain=False,
+                    use_magnetics=False,
+                    use_current_correction=False,
+                    use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                ),
+            ),
+            (
+                "photonic_gravity_tide",
+                dict(
+                    disable_map_match=False,
+                    gravimeter_spec=None,
+                    photonic_spec=photonic_spec,
+                    use_tide_correction=True,
+                    use_bathymetry=False,
+                    use_acoustic_terrain=False,
+                    use_magnetics=False,
+                    use_current_correction=False,
+                    use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                ),
+            ),
+            (
+                "photonic_gravity_tide_acoustic",
+                dict(
+                    disable_map_match=False,
+                    gravimeter_spec=None,
+                    photonic_spec=photonic_spec,
+                    use_tide_correction=True,
+                    use_bathymetry=True,
+                    use_acoustic_terrain=True,
+                    use_magnetics=False,
+                    use_current_correction=False,
+                    use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                ),
+            ),
+            (
+                "photonic_gravity_tide_acoustic_magnetic",
+                dict(
+                    disable_map_match=False,
+                    gravimeter_spec=None,
+                    photonic_spec=photonic_spec,
+                    use_tide_correction=True,
+                    use_bathymetry=True,
+                    use_acoustic_terrain=True,
+                    use_magnetics=True,
+                    use_current_correction=False,
+                    use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                ),
+            ),
+            (
+                "photonic_gravity_tide_acoustic_magnetic_current",
+                dict(
+                    disable_map_match=False,
+                    gravimeter_spec=None,
+                    photonic_spec=photonic_spec,
+                    use_tide_correction=True,
+                    use_bathymetry=True,
+                    use_acoustic_terrain=True,
+                    use_magnetics=True,
+                    use_current_correction=True,
+                    use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                ),
+            ),
         ]
         for label, cfg in cases:
             result, metrics = _run_case(
@@ -918,6 +1198,7 @@ def main() -> int:
                 scenario=scenario,
                 gravity_map=gravity_map,
                 bathymetry_map=bathymetry_map,
+                magnetic_map=magnetic_map,
                 imu_spec=imu_spec,
                 gravimeter_spec=cfg["gravimeter_spec"],
                 photonic_spec=cfg["photonic_spec"],
@@ -925,10 +1206,18 @@ def main() -> int:
                 velocity_spec=velocity_spec,
                 gradiometer_spec=gradiometer_spec,
                 bathymetry_spec=bathymetry_spec,
+                magnetometer_spec=magnetometer_spec,
+                current_profile_spec=current_profile_spec,
+                current_field=current_field,
+                tide_correction_spec=tide_correction_spec,
                 profile=profile,
                 seed=seed,
                 output_dir=output_dir,
                 use_bathymetry=cfg["use_bathymetry"],
+                use_acoustic_terrain=cfg["use_acoustic_terrain"],
+                use_magnetics=cfg["use_magnetics"],
+                use_current_correction=cfg["use_current_correction"],
+                use_tide_correction=cfg["use_tide_correction"],
                 disable_map_match=cfg["disable_map_match"],
                 use_lag_smoother=cfg["use_lag_smoother"],
                 dt_s=float(args.dt_s),
@@ -967,11 +1256,15 @@ def main() -> int:
                 photonic_summary["label"] = label
                 photonic_summary["seed"] = seed
                 photonic_rows.append(photonic_summary)
+            row["has_tide_correction"] = bool(cfg["use_tide_correction"] and tide_correction_spec is not None)
+            row["has_bathymetry_map"] = bool(cfg["use_bathymetry"] and bathymetry_map is not None)
+            row["has_magnetic_map"] = bool(cfg["use_magnetics"] and magnetic_map is not None)
+            row["has_current_field"] = bool(cfg["use_current_correction"] and current_field is not None)
             rows.append(row)
-            if label == "photonic_gravity_bathymetry" and representative_result is None:
+            if label == "photonic_gravity_tide_acoustic" and representative_result is None:
                 representative_result = result
                 representative_label = label
-            if label == "photonic_gravity_bathymetry_lag":
+            if label == "photonic_gravity_tide_acoustic_magnetic_current":
                 lag_hmi = row["lag_hmi_horizontal"]
                 lag_validated = lag_validated and (lag_hmi is not None) and (float(lag_hmi) == 0.0)
 
@@ -1003,6 +1296,11 @@ def main() -> int:
         gravity_manifest_path=gravity_manifest_path,
         bathymetry_grid_path=bathymetry_grid_path,
         bathymetry_manifest_path=bathymetry_manifest_path,
+        magnetic_grid_path=magnetic_grid_path,
+        magnetic_manifest_path=magnetic_manifest_path,
+        current_field_grid_path=current_field_grid_path,
+        current_manifest_path=current_manifest_path,
+        tide_config_path=tide_config_path,
         profile_path=profile_path,
         profile=profile,
         rows=rows,

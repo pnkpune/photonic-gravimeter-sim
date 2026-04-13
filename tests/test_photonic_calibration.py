@@ -114,12 +114,13 @@ def test_run_maritime_demo_smoke_for_frozen_demo_packs(tmp_path: Path) -> None:
 
         assert {row["label"] for row in rows} == {
             "live_ins",
-            "surrogate_gravity",
-            "photonic_gravity",
-            "photonic_gravity_bathymetry",
-            "photonic_gravity_bathymetry_lag",
+            "photonic_gravity_baseline",
+            "photonic_gravity_tide",
+            "photonic_gravity_tide_acoustic",
+            "photonic_gravity_tide_acoustic_magnetic",
+            "photonic_gravity_tide_acoustic_magnetic_current",
         }
         assert all("reported_output_mode" in row for row in rows)
         assert all("reported_output_reason" in row for row in rows)
-        assert len(photonic_rows) == 3
+        assert len(photonic_rows) == 5
         assert region_name in report_text

@@ -391,9 +391,11 @@ def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> N
         anchor,
         used_gradient,
         used_bathymetry,
+        used_magnetics,
         pred_g_mean,
         pred_g_std,
         pred_bath,
+        pred_mag,
         ambiguity,
     ) = matcher._estimate_for_window_index(
         window,
@@ -409,9 +411,11 @@ def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> N
     assert anchor.covariance_ned_m2.shape == (3, 3)
     assert used_gradient is False
     assert used_bathymetry is False
+    assert used_magnetics is False
     assert np.isfinite(pred_g_mean)
     assert np.isfinite(pred_g_std)
     assert pred_bath is None
+    assert pred_mag is None
     assert ambiguity.dominant_failure_mode in {
         "informative",
         "edge_clipped",

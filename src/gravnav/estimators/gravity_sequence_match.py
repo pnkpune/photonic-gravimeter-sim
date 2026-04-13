@@ -122,6 +122,8 @@ class SequenceAmbiguityDiagnostics:
     gravity_information_ratio: float
     bathymetry_predicted_spread_m: Optional[float]
     bathymetry_information_ratio: Optional[float]
+    magnetic_predicted_spread_nt: Optional[float]
+    magnetic_information_ratio: Optional[float]
     dominant_failure_mode: str
     grid_mode: str
     grid_half_span_m: FloatArray
@@ -156,6 +158,22 @@ class GravitySequenceMatcherSpec:
         Optional seabed-clearance / water-depth measurement standard deviation.
     bathymetry_weight : float, default=1.0
         Relative weight applied to the bathymetry log-likelihood term.
+    bathymetry_gradient_meas_std_m_per_m : float or None, default=None
+        Optional along-track bathymetry-gradient measurement standard deviation.
+    bathymetry_gradient_weight : float, default=1.0
+        Relative weight applied to the bathymetry-gradient likelihood term.
+    bathymetry_rugosity_meas_std_m : float or None, default=None
+        Optional local bathymetry-rugosity measurement standard deviation.
+    bathymetry_rugosity_weight : float, default=1.0
+        Relative weight applied to the bathymetry-rugosity likelihood term.
+    magnetic_meas_std_nt : float or None, default=None
+        Optional scalar total-field magnetic measurement standard deviation [nT].
+    magnetic_weight : float, default=1.0
+        Relative weight applied to the magnetic total-field likelihood term.
+    magnetic_gradient_meas_std_nt_per_m : float or None, default=None
+        Optional along-track magnetic-gradient measurement standard deviation.
+    magnetic_gradient_weight : float, default=1.0
+        Relative weight applied to the magnetic-gradient likelihood term.
     height_std_m : float, default=2
         Vertical covariance floor used when packaging delayed estimates.
     adaptive_grid_enabled : bool, default=False
@@ -177,6 +195,14 @@ class GravitySequenceMatcherSpec:
     gradient_meas_std_per_s2: Optional[float] = None
     bathymetry_meas_std_m: Optional[float] = None
     bathymetry_weight: float = 1.0
+    bathymetry_gradient_meas_std_m_per_m: Optional[float] = None
+    bathymetry_gradient_weight: float = 1.0
+    bathymetry_rugosity_meas_std_m: Optional[float] = None
+    bathymetry_rugosity_weight: float = 1.0
+    magnetic_meas_std_nt: Optional[float] = None
+    magnetic_weight: float = 1.0
+    magnetic_gradient_meas_std_nt_per_m: Optional[float] = None
+    magnetic_gradient_weight: float = 1.0
     height_std_m: float = 2.0
     adaptive_grid_enabled: bool = False
     expanded_grid_half_span_m: Optional[ArrayLike | float] = None
@@ -192,6 +218,7 @@ class GravitySequenceMatcherSpec:
     ambiguity_max_peak_probability: float = 0.85
     ambiguity_min_gravity_information_ratio: float = 0.50
     ambiguity_min_bathymetry_information_ratio: float = 0.50
+    ambiguity_min_magnetic_information_ratio: float = 0.50
     name: str = "gravity_sequence_match"
 
     def __post_init__(self) -> None:
@@ -233,6 +260,42 @@ class GravitySequenceMatcherSpec:
         self.bathymetry_weight = _positive_scalar(
             self.bathymetry_weight,
             name="bathymetry_weight",
+        )
+        if self.bathymetry_gradient_meas_std_m_per_m is not None:
+            self.bathymetry_gradient_meas_std_m_per_m = _positive_scalar(
+                self.bathymetry_gradient_meas_std_m_per_m,
+                name="bathymetry_gradient_meas_std_m_per_m",
+            )
+        self.bathymetry_gradient_weight = _positive_scalar(
+            self.bathymetry_gradient_weight,
+            name="bathymetry_gradient_weight",
+        )
+        if self.bathymetry_rugosity_meas_std_m is not None:
+            self.bathymetry_rugosity_meas_std_m = _positive_scalar(
+                self.bathymetry_rugosity_meas_std_m,
+                name="bathymetry_rugosity_meas_std_m",
+            )
+        self.bathymetry_rugosity_weight = _positive_scalar(
+            self.bathymetry_rugosity_weight,
+            name="bathymetry_rugosity_weight",
+        )
+        if self.magnetic_meas_std_nt is not None:
+            self.magnetic_meas_std_nt = _positive_scalar(
+                self.magnetic_meas_std_nt,
+                name="magnetic_meas_std_nt",
+            )
+        self.magnetic_weight = _positive_scalar(
+            self.magnetic_weight,
+            name="magnetic_weight",
+        )
+        if self.magnetic_gradient_meas_std_nt_per_m is not None:
+            self.magnetic_gradient_meas_std_nt_per_m = _positive_scalar(
+                self.magnetic_gradient_meas_std_nt_per_m,
+                name="magnetic_gradient_meas_std_nt_per_m",
+            )
+        self.magnetic_gradient_weight = _positive_scalar(
+            self.magnetic_gradient_weight,
+            name="magnetic_gradient_weight",
         )
         self.height_std_m = _positive_scalar(self.height_std_m, name="height_std_m")
         self.adaptive_grid_enabled = bool(self.adaptive_grid_enabled)
@@ -286,6 +349,9 @@ class GravitySequenceMatcherSpec:
         self.ambiguity_min_bathymetry_information_ratio = float(
             self.ambiguity_min_bathymetry_information_ratio
         )
+        self.ambiguity_min_magnetic_information_ratio = float(
+            self.ambiguity_min_magnetic_information_ratio
+        )
         if not (0.0 <= self.adaptive_expand_edge_mass_fraction <= 1.0):
             raise ValueError("adaptive_expand_edge_mass_fraction must be in [0, 1].")
         if not (0.0 <= self.adaptive_contract_edge_mass_fraction <= 1.0):
@@ -324,6 +390,10 @@ class GravitySequenceMatcherSpec:
             raise ValueError(
                 "ambiguity_min_bathymetry_information_ratio must be nonnegative."
             )
+        if self.ambiguity_min_magnetic_information_ratio < 0.0:
+            raise ValueError(
+                "ambiguity_min_magnetic_information_ratio must be nonnegative."
+            )
 
 
 @dataclass
@@ -340,6 +410,7 @@ class SequenceMatchEstimate:
     predicted_disturbance_mps2: Optional[float] = None
     marginal_peak_probability: Optional[float] = None
     predicted_bathymetry_m: Optional[float] = None
+    predicted_magnetic_total_nt: Optional[float] = None
 
     @property
     def geodetic_vector(self) -> FloatArray:
@@ -400,6 +471,7 @@ class SequenceMatchUpdateResult:
     predicted_disturbance_std_mps2: float
     used_gradient: bool
     used_bathymetry: bool
+    used_magnetics: bool
     viterbi_log_score: float
     viterbi_offset_ned_m: FloatArray
     posterior_mean_offset_ned_m: FloatArray
@@ -425,13 +497,19 @@ class _SequenceObservation:
     log_emission: FloatArray
     predicted_disturbance_mps2: FloatArray
     predicted_bathymetry_m: Optional[FloatArray]
+    predicted_bathymetry_gradient_m_per_m: Optional[FloatArray]
+    predicted_bathymetry_rugosity_m: Optional[FloatArray]
+    predicted_magnetic_total_nt: Optional[FloatArray]
+    predicted_magnetic_gradient_nt_per_m: Optional[FloatArray]
     gravity_meas_std_mps2: float
     bathymetry_meas_std_m: Optional[float]
+    magnetic_meas_std_nt: Optional[float]
     grid_mode: str
     grid_half_span_m: FloatArray
     grid_spacing_m: FloatArray
     used_gradient: bool
     used_bathymetry: bool
+    used_magnetics: bool
 
 
 class GravitySequenceMatcher:
@@ -449,10 +527,12 @@ class GravitySequenceMatcher:
         map_model: Any,
         *,
         bathymetry_map: Any | None = None,
+        magnetic_map: Any | None = None,
     ) -> None:
         self.spec = spec
         self.map_model = map_model
         self.bathymetry_map = bathymetry_map
+        self.magnetic_map = magnetic_map
         self._grid_catalog = {
             "nominal": {
                 "half_span_m": np.asarray(self.spec.grid_half_span_m, dtype=np.float64),
@@ -628,6 +708,89 @@ class GravitySequenceMatcher:
         clearance = water_depth - platform_depth
         return np.maximum(clearance, 0.0).astype(np.float64)
 
+    def _predict_bathymetry_alongtrack_gradient_m_per_m(
+        self,
+        lat_deg: FloatArray,
+        lon_deg: FloatArray,
+        *,
+        track_unit_ne: Optional[FloatArray],
+        reference_surface_height_m: float,
+    ) -> Optional[FloatArray]:
+        if self.bathymetry_map is None or track_unit_ne is None:
+            return None
+        if not hasattr(self.bathymetry_map, "evaluate_water_depth_gradient_m_per_m"):
+            return None
+        grad = np.asarray(
+            self.bathymetry_map.evaluate_water_depth_gradient_m_per_m(
+                lat_deg,
+                lon_deg,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        if grad.ndim == 1:
+            grad = grad.reshape(1, 2)
+        return np.sum(grad * track_unit_ne[None, :], axis=1).astype(np.float64)
+
+    def _predict_bathymetry_rugosity_m(
+        self,
+        lat_deg: FloatArray,
+        lon_deg: FloatArray,
+        *,
+        reference_surface_height_m: float,
+    ) -> Optional[FloatArray]:
+        if self.bathymetry_map is None or not hasattr(self.bathymetry_map, "evaluate_rugosity_m"):
+            return None
+        return np.asarray(
+            self.bathymetry_map.evaluate_rugosity_m(
+                lat_deg,
+                lon_deg,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+
+    def _predict_magnetic_total_nt(
+        self,
+        lat_deg: FloatArray,
+        lon_deg: FloatArray,
+    ) -> Optional[FloatArray]:
+        if self.magnetic_map is None:
+            return None
+        if not hasattr(self.magnetic_map, "evaluate_total_field_nt"):
+            raise AttributeError(
+                "magnetic_map must define evaluate_total_field_nt(lat_deg, lon_deg, ...)."
+            )
+        return np.asarray(
+            self.magnetic_map.evaluate_total_field_nt(
+                lat_deg,
+                lon_deg,
+            ),
+            dtype=np.float64,
+        )
+
+    def _predict_magnetic_alongtrack_gradient_nt_per_m(
+        self,
+        lat_deg: FloatArray,
+        lon_deg: FloatArray,
+        *,
+        track_unit_ne: Optional[FloatArray],
+    ) -> Optional[FloatArray]:
+        if self.magnetic_map is None or track_unit_ne is None:
+            return None
+        if not hasattr(self.magnetic_map, "evaluate_horizontal_gradient_nt_per_m"):
+            return None
+        grad = np.asarray(
+            self.magnetic_map.evaluate_horizontal_gradient_nt_per_m(
+                lat_deg,
+                lon_deg,
+            ),
+            dtype=np.float64,
+        )
+        if grad.ndim == 1:
+            grad = grad.reshape(1, 2)
+        return np.sum(grad * track_unit_ne[None, :], axis=1).astype(np.float64)
+
     def _ambiguity_diagnostics(
         self,
         obs: _SequenceObservation,
@@ -708,6 +871,14 @@ class GravitySequenceMatcher:
             bathy_spread = float(np.std(bathy_valid)) if bathy_valid.size > 1 else 0.0
             bathy_information_ratio = bathy_spread / max(obs.bathymetry_meas_std_m, 1.0e-12)
 
+        magnetic_spread: Optional[float] = None
+        magnetic_information_ratio: Optional[float] = None
+        if obs.predicted_magnetic_total_nt is not None and obs.magnetic_meas_std_nt is not None:
+            magnetic_values = np.asarray(obs.predicted_magnetic_total_nt, dtype=np.float64)
+            magnetic_valid = magnetic_values[np.isfinite(magnetic_values)]
+            magnetic_spread = float(np.std(magnetic_valid)) if magnetic_valid.size > 1 else 0.0
+            magnetic_information_ratio = magnetic_spread / max(obs.magnetic_meas_std_nt, 1.0e-12)
+
         grid_saturated_north = bool(
             float(np.sum(w[north_edge])) >= 0.5 * self.spec.ambiguity_edge_mass_fraction
             or support_radius_fraction_n >= self.spec.ambiguity_support_radius_fraction
@@ -726,6 +897,11 @@ class GravitySequenceMatcher:
             and bathy_information_ratio is not None
             and bathy_information_ratio >= self.spec.ambiguity_min_bathymetry_information_ratio
         )
+        magnetic_informative = (
+            obs.used_magnetics
+            and magnetic_information_ratio is not None
+            and magnetic_information_ratio >= self.spec.ambiguity_min_magnetic_information_ratio
+        )
 
         if edge_mass_fraction >= self.spec.ambiguity_edge_mass_fraction or grid_saturated_any:
             failure_mode = "edge_clipped"
@@ -736,7 +912,7 @@ class GravitySequenceMatcher:
             and bathy_information_ratio < self.spec.ambiguity_min_bathymetry_information_ratio
         ):
             failure_mode = "bathymetry_noninformative"
-        elif not (gravity_informative or bathymetry_informative):
+        elif not (gravity_informative or bathymetry_informative or magnetic_informative):
             failure_mode = "flat_signature"
         elif (
             ess_fraction < self.spec.ambiguity_min_posterior_ess_fraction
@@ -766,6 +942,8 @@ class GravitySequenceMatcher:
             gravity_information_ratio=gravity_information_ratio,
             bathymetry_predicted_spread_m=bathy_spread,
             bathymetry_information_ratio=bathy_information_ratio,
+            magnetic_predicted_spread_nt=magnetic_spread,
+            magnetic_information_ratio=magnetic_information_ratio,
             dominant_failure_mode=failure_mode,
             grid_mode=str(obs.grid_mode),
             grid_half_span_m=np.asarray(obs.grid_half_span_m, dtype=np.float64),
@@ -810,11 +988,20 @@ class GravitySequenceMatcher:
         gravity_meas_std_mps2: float,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
         search_center_offset_ned_m: Optional[ArrayLike] = None,
-        measured_gradient_per_s2: Optional[ArrayLike],
-        gradient_meas_std_per_s2: Optional[float],
-        measured_bathymetry_m: Optional[float],
-        bathymetry_meas_std_m: Optional[float],
-        depth_measurement: Optional[DepthMeasurement],
+        current_track_unit_ned: Optional[ArrayLike] = None,
+        measured_gradient_per_s2: Optional[ArrayLike] = None,
+        gradient_meas_std_per_s2: Optional[float] = None,
+        measured_bathymetry_m: Optional[float] = None,
+        bathymetry_meas_std_m: Optional[float] = None,
+        measured_bathymetry_gradient_m_per_m: Optional[float] = None,
+        bathymetry_gradient_meas_std_m_per_m: Optional[float] = None,
+        measured_bathymetry_rugosity_m: Optional[float] = None,
+        bathymetry_rugosity_meas_std_m: Optional[float] = None,
+        measured_magnetic_total_nt: Optional[float] = None,
+        magnetic_meas_std_nt: Optional[float] = None,
+        measured_magnetic_gradient_nt_per_m: Optional[float] = None,
+        magnetic_gradient_meas_std_nt_per_m: Optional[float] = None,
+        depth_measurement: Optional[DepthMeasurement] = None,
         reference_surface_height_m: float,
         time_s: float,
     ) -> _SequenceObservation:
@@ -833,6 +1020,12 @@ class GravitySequenceMatcher:
         )
         center_offset[2] = 0.0
         candidate_offsets = local_offsets + center_offset[None, :]
+        track_unit_ne: Optional[FloatArray] = None
+        if current_track_unit_ned is not None:
+            track_vec = _axis3(current_track_unit_ned, name="current_track_unit_ned")
+            track_norm = float(np.linalg.norm(track_vec[:2]))
+            if track_norm > 1.0e-9:
+                track_unit_ne = (track_vec[:2] / track_norm).astype(np.float64)
         lat_c = float(state.nominal.lat_rad)
         lon_c = float(wrap_angle_pi(state.nominal.lon_rad))
         h_c = self._center_height_from_measurements(
@@ -917,6 +1110,17 @@ class GravitySequenceMatcher:
             depth_measurement=depth_measurement,
             reference_surface_height_m=reference_surface_height_m,
         )
+        pred_bathy_gradient = self._predict_bathymetry_alongtrack_gradient_m_per_m(
+            lat_deg,
+            lon_deg,
+            track_unit_ne=track_unit_ne,
+            reference_surface_height_m=reference_surface_height_m,
+        )
+        pred_bathy_rugosity = self._predict_bathymetry_rugosity_m(
+            lat_deg,
+            lon_deg,
+            reference_surface_height_m=reference_surface_height_m,
+        )
         if measured_bathymetry_m is not None:
             sigma_bathy = (
                 self.spec.bathymetry_meas_std_m
@@ -942,6 +1146,120 @@ class GravitySequenceMatcher:
                 log_emission += self.spec.bathymetry_weight * bathy_log
                 used_bathymetry = True
 
+        if measured_bathymetry_gradient_m_per_m is not None:
+            sigma_bathy_grad = (
+                self.spec.bathymetry_gradient_meas_std_m_per_m
+                if bathymetry_gradient_meas_std_m_per_m is None
+                else float(bathymetry_gradient_meas_std_m_per_m)
+            )
+            if sigma_bathy_grad is None or sigma_bathy_grad <= 0.0:
+                raise ValueError(
+                    "A positive bathymetry-gradient standard deviation is required "
+                    "when measured_bathymetry_gradient_m_per_m is provided."
+                )
+            if pred_bathy_gradient is None:
+                raise ValueError(
+                    "measured_bathymetry_gradient_m_per_m was provided but the "
+                    "matcher cannot predict bathymetry gradients."
+                )
+            valid_mask = np.isfinite(pred_bathy_gradient)
+            if np.any(valid_mask):
+                bathy_grad_log = np.full(log_emission.shape, -1.0e12, dtype=np.float64)
+                bathy_grad_log[valid_mask] = gaussian_log_likelihood_scalar(
+                    float(measured_bathymetry_gradient_m_per_m) - pred_bathy_gradient[valid_mask],
+                    sigma=sigma_bathy_grad,
+                )
+                log_emission += self.spec.bathymetry_gradient_weight * bathy_grad_log
+                used_bathymetry = True
+
+        if measured_bathymetry_rugosity_m is not None:
+            sigma_bathy_rug = (
+                self.spec.bathymetry_rugosity_meas_std_m
+                if bathymetry_rugosity_meas_std_m is None
+                else float(bathymetry_rugosity_meas_std_m)
+            )
+            if sigma_bathy_rug is None or sigma_bathy_rug <= 0.0:
+                raise ValueError(
+                    "A positive bathymetry-rugosity standard deviation is required "
+                    "when measured_bathymetry_rugosity_m is provided."
+                )
+            if pred_bathy_rugosity is None:
+                raise ValueError(
+                    "measured_bathymetry_rugosity_m was provided but the matcher "
+                    "cannot predict bathymetry rugosity."
+                )
+            valid_mask = np.isfinite(pred_bathy_rugosity)
+            if np.any(valid_mask):
+                bathy_rug_log = np.full(log_emission.shape, -1.0e12, dtype=np.float64)
+                bathy_rug_log[valid_mask] = gaussian_log_likelihood_scalar(
+                    float(measured_bathymetry_rugosity_m) - pred_bathy_rugosity[valid_mask],
+                    sigma=sigma_bathy_rug,
+                )
+                log_emission += self.spec.bathymetry_rugosity_weight * bathy_rug_log
+                used_bathymetry = True
+
+        pred_magnetic_total = self._predict_magnetic_total_nt(
+            lat_deg,
+            lon_deg,
+        )
+        pred_magnetic_gradient = self._predict_magnetic_alongtrack_gradient_nt_per_m(
+            lat_deg,
+            lon_deg,
+            track_unit_ne=track_unit_ne,
+        )
+        used_magnetics = False
+        if measured_magnetic_total_nt is not None:
+            sigma_mag = (
+                self.spec.magnetic_meas_std_nt
+                if magnetic_meas_std_nt is None
+                else float(magnetic_meas_std_nt)
+            )
+            if sigma_mag is None or sigma_mag <= 0.0:
+                raise ValueError(
+                    "A positive magnetic standard deviation is required when "
+                    "measured_magnetic_total_nt is provided."
+                )
+            if pred_magnetic_total is None:
+                raise ValueError(
+                    "measured_magnetic_total_nt was provided but the matcher has "
+                    "no magnetic_map."
+                )
+            valid_mask = np.isfinite(pred_magnetic_total)
+            if np.any(valid_mask):
+                mag_log = np.full(log_emission.shape, -1.0e12, dtype=np.float64)
+                mag_log[valid_mask] = gaussian_log_likelihood_scalar(
+                    float(measured_magnetic_total_nt) - pred_magnetic_total[valid_mask],
+                    sigma=sigma_mag,
+                )
+                log_emission += self.spec.magnetic_weight * mag_log
+                used_magnetics = True
+
+        if measured_magnetic_gradient_nt_per_m is not None:
+            sigma_mag_grad = (
+                self.spec.magnetic_gradient_meas_std_nt_per_m
+                if magnetic_gradient_meas_std_nt_per_m is None
+                else float(magnetic_gradient_meas_std_nt_per_m)
+            )
+            if sigma_mag_grad is None or sigma_mag_grad <= 0.0:
+                raise ValueError(
+                    "A positive magnetic-gradient standard deviation is required "
+                    "when measured_magnetic_gradient_nt_per_m is provided."
+                )
+            if pred_magnetic_gradient is None:
+                raise ValueError(
+                    "measured_magnetic_gradient_nt_per_m was provided but the "
+                    "matcher cannot predict magnetic gradients."
+                )
+            valid_mask = np.isfinite(pred_magnetic_gradient)
+            if np.any(valid_mask):
+                mag_grad_log = np.full(log_emission.shape, -1.0e12, dtype=np.float64)
+                mag_grad_log[valid_mask] = gaussian_log_likelihood_scalar(
+                    float(measured_magnetic_gradient_nt_per_m) - pred_magnetic_gradient[valid_mask],
+                    sigma=sigma_mag_grad,
+                )
+                log_emission += self.spec.magnetic_gradient_weight * mag_grad_log
+                used_magnetics = True
+
         obs = _SequenceObservation(
             global_index=self._next_global_index,
             time_s=float(time_s),
@@ -957,6 +1275,18 @@ class GravitySequenceMatcher:
             predicted_bathymetry_m=None
             if pred_bathymetry is None
             else np.asarray(pred_bathymetry, dtype=np.float64),
+            predicted_bathymetry_gradient_m_per_m=None
+            if pred_bathy_gradient is None
+            else np.asarray(pred_bathy_gradient, dtype=np.float64),
+            predicted_bathymetry_rugosity_m=None
+            if pred_bathy_rugosity is None
+            else np.asarray(pred_bathy_rugosity, dtype=np.float64),
+            predicted_magnetic_total_nt=None
+            if pred_magnetic_total is None
+            else np.asarray(pred_magnetic_total, dtype=np.float64),
+            predicted_magnetic_gradient_nt_per_m=None
+            if pred_magnetic_gradient is None
+            else np.asarray(pred_magnetic_gradient, dtype=np.float64),
             gravity_meas_std_mps2=float(gravity_meas_std_mps2),
             bathymetry_meas_std_m=(
                 None
@@ -967,11 +1297,21 @@ class GravitySequenceMatcher:
                     else float(bathymetry_meas_std_m)
                 )
             ),
+            magnetic_meas_std_nt=(
+                None
+                if measured_magnetic_total_nt is None
+                else (
+                    self.spec.magnetic_meas_std_nt
+                    if magnetic_meas_std_nt is None
+                    else float(magnetic_meas_std_nt)
+                )
+            ),
             grid_mode=grid_mode,
             grid_half_span_m=np.asarray(grid_half_span_m, dtype=np.float64),
             grid_spacing_m=np.asarray(grid_spacing_m, dtype=np.float64),
             used_gradient=used_gradient,
             used_bathymetry=used_bathymetry,
+            used_magnetics=used_magnetics,
         )
         local_weights = self._stable_posterior_weights(obs.log_emission, obs)
         self._maybe_update_active_grid_mode(
@@ -1091,8 +1431,10 @@ class GravitySequenceMatcher:
         SequenceAnchorEstimate,
         bool,
         bool,
+        bool,
         float,
         float,
+        Optional[float],
         Optional[float],
         SequenceAmbiguityDiagnostics,
     ]:
@@ -1153,6 +1495,17 @@ class GravitySequenceMatcher:
                     pred_bath_mean = float(
                         np.sum((w_bath / w_bath_sum) * pred_bath[valid_bath])
                     )
+        pred_mag_mean = None
+        if obs.predicted_magnetic_total_nt is not None:
+            pred_mag = np.asarray(obs.predicted_magnetic_total_nt, dtype=np.float64)
+            valid_mag = np.isfinite(pred_mag)
+            if np.any(valid_mag):
+                w_mag = weights[valid_mag]
+                w_mag_sum = float(np.sum(w_mag))
+                if w_mag_sum > 0.0 and np.isfinite(w_mag_sum):
+                    pred_mag_mean = float(
+                        np.sum((w_mag / w_mag_sum) * pred_mag[valid_mag])
+                    )
         mean_offset_ned = np.sum(
             weights[:, None] * obs.candidate_offsets_ned_m,
             axis=0,
@@ -1191,9 +1544,11 @@ class GravitySequenceMatcher:
             anchor,
             bool(obs.used_gradient),
             bool(obs.used_bathymetry),
+            bool(obs.used_magnetics),
             pred_g_mean,
             pred_g_std,
             pred_bath_mean,
+            pred_mag_mean,
             ambiguity,
         )
 
@@ -1211,9 +1566,11 @@ class GravitySequenceMatcher:
             target_anchor,
             used_gradient,
             used_bathymetry,
+            used_magnetics,
             pred_g_mean,
             pred_g_std,
             pred_bath_mean,
+            pred_mag_mean,
             ambiguity,
         ) = self._estimate_for_window_index(
             window,
@@ -1243,6 +1600,7 @@ class GravitySequenceMatcher:
             predicted_disturbance_mps2=float(pred_g_mean),
             marginal_peak_probability=float(target_anchor.marginal_peak_probability),
             predicted_bathymetry_m=pred_bath_mean,
+            predicted_magnetic_total_nt=pred_mag_mean,
         )
 
         return SequenceMatchUpdateResult(
@@ -1258,6 +1616,7 @@ class GravitySequenceMatcher:
             predicted_disturbance_std_mps2=pred_g_std,
             used_gradient=used_gradient,
             used_bathymetry=used_bathymetry,
+            used_magnetics=used_magnetics,
             ambiguity_diagnostics=ambiguity,
             viterbi_log_score=float(delta[-1][best_last]),
             viterbi_offset_ned_m=np.asarray(target_anchor.viterbi_offset_ned_m, dtype=np.float64),
@@ -1275,12 +1634,21 @@ class GravitySequenceMatcher:
         gravity_meas_std_mps2: Optional[float] = None,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
         search_center_offset_ned_m: Optional[ArrayLike] = None,
+        current_track_unit_ned: Optional[ArrayLike] = None,
         depth_measurement: Optional[DepthMeasurement] = None,
         reference_surface_height_m: float = 0.0,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
         gradient_meas_std_per_s2: Optional[float] = None,
         measured_bathymetry_m: Optional[float] = None,
         bathymetry_meas_std_m: Optional[float] = None,
+        measured_bathymetry_gradient_m_per_m: Optional[float] = None,
+        bathymetry_gradient_meas_std_m_per_m: Optional[float] = None,
+        measured_bathymetry_rugosity_m: Optional[float] = None,
+        bathymetry_rugosity_meas_std_m: Optional[float] = None,
+        measured_magnetic_total_nt: Optional[float] = None,
+        magnetic_meas_std_nt: Optional[float] = None,
+        measured_magnetic_gradient_nt_per_m: Optional[float] = None,
+        magnetic_gradient_meas_std_nt_per_m: Optional[float] = None,
         time_s: Optional[float] = None,
     ) -> list[SequenceMatchUpdateResult]:
         """
@@ -1312,10 +1680,19 @@ class GravitySequenceMatcher:
             gravity_meas_std_mps2=sigma_g,
             ins_or_state=state,
             search_center_offset_ned_m=search_center_offset_ned_m,
+            current_track_unit_ned=current_track_unit_ned,
             measured_gradient_per_s2=measured_gradient_per_s2,
             gradient_meas_std_per_s2=gradient_meas_std_per_s2,
             measured_bathymetry_m=measured_bathymetry_m,
             bathymetry_meas_std_m=bathymetry_meas_std_m,
+            measured_bathymetry_gradient_m_per_m=measured_bathymetry_gradient_m_per_m,
+            bathymetry_gradient_meas_std_m_per_m=bathymetry_gradient_meas_std_m_per_m,
+            measured_bathymetry_rugosity_m=measured_bathymetry_rugosity_m,
+            bathymetry_rugosity_meas_std_m=bathymetry_rugosity_meas_std_m,
+            measured_magnetic_total_nt=measured_magnetic_total_nt,
+            magnetic_meas_std_nt=magnetic_meas_std_nt,
+            measured_magnetic_gradient_nt_per_m=measured_magnetic_gradient_nt_per_m,
+            magnetic_gradient_meas_std_nt_per_m=magnetic_gradient_meas_std_nt_per_m,
             depth_measurement=depth_measurement,
             reference_surface_height_m=reference_surface_height_m,
             time_s=obs_time,
@@ -1345,12 +1722,21 @@ class GravitySequenceMatcher:
         gravity_meas_std_mps2: Optional[float] = None,
         ins_or_state: ErrorStateINS | ErrorStateINSState,
         search_center_offset_ned_m: Optional[ArrayLike] = None,
+        current_track_unit_ned: Optional[ArrayLike] = None,
         depth_measurement: Optional[DepthMeasurement] = None,
         reference_surface_height_m: Optional[float] = None,
         measured_gradient_per_s2: Optional[ArrayLike] = None,
         gradient_meas_std_per_s2: Optional[float] = None,
         measured_bathymetry_m: Optional[float] = None,
         bathymetry_meas_std_m: Optional[float] = None,
+        measured_bathymetry_gradient_m_per_m: Optional[float] = None,
+        bathymetry_gradient_meas_std_m_per_m: Optional[float] = None,
+        measured_bathymetry_rugosity_m: Optional[float] = None,
+        bathymetry_rugosity_meas_std_m: Optional[float] = None,
+        measured_magnetic_total_nt: Optional[float] = None,
+        magnetic_meas_std_nt: Optional[float] = None,
+        measured_magnetic_gradient_nt_per_m: Optional[float] = None,
+        magnetic_gradient_meas_std_nt_per_m: Optional[float] = None,
     ) -> list[SequenceMatchUpdateResult]:
         """
         Convenience wrapper for disturbance-gravimeter measurements.
@@ -1370,12 +1756,21 @@ class GravitySequenceMatcher:
             gravity_meas_std_mps2=gravity_meas_std_mps2,
             ins_or_state=ins_or_state,
             search_center_offset_ned_m=search_center_offset_ned_m,
+            current_track_unit_ned=current_track_unit_ned,
             depth_measurement=depth_measurement,
             reference_surface_height_m=href,
             measured_gradient_per_s2=measured_gradient_per_s2,
             gradient_meas_std_per_s2=gradient_meas_std_per_s2,
             measured_bathymetry_m=measured_bathymetry_m,
             bathymetry_meas_std_m=bathymetry_meas_std_m,
+            measured_bathymetry_gradient_m_per_m=measured_bathymetry_gradient_m_per_m,
+            bathymetry_gradient_meas_std_m_per_m=bathymetry_gradient_meas_std_m_per_m,
+            measured_bathymetry_rugosity_m=measured_bathymetry_rugosity_m,
+            bathymetry_rugosity_meas_std_m=bathymetry_rugosity_meas_std_m,
+            measured_magnetic_total_nt=measured_magnetic_total_nt,
+            magnetic_meas_std_nt=magnetic_meas_std_nt,
+            measured_magnetic_gradient_nt_per_m=measured_magnetic_gradient_nt_per_m,
+            magnetic_gradient_meas_std_nt_per_m=magnetic_gradient_meas_std_nt_per_m,
             time_s=None if measurement.time_s is None else float(measurement.time_s),
         )
 

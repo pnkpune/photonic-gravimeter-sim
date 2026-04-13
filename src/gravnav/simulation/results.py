@@ -937,6 +937,8 @@ class SimulationEstimatorLog:
             "sequence_predicted_disturbance_std_mps2": np.empty(n, dtype=np.float64),
             "sequence_used_gradient": np.empty(n, dtype=bool),
             "sequence_used_bathymetry": np.empty(n, dtype=bool),
+            "sequence_used_magnetics": np.empty(n, dtype=bool),
+            "sequence_predicted_magnetic_total_nt": np.empty(n, dtype=np.float64),
             "sequence_viterbi_log_score": np.empty(n, dtype=np.float64),
             "sequence_viterbi_offset_ned_m": np.empty((n, 3), dtype=np.float64),
             "sequence_posterior_mean_offset_ned_m": np.empty((n, 3), dtype=np.float64),
@@ -955,6 +957,8 @@ class SimulationEstimatorLog:
             "sequence_gravity_information_ratio": np.empty(n, dtype=np.float64),
             "sequence_bathymetry_predicted_spread_m": np.empty(n, dtype=np.float64),
             "sequence_bathymetry_information_ratio": np.empty(n, dtype=np.float64),
+            "sequence_magnetic_predicted_spread_nt": np.empty(n, dtype=np.float64),
+            "sequence_magnetic_information_ratio": np.empty(n, dtype=np.float64),
             "sequence_grid_mode": np.empty(n, dtype=object),
             "sequence_grid_half_span_m": np.empty((n, 2), dtype=np.float64),
             "sequence_grid_spacing_m": np.empty((n, 2), dtype=np.float64),
@@ -1002,6 +1006,13 @@ class SimulationEstimatorLog:
             )
             out["sequence_used_bathymetry"][k] = bool(
                 _get_required_attr(upd, "used_bathymetry")
+            )
+            out["sequence_used_magnetics"][k] = bool(
+                _get_required_attr(upd, "used_magnetics")
+            )
+            pred_mag_total = getattr(est, "predicted_magnetic_total_nt", np.nan)
+            out["sequence_predicted_magnetic_total_nt"][k] = (
+                np.nan if pred_mag_total is None else float(pred_mag_total)
             )
             out["sequence_viterbi_log_score"][k] = float(
                 _get_required_attr(upd, "viterbi_log_score")
@@ -1055,6 +1066,14 @@ class SimulationEstimatorLog:
             bathy_info = getattr(diag, "bathymetry_information_ratio", np.nan)
             out["sequence_bathymetry_information_ratio"][k] = (
                 np.nan if bathy_info is None else float(bathy_info)
+            )
+            magnetic_spread = getattr(diag, "magnetic_predicted_spread_nt", np.nan)
+            out["sequence_magnetic_predicted_spread_nt"][k] = (
+                np.nan if magnetic_spread is None else float(magnetic_spread)
+            )
+            magnetic_info = getattr(diag, "magnetic_information_ratio", np.nan)
+            out["sequence_magnetic_information_ratio"][k] = (
+                np.nan if magnetic_info is None else float(magnetic_info)
             )
             out["sequence_grid_mode"][k] = str(_get_required_attr(diag, "grid_mode"))
             out["sequence_grid_half_span_m"][k] = _as_float_array(

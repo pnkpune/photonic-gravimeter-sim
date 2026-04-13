@@ -25,6 +25,16 @@ from .gravity_loader import (
     RegionalGravityMapManifest,
     load_regional_map_from_manifest,
 )
+from .current_loader import (
+    CurrentFieldGrid,
+    RegionalCurrentFieldManifest,
+    load_current_field_from_manifest,
+)
+from .magnetic_loader import (
+    MagneticGrid,
+    RegionalMagneticMapManifest,
+    load_magnetic_grid_from_manifest,
+)
 from ..utils.config import find_project_root
 
 FloatArray = NDArray[np.float64]
@@ -244,6 +254,109 @@ class BathymetryGrid:
             return float(depth)
         return depth
 
+    def evaluate_water_depth_gradient_m_per_m(
+        self,
+        lat_deg: ArrayLike,
+        lon_deg: ArrayLike,
+        *,
+        reference_surface_height_m: Optional[float] = None,
+        delta_lat_deg: Optional[float] = None,
+        delta_lon_deg: Optional[float] = None,
+    ) -> FloatArray:
+        lat = np.asarray(lat_deg, dtype=np.float64)
+        lon = np.asarray(lon_deg, dtype=np.float64)
+        lat_b, lon_b = np.broadcast_arrays(lat, lon)
+        lat_step = (
+            float(delta_lat_deg)
+            if delta_lat_deg is not None
+            else max(1.0e-4, 0.5 * _axis_spacing_deg(self.lat_axis_deg))
+        )
+        lon_step = (
+            float(delta_lon_deg)
+            if delta_lon_deg is not None
+            else max(1.0e-4, 0.5 * _axis_spacing_deg(self.lon_axis_deg))
+        )
+        north_m_per_deg = 111_320.0
+        east_m_per_deg = np.maximum(
+            north_m_per_deg * np.cos(np.deg2rad(lat_b)),
+            1.0,
+        )
+        plus_n = np.asarray(
+            self.evaluate_water_depth_m(
+                lat_b + lat_step,
+                lon_b,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        minus_n = np.asarray(
+            self.evaluate_water_depth_m(
+                lat_b - lat_step,
+                lon_b,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        plus_e = np.asarray(
+            self.evaluate_water_depth_m(
+                lat_b,
+                lon_b + lon_step,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        minus_e = np.asarray(
+            self.evaluate_water_depth_m(
+                lat_b,
+                lon_b - lon_step,
+                reference_surface_height_m=reference_surface_height_m,
+            ),
+            dtype=np.float64,
+        )
+        d_dn = (plus_n - minus_n) / (2.0 * lat_step * north_m_per_deg)
+        d_de = (plus_e - minus_e) / (2.0 * lon_step * east_m_per_deg)
+        return np.stack([d_dn, d_de], axis=-1).astype(np.float64)
+
+    def evaluate_rugosity_m(
+        self,
+        lat_deg: ArrayLike,
+        lon_deg: ArrayLike,
+        *,
+        reference_surface_height_m: Optional[float] = None,
+    ):
+        lat = np.asarray(lat_deg, dtype=np.float64)
+        lon = np.asarray(lon_deg, dtype=np.float64)
+        lat_b, lon_b = np.broadcast_arrays(lat, lon)
+        lat_step = max(1.0e-4, _axis_spacing_deg(self.lat_axis_deg))
+        lon_step = max(1.0e-4, _axis_spacing_deg(self.lon_axis_deg))
+        offsets = (
+            (-lat_step, -lon_step),
+            (-lat_step, 0.0),
+            (-lat_step, lon_step),
+            (0.0, -lon_step),
+            (0.0, 0.0),
+            (0.0, lon_step),
+            (lat_step, -lon_step),
+            (lat_step, 0.0),
+            (lat_step, lon_step),
+        )
+        samples = [
+            np.asarray(
+                self.evaluate_water_depth_m(
+                    lat_b + dlat,
+                    lon_b + dlon,
+                    reference_surface_height_m=reference_surface_height_m,
+                ),
+                dtype=np.float64,
+            )
+            for dlat, dlon in offsets
+        ]
+        stacked = np.stack(samples, axis=0)
+        rugosity = np.std(stacked, axis=0)
+        if rugosity.ndim == 0:
+            return float(rugosity)
+        return rugosity.astype(np.float64)
+
     def to_npz(self, path: str | Path) -> Path:
         p = Path(path).expanduser().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -340,6 +453,9 @@ class RegionalDemoPackManifest:
     bathymetry_manifest_path: str
     scenario_path: str
     sequence_profile_path: str
+    magnetic_manifest_path: Optional[str] = None
+    current_manifest_path: Optional[str] = None
+    tide_config_path: Optional[str] = None
     notes: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -354,6 +470,21 @@ class RegionalDemoPackManifest:
             bathymetry_manifest_path=str(mapping["bathymetry_manifest_path"]),
             scenario_path=str(mapping["scenario_path"]),
             sequence_profile_path=str(mapping["sequence_profile_path"]),
+            magnetic_manifest_path=(
+                None
+                if mapping.get("magnetic_manifest_path") is None
+                else str(mapping["magnetic_manifest_path"])
+            ),
+            current_manifest_path=(
+                None
+                if mapping.get("current_manifest_path") is None
+                else str(mapping["current_manifest_path"])
+            ),
+            tide_config_path=(
+                None
+                if mapping.get("tide_config_path") is None
+                else str(mapping["tide_config_path"])
+            ),
             notes=[str(x) for x in mapping.get("notes", [])],
             metadata=dict(mapping.get("metadata", {})),
         )
@@ -379,6 +510,15 @@ class ResolvedRegionalDemoPack:
     bathymetry_manifest_path: Path
     bathymetry_grid: BathymetryGrid
     bathymetry_grid_path: Path
+    magnetic_manifest: Optional[RegionalMagneticMapManifest]
+    magnetic_manifest_path: Optional[Path]
+    magnetic_grid: Optional[MagneticGrid]
+    magnetic_grid_path: Optional[Path]
+    current_manifest: Optional[RegionalCurrentFieldManifest]
+    current_manifest_path: Optional[Path]
+    current_field: Optional[CurrentFieldGrid]
+    current_field_grid_path: Optional[Path]
+    tide_config_path: Optional[Path]
     scenario_path: Path
     sequence_profile_path: Path
 
@@ -452,6 +592,38 @@ def resolve_regional_demo_pack(path: str | Path) -> ResolvedRegionalDemoPack:
             manifest_path=manifest_path,
         )
     )
+    magnetic_grid: Optional[MagneticGrid] = None
+    magnetic_manifest: Optional[RegionalMagneticMapManifest] = None
+    magnetic_grid_path: Optional[Path] = None
+    magnetic_manifest_path: Optional[Path] = None
+    if manifest.magnetic_manifest_path is not None:
+        (
+            magnetic_grid,
+            magnetic_manifest,
+            magnetic_grid_path,
+            magnetic_manifest_path,
+        ) = load_magnetic_grid_from_manifest(
+            _resolve_manifest_ref(
+                manifest.magnetic_manifest_path,
+                manifest_path=manifest_path,
+            )
+        )
+    current_field: Optional[CurrentFieldGrid] = None
+    current_manifest: Optional[RegionalCurrentFieldManifest] = None
+    current_field_grid_path: Optional[Path] = None
+    current_manifest_path: Optional[Path] = None
+    if manifest.current_manifest_path is not None:
+        (
+            current_field,
+            current_manifest,
+            current_field_grid_path,
+            current_manifest_path,
+        ) = load_current_field_from_manifest(
+            _resolve_manifest_ref(
+                manifest.current_manifest_path,
+                manifest_path=manifest_path,
+            )
+        )
     scenario_path = _resolve_manifest_ref(
         manifest.scenario_path,
         manifest_path=manifest_path,
@@ -459,6 +631,14 @@ def resolve_regional_demo_pack(path: str | Path) -> ResolvedRegionalDemoPack:
     sequence_profile_path = _resolve_manifest_ref(
         manifest.sequence_profile_path,
         manifest_path=manifest_path,
+    )
+    tide_config_path = (
+        None
+        if manifest.tide_config_path is None
+        else _resolve_manifest_ref(
+            manifest.tide_config_path,
+            manifest_path=manifest_path,
+        )
     )
     return ResolvedRegionalDemoPack(
         manifest=manifest,
@@ -471,6 +651,15 @@ def resolve_regional_demo_pack(path: str | Path) -> ResolvedRegionalDemoPack:
         bathymetry_manifest_path=bathymetry_manifest_path,
         bathymetry_grid=bathymetry_grid,
         bathymetry_grid_path=bathymetry_grid_path,
+        magnetic_manifest=magnetic_manifest,
+        magnetic_manifest_path=magnetic_manifest_path,
+        magnetic_grid=magnetic_grid,
+        magnetic_grid_path=magnetic_grid_path,
+        current_manifest=current_manifest,
+        current_manifest_path=current_manifest_path,
+        current_field=current_field,
+        current_field_grid_path=current_field_grid_path,
+        tide_config_path=tide_config_path,
         scenario_path=scenario_path,
         sequence_profile_path=sequence_profile_path,
     )
