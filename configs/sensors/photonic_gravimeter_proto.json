@@ -1,32 +1,79 @@
 {
   "name": "photonic_gravimeter_proto",
   "operating_mode": "mission",
+  "physics_model": "digital_twin",
   "noise_density_mps2_per_sqrt_hz": 4.0e-06,
   "bias_random_walk_mps2_per_sqrt_s": 2.0e-08,
   "turn_on_bias_std_mps2": 1.0e-06,
   "fixed_bias_mps2": 0.0,
   "scale_factor_error_ppm": 0.0,
   "bandwidth_hz": 0.4,
-  "specific_force_coupling_b": [
-    1.0e-06,
-    1.0e-06,
-    1.0e-05
-  ],
-  "specific_force_reference_b_mps2": [
-    0.0,
-    0.0,
-    -9.80665
-  ],
-  "angular_rate_coupling_b_mps2_per_radps": [
-    1.5e-06,
-    1.5e-06,
-    1.5e-05
-  ],
   "supports_absolute_mode": true,
   "update_period_s": 1.0,
   "warmup_time_s": 45.0,
   "valid_duty_cycle": 1.0,
   "degraded_noise_factor": 2.5,
   "degraded_bias_factor": 2.0,
-  "degraded_motion_factor": 2.0
+  "degraded_motion_factor": 2.0,
+  "raman_axis_body_b": [
+    0.0,
+    0.0,
+    1.0
+  ],
+  "interferometer": {
+    "atom_species": "Rb87",
+    "pulse_sequence": "raman_mach_zehnder",
+    "effective_wavevector_rad_per_m": 1.611e7,
+    "pulse_duration_s": 1.2e-05,
+    "interrogation_time_s": 0.12,
+    "cycle_time_s": 1.0,
+    "chirp_rate_rad_per_s2": 0.0,
+    "auto_chirp_from_normal_gravity": true,
+    "lmt_order": 1,
+    "pulse_efficiency": 0.995,
+    "fringe_phase_bias_rad": 1.5707963267948966,
+    "fringe_offset_probability": 0.5
+  },
+  "atom_ensemble": {
+    "temperature_k": 2.0e-06,
+    "transverse_temperature_k": 2.0e-06,
+    "cloud_radius_m": 0.0025,
+    "launch_position_axis_m": 0.0,
+    "launch_velocity_axis_mps": 0.0,
+    "transverse_velocity_std_mps": 0.0,
+    "detection_noise_std_probability": 0.01,
+    "dead_time_s": 0.15,
+    "base_contrast": 0.62,
+    "contrast_floor": 0.18
+  },
+  "vibration_compensation": {
+    "enabled": true,
+    "accelerometer_noise_density_mps2_per_sqrt_hz": 1.0e-07,
+    "accelerometer_bias_mps2": 0.0,
+    "accelerometer_bias_random_walk_mps2_per_sqrt_s": 1.0e-08,
+    "accelerometer_scale_factor_error_ppm": 40.0,
+    "accelerometer_latency_s": 0.015,
+    "accelerometer_alignment_error_rad": 0.001,
+    "residual_correction_fraction": 0.96,
+    "accelerometer_bandwidth_hz": 30.0,
+    "tilt_stage_residual_rad": 0.0
+  },
+  "systematics": {
+    "gravity_gradient_zz_per_s2": 0.0,
+    "use_normal_vertical_gradient": true,
+    "body_rotation_residual_gain": 0.02,
+    "wavefront_aberration_coeff_rad_per_m2": 0.0,
+    "quadratic_zeeman_coeff_rad_per_t2": 50000.0,
+    "magnetic_field_bias_t": 5.0e-05,
+    "ac_stark_coeff_rad_per_fraction": 0.0,
+    "relative_intensity_error": 0.0,
+    "chirp_error_fraction": 0.0,
+    "finite_pulse_coefficient": 0.2732395447351627,
+    "readout_phase_bias_rad": 0.0,
+    "valid_tilt_limit_deg": 3.3,
+    "contrast_tilt_scale_deg": 3.3,
+    "contrast_rotation_scale_radps": 0.04,
+    "contrast_residual_accel_scale_mps2": 0.02,
+    "min_valid_contrast": 0.2
+  }
 }

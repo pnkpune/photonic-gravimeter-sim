@@ -2,7 +2,7 @@
 
 `photonic-gravimeter-sim` is a GPS-denied navigation simulation stack for passive, stealth-compatible missions. The design target is not a standalone gravimeter. It is an INS-centered navigation subsystem where gravity is the primary geophysical anchor and other passive data channels are allowed to reduce ambiguity without relying on GNSS.
 
-The repo is maritime/UUV-first. The current best result is a realistic Norwegian-margin demo where a bounded-lag Earth-signature output built from a mission-mode photonic gravimeter, gravity gradient likelihood, and bathymetry beats the INS-only baseline across all acceptance seeds with zero horizontal HMI. That result is still region-specific: the first frozen second-region validation on Helgeland offshore failed, so the repo does not yet claim a two-region validated passive stack.
+The repo is maritime/UUV-first. The frozen milestone tag `v0.1-off-grid-maritime-demo` captures the first realistic Norwegian-margin demo where a bounded-lag Earth-signature output beat the INS-only baseline across the acceptance seeds with zero horizontal HMI. The current branch, `feature/photonic-digital-twin`, replaces the earlier mission-facing photonic wrapper with a phase-domain cold-atom Raman digital twin and reruns the same demos. Under the new sensor physics, Norwegian-margin still beats INS-only, but by a smaller margin, and Helgeland still fails. So the branch is more physically credible, but it does not yet upgrade the regional claim.
 
 ## Current Status
 
@@ -10,7 +10,7 @@ The stack is well past scaffolding. It now includes:
 
 - WGS84 geodesy, frame transforms, and local-level kinematics
 - trajectory and scenario generation
-- IMU, scalar gravimeter, photonic gravimeter, gradiometer, depth, velocity-aid, and bathymetry sensor models
+- IMU, scalar gravimeter, a phase-domain photonic gravimeter digital twin, gradiometer, depth, velocity-aid, and bathymetry sensor models
 - local-level error-state INS propagation with constrained depth and velocity aiding
 - particle-filter and sequence-based gravity map matching
 - bounded-lag sequence smoothing as a separate delayed navigation output
@@ -31,7 +31,48 @@ What is not promoted:
 - delayed sequence-to-INS replay feedback
 - any path that silently treats a delayed geophysical estimate as an instantaneous live-state correction
 
-## Headline Result
+## Digital Twin Checkpoint
+
+The current branch replaces the older photonic wrapper with a cold-atom Raman Mach-Zehnder digital twin that explicitly models:
+
+- interferometer phase accumulation with `k_eff T^2` scale factor
+- sensitivity-function-based vibration phase and accelerometer-assisted compensation
+- gravity-gradient, Coriolis / rotation, chirp, Zeeman, light-shift, and wavefront terms
+- fringe contrast, transition probability, phase inversion, cadence, warm-up, and validity gating
+- rich per-sample photonic telemetry recorded alongside the navigation-facing gravity measurement
+
+The reference model is based primarily on Lellouch et al. (2025), Cheinet et al. (2008), Bidel et al. (2018), and Jensen et al. (2025), with the implementation kept navigation-facing rather than turning into a full optical-state or atomic-state simulator.
+
+Current branch result on the Norwegian-margin demo pack, rerun with the digital twin across seeds `42/123/777`:
+
+| Mode | Reported Earth-signature output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | Horizontal HMI |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
+| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
+| `photonic_gravity` | `sequence` | 241.526 | 219.225 | 427.030 | 393.264 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 201.343 | 427.030 | 391.419 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 205.401 | 427.030 | 392.220 | 0.000 |
+
+What changed relative to the frozen milestone:
+
+- the first-region result still beats INS-only under the more realistic sensor model
+- the gain shrank materially relative to the old mission-facing wrapper
+- the best current first-region output on this branch is the observe-only `photonic_gravity_bathymetry` sequence estimate, not the lag output
+- Helgeland still fails, which points harder at regional distinctiveness and route packaging rather than the old surrogate being the whole story
+
+Current branch result on the Helgeland demo pack, rerun with the same digital twin across seeds `42/123/777`:
+
+| Mode | Reported Earth-signature output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | Horizontal HMI |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `live_ins` | `live_ins` | 161.608 | 161.608 | 278.771 | 278.771 | 0.000 |
+| `surrogate_gravity` | `sequence` | 161.608 | 209.473 | 278.771 | 331.689 | 0.000 |
+| `photonic_gravity` | `sequence` | 161.608 | 205.859 | 278.771 | 330.585 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 161.608 | 199.778 | 278.771 | 330.585 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 161.608 | 194.961 | 278.771 | 309.133 | 0.695 |
+
+So the digital twin made the sensor model more interpretable, but it did not rescue second-region generalization. That keeps the next priority on physics-driven regional hardening, not on adding another modality yet.
+
+## Frozen Milestone Reference
 
 The promoted realistic demo is:
 
@@ -64,14 +105,19 @@ Frozen demo sequence profile:
 - `bathymetry_weight = 3.5`
 - `map_match_every_steps = 1`
 
-Mission-mode photonic gravimeter defaults used in the promoted demo:
+The frozen milestone used the older mission-facing photonic wrapper. On the current branch, the photonic defaults have been replaced by a digital twin with nested interferometer, atom-ensemble, vibration-compensation, and systematics blocks.
+
+Mission-mode digital-twin defaults on the current branch:
 
 - `update_period_s = 1.0`
 - `warmup_time_s = 45.0`
-- `bandwidth_hz = 0.4`
-- `noise_density = 4.0e-06 m/s^2/sqrt(Hz)`
-- `turn_on_bias_std = 1.0e-06 m/s^2`
-- motion-coupling residuals retained explicitly rather than assuming an ideal quiet-lab sensor
+- `physics_model = digital_twin`
+- Raman `k_eff = 1.611e7 rad/m`
+- interrogation time `T = 0.12 s`
+- cycle time `T_c = 1.0 s`
+- accelerometer-assisted vibration compensation with `1.0e-07 m/s^2/sqrt(Hz)` equivalent accelerometer noise density
+- validity tilt limit `3.3 deg`
+- bandwidth-limited disturbance-equivalent output still preserved for navigation integration
 
 Supporting passive bathymetry defaults:
 
@@ -223,7 +269,7 @@ python3 scripts/benchmark_filters.py
 
 Current regression status:
 
-- `49 passed`
+- `53 passed`
 
 The promoted maritime demo was validated on acceptance seeds:
 
@@ -247,7 +293,7 @@ Validation boundary:
 The current demo is intentionally realistic in the ways that matter most for navigation:
 
 - mission-duration denied run rather than a short toy route
-- photonic gravimeter modeled as a mission-facing instrument with warm-up, cadence, bandwidth, drift, and residual motion coupling
+- photonic gravimeter modeled as a phase-domain digital twin with warm-up, cadence, vibration compensation, interferometer systematics, fringe contrast, and telemetry
 - passive aids only: gravity, gradient, bathymetry, INS, depth, and velocity
 - explicit initial INS offset so the Earth-signature estimator has to do real work
 

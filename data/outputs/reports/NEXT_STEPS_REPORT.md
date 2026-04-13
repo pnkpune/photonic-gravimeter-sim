@@ -2,7 +2,7 @@
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
 **Date: 2026-04-13**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, second-region validation failed on Helgeland offshore, PF feedback disabled, 49 tests passing**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, second-region validation failed on Helgeland offshore, phase-domain photonic gravimeter digital twin integrated on `feature/photonic-digital-twin`, PF feedback disabled, 53 tests passing**
 
 ---
 
@@ -66,6 +66,72 @@ Per-seed promoted output result:
 | `777` | 364.901 | 306.314 | 58.587 | 0.000 |
 
 This is the first in-repo result that is both technically defensible and operationally relevant to the actual goal: **reducing denied-mission INS drift without GNSS by using gravity-led passive Earth-signature aiding.**
+
+---
+
+## Photonic digital twin checkpoint (2026-04-13)
+
+The current branch replaces the older mission-facing photonic wrapper with a **phase-domain cold-atom Raman Mach-Zehnder digital twin**. The public interface is unchanged, but the internals now model:
+
+- interferometer phase accumulation with `k_eff T^2`
+- sensitivity-function-based vibration phase integration
+- classical accelerometer-assisted vibration compensation
+- gravity-gradient, Coriolis / rotation, chirp, Zeeman, light-shift, and wavefront terms
+- fringe formation, phase inversion, contrast loss, cadence, warm-up, and invalid-sample gating
+- per-sample photonic telemetry alongside the navigation-facing gravity estimate
+
+Primary literature basis used for the composite reference model:
+
+- Lellouch et al. (2025)
+- Cheinet et al. (2008)
+- Bidel et al. (2018)
+- Jensen et al. (2025)
+
+This phase was intentionally sensor-first. No estimator family changes were made.
+
+### Norwegian-margin rerun under the digital twin
+
+The same first-region maritime demo was rerun with the new photonic model across seeds `42/123/777`:
+
+| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
+| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
+| `photonic_gravity` | `sequence` | 241.526 | 219.225 | 427.030 | 393.264 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 201.343 | 427.030 | 391.419 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 205.401 | 427.030 | 392.220 | 0.000 |
+
+Interpretation:
+
+- the more realistic photonic model still beats live INS on the promoted Norwegian-margin route
+- the gain shrinks materially relative to the earlier wrapper model
+- the best current first-region output on this branch is now the observe-only `photonic_gravity_bathymetry` sequence estimate, not the lag output
+- this is a realism gain, not a performance gain
+
+### Helgeland rerun under the digital twin
+
+Helgeland was rerun with the same digital twin across seeds `42/123/777`:
+
+| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `live_ins` | `live_ins` | 161.608 | 161.608 | 278.771 | 278.771 | 0.000 |
+| `surrogate_gravity` | `sequence` | 161.608 | 209.473 | 278.771 | 331.689 | 0.000 |
+| `photonic_gravity` | `sequence` | 161.608 | 205.859 | 278.771 | 330.585 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 161.608 | 199.778 | 278.771 | 330.585 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 161.608 | 194.961 | 278.771 | 309.133 | 0.695 |
+
+Interpretation:
+
+- the digital twin does not rescue second-region generalization
+- Helgeland still fails badly enough that adding a new modality immediately would muddy the diagnosis
+- the failure now points harder at regional distinctiveness, route packaging, and map realism rather than the old surrogate gravimeter being the main issue
+
+Practical conclusion from this phase:
+
+- keep the digital twin
+- keep the estimator family unchanged for now
+- use the new telemetry to explain failures
+- continue hardening realistic regional demo packs before adding more passive channels
 
 ---
 
