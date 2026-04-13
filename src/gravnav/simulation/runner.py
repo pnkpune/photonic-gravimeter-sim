@@ -102,6 +102,7 @@ from ..estimators.map_match_pf import (
     evaluate_gravity_map_horizontal_gradient,
     geodetic_covariance_from_ned_covariance,
 )
+from ..physics.earth import meridian_radius, prime_vertical_radius
 from ..physics.gravity_map import GravityGridMap
 from ..sensors.bathymetry import (
     BathymetryMeasurement,
@@ -167,6 +168,90 @@ _RUN_WITH_SPECS_RNG_STREAM_INDICES = {
 def _as_float_array(x: ArrayLike) -> FloatArray:
     """Convert input to a NumPy float64 array."""
     return np.asarray(x, dtype=np.float64)
+
+
+def _symmetrize(M: ArrayLike) -> FloatArray:
+    """Return the symmetric part of a square matrix."""
+    A = _as_float_array(M)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"Expected square matrix, got shape {A.shape}.")
+    return 0.5 * (A + A.T)
+
+
+def _position_covariance_ned_from_geodetic(
+    lat_rad: float,
+    height_m: float,
+    covariance_geodetic: ArrayLike,
+) -> FloatArray:
+    """
+    Convert a small geodetic position covariance into local NED covariance.
+
+    This is the inverse of `geodetic_covariance_from_ned_covariance(...)` under
+    the same small-displacement linearization.
+    """
+    phi = float(lat_rad)
+    h = float(height_m)
+    P_geo = _symmetrize(covariance_geodetic)
+    if P_geo.shape != (3, 3):
+        raise ValueError(
+            "covariance_geodetic must have shape (3, 3), "
+            f"got {P_geo.shape}."
+        )
+
+    M = float(meridian_radius(phi))
+    N = float(prime_vertical_radius(phi))
+    cos_phi = float(np.cos(phi))
+    if abs(cos_phi) < 1.0e-8:
+        cos_phi = 1.0e-8 if cos_phi >= 0.0 else -1.0e-8
+
+    J = np.array(
+        [
+            [M + h, 0.0, 0.0],
+            [0.0, (N + h) * cos_phi, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=np.float64,
+    )
+    return _symmetrize(J @ P_geo @ J.T)
+
+
+def _lag_publish_position_covariance_geodetic(
+    replayed_state: ErrorStateINSState,
+    *,
+    published_lat_rad: float,
+    published_height_m: float,
+    sequence_covariance_geodetic: ArrayLike,
+) -> FloatArray:
+    """
+    Build a conservative position covariance for the published lag output.
+
+    The lag-smoothed track is currently a bounded-lag replay plus a delayed
+    sequence mean replacement; it is not a fully consistent fixed-lag smoother.
+    Treating the raw sequence covariance as the complete integrity bound is too
+    optimistic in weak-information regions. Use a conservative envelope of the
+    replayed INS position covariance and the sequence covariance instead.
+    """
+    lat = float(published_lat_rad)
+    h = float(published_height_m)
+    P_seq_ned = _position_covariance_ned_from_geodetic(
+        lat,
+        h,
+        sequence_covariance_geodetic,
+    )
+    P_replay_ned = _position_covariance_ned_from_geodetic(
+        lat,
+        h,
+        replayed_state.P[ERR_POS, ERR_POS],
+    )
+    P_bound_ned = _symmetrize(P_seq_ned + P_replay_ned)
+    P_bound_geo = geodetic_covariance_from_ned_covariance(
+        lat_ref_rad=lat,
+        height_ref_m=h,
+        ned_cov_m2=P_bound_ned,
+    )
+    return _symmetrize(
+        P_bound_geo + np.diag(np.full(3, 1.0e-12, dtype=np.float64))
+    )
 
 
 def _axis3(x: ArrayLike | float, *, name: str) -> FloatArray:
@@ -1548,15 +1633,15 @@ class ScenarioSimulationRunner:
                 publish_anchor = None
                 direct_update = sequence_updates_by_step.get(step_index)
                 if direct_update is not None:
-                    P_pos = np.asarray(
-                        direct_update.estimate.covariance_geodetic,
-                        dtype=np.float64,
-                    )
-                    P_pos = 0.5 * (P_pos + P_pos.T)
-                    P_pos += np.diag(np.full(3, 1.0e-12, dtype=np.float64))
                     published_state.nominal.lat_rad = float(direct_update.estimate.lat_rad)
                     published_state.nominal.lon_rad = float(direct_update.estimate.lon_rad)
                     published_state.nominal.height_m = float(direct_update.estimate.height_m)
+                    P_pos = _lag_publish_position_covariance_geodetic(
+                        replayed_state,
+                        published_lat_rad=published_state.nominal.lat_rad,
+                        published_height_m=published_state.nominal.height_m,
+                        sequence_covariance_geodetic=direct_update.estimate.covariance_geodetic,
+                    )
                     published_state.P[ERR_POS, :] = 0.0
                     published_state.P[:, ERR_POS] = 0.0
                     published_state.P[ERR_POS, ERR_POS] = P_pos
@@ -1578,15 +1663,15 @@ class ScenarioSimulationRunner:
                             and publish_anchor_std
                             <= sequence_lag_smoother_ctrl.spec.max_horizontal_std_m
                         ):
-                            P_pos = np.asarray(
-                                publish_anchor.covariance_geodetic,
-                                dtype=np.float64,
-                            )
-                            P_pos = 0.5 * (P_pos + P_pos.T)
-                            P_pos += np.diag(np.full(3, 1.0e-12, dtype=np.float64))
                             published_state.nominal.lat_rad = float(publish_anchor.lat_rad)
                             published_state.nominal.lon_rad = float(publish_anchor.lon_rad)
                             published_state.nominal.height_m = float(publish_anchor.height_m)
+                            P_pos = _lag_publish_position_covariance_geodetic(
+                                replayed_state,
+                                published_lat_rad=published_state.nominal.lat_rad,
+                                published_height_m=published_state.nominal.height_m,
+                                sequence_covariance_geodetic=publish_anchor.covariance_geodetic,
+                            )
                             published_state.P[ERR_POS, :] = 0.0
                             published_state.P[:, ERR_POS] = 0.0
                             published_state.P[ERR_POS, ERR_POS] = P_pos
@@ -1627,6 +1712,11 @@ class ScenarioSimulationRunner:
                         "num_anchor_updates_applied_here": int(len(applied_here)),
                         "publish_anchor_applied": bool(publish_anchor_applied),
                         "publish_source": publish_source,
+                        "publish_covariance_mode": (
+                            "replay_plus_sequence_envelope"
+                            if publish_anchor_applied
+                            else "replay_only"
+                        ),
                         "publish_anchor_peak_probability": (
                             None
                             if publish_anchor is None

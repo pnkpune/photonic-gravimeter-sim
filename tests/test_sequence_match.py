@@ -15,6 +15,7 @@ from gravnav.estimators.map_match_pf import (
     apply_ned_offsets_to_geodetic,
     geodetic_offsets_to_local_ned,
 )
+from gravnav.physics.earth import meridian_radius, prime_vertical_radius
 from gravnav.sensors.depth import DepthSensorSpec
 from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
@@ -25,7 +26,11 @@ from gravnav.simulation.metrics import (
     lag_smoothed_position_error_metrics_from_result,
     sequence_position_error_metrics_from_result,
 )
-from gravnav.simulation.runner import ScenarioSimulationRunner, SimulationRunnerConfig
+from gravnav.simulation.runner import (
+    ScenarioSimulationRunner,
+    SimulationRunnerConfig,
+    _lag_publish_position_covariance_geodetic,
+)
 from gravnav.truth.scenarios import build_truth_trajectory_from_scenario, get_named_scenario
 
 
@@ -495,3 +500,53 @@ def test_runner_sequence_lag_smoother_improves_output_without_mutating_live_ins(
     assert sum(row["publish_source"] == "sequence_update" for row in publish_rows) > 10
     assert lag_metrics.horizontal_rmse_m < live_ins_metrics.horizontal_rmse_m
     assert lag_metrics.cep95_m <= live_ins_metrics.cep95_m
+
+
+def test_lag_publish_covariance_envelopes_replay_and_sequence_uncertainty() -> None:
+    lat0 = np.deg2rad(63.0)
+    lon0 = np.deg2rad(10.0)
+    state = _make_state(
+        time_s=0.0,
+        lat_rad=lat0,
+        lon_rad=lon0,
+        height_m=0.0,
+    )
+    # Roughly 20 m / 15 m / 2 m 1-sigma in local NED.
+    replay_cov_geo = np.diag(
+        [
+            (20.0 / float(meridian_radius(lat0))) ** 2,
+            (15.0 / (float(prime_vertical_radius(lat0)) * np.cos(lat0))) ** 2,
+            2.0**2,
+        ]
+    )
+    state.P[:3, :3] = replay_cov_geo
+
+    # A sharper sequence covariance that should not become the published
+    # integrity bound on its own.
+    seq_cov_geo = np.diag(
+        [
+            (4.0 / float(meridian_radius(lat0))) ** 2,
+            (3.0 / (float(prime_vertical_radius(lat0)) * np.cos(lat0))) ** 2,
+            1.0**2,
+        ]
+    )
+
+    bound_geo = _lag_publish_position_covariance_geodetic(
+        state,
+        published_lat_rad=lat0,
+        published_height_m=0.0,
+        sequence_covariance_geodetic=seq_cov_geo,
+    )
+
+    def _geo_to_ned(P_geo: np.ndarray) -> np.ndarray:
+        rm = float(meridian_radius(lat0))
+        rn = float(prime_vertical_radius(lat0)) * np.cos(lat0)
+        J = np.diag([rm, rn, -1.0])
+        return J @ P_geo @ J.T
+
+    bound_ned = _geo_to_ned(bound_geo)
+    replay_ned = _geo_to_ned(replay_cov_geo)
+    seq_ned = _geo_to_ned(seq_cov_geo)
+
+    assert np.all(np.linalg.eigvalsh(bound_ned - replay_ned) >= -1.0e-9)
+    assert np.all(np.linalg.eigvalsh(bound_ned - seq_ned) >= -1.0e-9)
