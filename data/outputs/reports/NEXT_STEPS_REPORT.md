@@ -1,755 +1,188 @@
-# Next-Steps Report: From Gravity-Aided INS to Earth-Signature Navigator
+# Next-Steps Report
 
-**Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
-**Date: 2026-04-13**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, second-region validation failed on Helgeland offshore, phase-domain photonic gravimeter digital twin integrated on `feature/photonic-digital-twin`, PF feedback disabled, 53 tests passing**
+**Date:** 2026-04-13  
+**Branch:** `feature/photonic-digital-twin`  
+**Repo state:** calibrated phase-domain photonic gravimeter digital twin integrated, two frozen maritime demo packs rerun, branch diagnosis locked, `58` tests passing
 
----
+## Current Branch Scope
 
-## Current top-line milestone (where we are)
+This branch was deliberately kept narrow:
 
-The repo now has a **realistic off-grid maritime demo** that clears the actual product bar:
+- replace the older mission-facing photonic wrapper with a physically richer cold-atom Raman digital twin
+- calibrate that sensor model against fixed operating regimes
+- rerun only the two frozen maritime demo packs:
+  - Norwegian margin
+  - Helgeland offshore
+- use photonic telemetry to determine whether the remaining failure is sensor-limited or region-limited
 
-- live INS remains the real-time backbone
-- gravity remains the primary passive Earth-signature
-- gradient likelihood and bathymetry reduce ambiguity
-- the winning navigation product is a **bounded-lag Earth-signature output**, not a hidden GNSS substitute
-- the promoted output beats INS-only across all acceptance seeds with **0.0% horizontal HMI**
+This branch does **not** add new modalities, new estimator families, or more generic regional tooling.
 
-Promoted demo:
+## What Was Implemented
 
-- theater: Norwegian margin
-- scenario: `norwegian_margin_maritime`
-- mission: `1.25 h` multi-leg off-grid maritime survey
-- speed: `4.0 m/s`
-- turn bank angle: `8 deg`
-- sample period: `2.0 s`
-- deterministic initial INS offset: `[60.0, -30.0, 0.0] m` NED
-- seeds: `42`, `123`, `777`
+- phase-domain photonic gravimeter digital twin in `src/gravnav/sensors/photonic_gravimeter.py`
+- three locked calibration presets:
+  - `photonic_gravimeter_lab_static`
+  - `photonic_gravimeter_maritime_benign`
+  - `photonic_gravimeter_maritime_rough`
+- run-level photonic telemetry summaries
+- calibration harness:
+  - `scripts/run_photonic_calibration.py`
+- compact branch checkpoint report generator:
+  - `scripts/generate_photonic_branch_checkpoint.py`
+- demo-runner photonic summary export in:
+  - `scripts/run_maritime_demo.py`
 
-Promoted frozen sequence profile:
+## Calibration Result
 
-- `window_size = 11`
-- `grid_half_span_m = [120.0, 120.0]`
-- `grid_spacing_m = [20.0, 20.0]`
-- `transition_std_m = [20.0, 20.0]`
-- `center_prior_std_m = [80.0, 80.0]`
-- `bathymetry_meas_std_m = 2.0`
-- `bathymetry_weight = 3.5`
-- `map_match_every_steps = 1`
+The digital twin now has a defensible calibration surface.
 
-Promoted hardware-tied passive stack:
+| Preset | Key result | Outcome |
+| --- | --- | --- |
+| `lab_static` | zero-disturbance error `0`, doubled-`T` scale ratio `3.999918`, gradient and wavefront terms visible | pass |
+| `maritime_benign` | valid fraction `0.925`, median contrast `0.660`, vibration suppression `40.0x` | pass |
+| `maritime_rough` | vibration suppression `3.18x`, failures dominated by `low_contrast` and `tilt_limit` | stressed but physically coherent |
 
-- live INS + depth + velocity
-- mission-mode photonic gravimeter
-- gravity gradiometer likelihood
-- bathymetry as supporting passive context
-- observe-only sequence matcher
-- bounded-lag Earth-signature output
+Important interpretation:
 
-Median result across acceptance seeds:
+- benign maritime operation is usable
+- rough maritime operation is near the edge of viability
+- the rough-mode failure pattern is physical, not a software artifact
 
-| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
-| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
-| `photonic_gravity` | `sequence` | 241.526 | 216.118 | 427.030 | 388.292 | 0.000 |
-| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 197.839 | 427.030 | 375.991 | 0.000 |
-| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 197.371 | 427.030 | 374.722 | 0.000 |
+## Frozen Demo Reruns
 
-Per-seed promoted output result:
+### Norwegian Margin
 
-| Seed | Live INS RMSE [m] | Lag-smoothed RMSE [m] | Improvement [m] | HMI horiz |
-| --- | ---: | ---: | ---: | ---: |
-| `42` | 241.526 | 197.371 | 44.155 | 0.000 |
-| `123` | 135.255 | 133.763 | 1.492 | 0.000 |
-| `777` | 364.901 | 306.314 | 58.587 | 0.000 |
-
-This is the first in-repo result that is both technically defensible and operationally relevant to the actual goal: **reducing denied-mission INS drift without GNSS by using gravity-led passive Earth-signature aiding.**
-
----
-
-## Photonic digital twin checkpoint (2026-04-13)
-
-The current branch replaces the older mission-facing photonic wrapper with a **phase-domain cold-atom Raman Mach-Zehnder digital twin**. The public interface is unchanged, but the internals now model:
-
-- interferometer phase accumulation with `k_eff T^2`
-- sensitivity-function-based vibration phase integration
-- classical accelerometer-assisted vibration compensation
-- gravity-gradient, Coriolis / rotation, chirp, Zeeman, light-shift, and wavefront terms
-- fringe formation, phase inversion, contrast loss, cadence, warm-up, and invalid-sample gating
-- per-sample photonic telemetry alongside the navigation-facing gravity estimate
-
-Primary literature basis used for the composite reference model:
-
-- Lellouch et al. (2025)
-- Cheinet et al. (2008)
-- Bidel et al. (2018)
-- Jensen et al. (2025)
-
-This phase was intentionally sensor-first. No estimator family changes were made.
-
-### Norwegian-margin rerun under the digital twin
-
-The same first-region maritime demo was rerun with the new photonic model across seeds `42/123/777`:
+Median across seeds `42/123/777` under the calibrated digital twin:
 
 | Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
-| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
-| `photonic_gravity` | `sequence` | 241.526 | 219.225 | 427.030 | 393.264 | 0.000 |
-| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 201.343 | 427.030 | 391.419 | 0.000 |
-| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 205.401 | 427.030 | 392.220 | 0.000 |
+| `photonic_gravity` | `sequence` | 241.526 | 219.837 | 427.030 | 395.241 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 201.691 | 427.030 | 392.602 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 205.490 | 427.030 | 393.373 | 0.000 |
 
-Interpretation:
+Result:
 
-- the more realistic photonic model still beats live INS on the promoted Norwegian-margin route
-- the gain shrinks materially relative to the earlier wrapper model
-- the best current first-region output on this branch is now the observe-only `photonic_gravity_bathymetry` sequence estimate, not the lag output
-- this is a realism gain, not a performance gain
+- first-region success survives the physics upgrade
+- the best first-region output on this branch is the observe-only `photonic_gravity_bathymetry` sequence path
 
-### Helgeland rerun under the digital twin
+### Helgeland Offshore
 
-Helgeland was rerun with the same digital twin across seeds `42/123/777`:
+Median across seeds `42/123/777` under the same digital twin:
 
 | Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | `live_ins` | `live_ins` | 161.608 | 161.608 | 278.771 | 278.771 | 0.000 |
-| `surrogate_gravity` | `sequence` | 161.608 | 209.473 | 278.771 | 331.689 | 0.000 |
-| `photonic_gravity` | `sequence` | 161.608 | 205.859 | 278.771 | 330.585 | 0.000 |
-| `photonic_gravity_bathymetry` | `sequence` | 161.608 | 199.778 | 278.771 | 330.585 | 0.000 |
-| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 161.608 | 194.961 | 278.771 | 309.133 | 0.695 |
-
-Interpretation:
-
-- the digital twin does not rescue second-region generalization
-- Helgeland still fails badly enough that adding a new modality immediately would muddy the diagnosis
-- the failure now points harder at regional distinctiveness, route packaging, and map realism rather than the old surrogate gravimeter being the main issue
-
-Practical conclusion from this phase:
-
-- keep the digital twin
-- keep the estimator family unchanged for now
-- use the new telemetry to explain failures
-- continue hardening realistic regional demo packs before adding more passive channels
-
----
-
-## Second-region validation outcome (2026-04-13)
-
-The next planned gate was a clean semi-frozen second-region validation on `feature/second-region-validation`:
-
-- keep the same estimator family
-- keep the same passive stack class
-- add only a new regional demo pack and a locked offshore sequence profile
-- require the promoted output to remain `photonic_gravity_bathymetry_lag`
-
-Chosen second region:
-
-- primary: `helgeland_offshore`
-- frozen profile: `public_offshore_locked`
-
-Locked offshore profile:
-
-- `window_size = 11`
-- `grid_half_span_m = [100.0, 100.0]`
-- `grid_spacing_m = [20.0, 20.0]`
-- `transition_std_m = [15.0, 15.0]`
-- `center_prior_std_m = [50.0, 50.0]`
-- `gravity_meas_std_mps2 = 1.2e-05`
-- `gradient_meas_std_per_s2 = 1.0e-08`
-- `bathymetry_meas_std_m = 2.0`
-- `bathymetry_weight = 3.5`
-- `height_std_m = 2.0`
-- `map_match_every_steps = 1`
-- `use_gradiometer = true`
-- `use_lag_smoother = true`
-
-Acceptance result:
-
-| Region | Profile | Live INS RMSE [m] | Promoted RMSE [m] | Live INS CEP95 [m] | Promoted CEP95 [m] | HMI zero all seeds | Outcome |
-| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| `norwegian_margin` | `norwegian_margin_maritime_demo` | 241.526 | 197.371 | 427.030 | 374.722 | `True` | `PASS` |
-| `helgeland_offshore` | `public_offshore_locked` | 161.608 | 199.273 | 278.771 | 331.707 | `False` | `FAIL` |
-
-Important Helgeland details:
-
-- even `photonic_gravity` alone was worse than live INS on median RMSE: `209.549 m` vs `161.608 m`
-- the promoted lag output had median horizontal HMI `0.790`
-- seed `123` was `79.2%` worse than live INS on horizontal RMSE
-- the acceptance gate failed on all three criteria that mattered: RMSE, CEP95, and HMI
-
-What this means:
-
-- the Norwegian-margin promoted result is stable and still reruns unchanged through the new demo-pack-driven path
-- the current gravity-led passive stack does **not** yet generalize across a second offshore region under a locked profile
-- the correct next branch is **not** `feature/magnetic-passive-aiding`
-- the correct next branch is **`feature/regional-demo-pack-hardening`**
-
-Reasoning:
-
-- adding magnetic now would blur whether the failure came from missing modality or from weak regional packaging / route selection
-- the Helgeland failure is too strong to wave away as a small robustness issue
-- we need a stable two-region gravity-led passive story before layering in another signature channel
-
----
-
-## Current baseline and why it still matters
-
-The repo is a real, working gravity-aided navigation simulator. The validated maritime baseline proves:
-
-| Metric | IMU-only | Aided (observe-only PF) | Improvement |
-| --- | ---: | ---: | ---: |
-| Horizontal RMSE [m] | 13,750 | 90.3 | 152× |
-| CEP95 [m] | 21,580 | 169 | 128× |
-| Vertical RMSE [m] | 2,059 | 0.387 | 5,319× |
-| Gravimeter RMSE [m/s²] | — | 9.42e-06 | — |
-| PF horizontal RMSE [m] | — | 128.6 | — |
-
-The stack includes: WGS84 geodesy, nav-grade IMU model, scalar gravimeter with moving-base reduction, depth and velocity aiding, 15-state error-state INS, constrained fusion, particle-filter map matching (observe-only), integrity monitoring, metrics and reporting infrastructure.
-
-PF feedback is intentionally disabled. Naive PF-to-INS pseudo-position injection destroys the INS (19 km RMSE). Covariance inflation makes it non-destructive but never better than observe-only. This is the central bottleneck.
-
-That older synthetic baseline still matters because it established three things that remained true all the way through the more realistic demo work:
-
-- gravity helps only as an aiding source inside an INS-centered stack
-- sequence matching beats PF as the main Earth-signature estimator
-- the safe architecture is a separate delayed-output path, not naive closed-loop feedback into the live INS
-
----
-
-## Regional and public benchmark checkpoints
-
-The repo now has a **gravity-first Norwegian-margin regional benchmark path** that keeps the estimator stack unchanged and swaps only the map source:
-
-- new `gravnav.datasets` layer that ingests a regular-grid CSV and produces a `GravityGridMap` cache plus manifest
-- tracked in-repo Norwegian-margin fixture under `data/gravity_maps/raw/norwegian_margin/`
-- processed cache and manifest under `data/gravity_maps/processed/`
-- regional scenario `norwegian_margin_maritime`
-- regional benchmark/report path comparing live INS, PF observe-only, sequence observe-only, and the bounded-lag smoother
-
-Current result on `norwegian_margin_maritime`, seed `42`, `dt = 2.0 s`:
-
-| Path | Horizontal RMSE [m] | CEP95 [m] | HMI horiz |
-| --- | ---: | ---: | ---: |
-| Live INS | 111.474 | 196.457 | 0.0 % |
-| Best PF observe-only (`observe_plus_gradient`) | 131.762 | 253.578 | 0.0 % |
-| Best sequence observe-only (`sequence_plus_gradient`) | 110.219 | 195.754 | 0.0 % |
-| Bounded-lag smoother (`sequence_plus_gradient_lag_smoothed`) | 110.763 | 196.082 | 0.0 % |
-
-What this means:
-
-- the **ranking survives** on the regional benchmark: sequence matching still beats PF
-- the bounded-lag smoother still beats the live INS, but only modestly
-- the gains shrink sharply relative to the synthetic maritime benchmark, which means the earlier synthetic map materially overstated regional gravity distinctiveness
-- the current regional path is a realism check, not yet a benchmark on a full public Norwegian-margin survey product
-
-This stage was valuable because it showed that synthetic maps had overstated the distinctiveness of the signal. That realism penalty is exactly what pushed the work toward longer missions and multi-modal passive context.
-
----
-
-## Public-product benchmark checkpoint
-
-That next step is now partly complete. The repo can ingest the public NAG-TEC Bouguer anomaly export (`bouguer_anomaly_geo.xyz`, DOI `10.22008/FK2/AQ38FS`) by binning the scattered geographic XYZ product into the existing `GravityGridMap` interface, then generating a regional maritime scenario inside the processed map bounds.
-
-Important reality check: the default regional sequence settings that worked on the synthetic and fixture benchmarks do **not** automatically carry over. On the first high-information public-product routes, default observe-only PF and default observe-only sequence were often worse than the live INS. That is the expected kind of realism penalty the fixture could not expose.
-
-But there is now a real public-product win:
-
-- route: `norwegian_margin_public_maritime`
-- initial state: `lat 66.0 deg`, `lon 14.0 deg`, `heading 45 deg`
-- source: public NAG-TEC Bouguer anomaly export, binned into a regular grid
-
-With a tighter INS-centered sequence configuration:
-
-- `sequence_window_size = 11`
-- `sequence_grid_half_span = (100 m, 100 m)`
-- `sequence_grid_spacing = (20 m, 20 m)`
-- `sequence_transition_std = (15 m, 15 m)`
-- `sequence_center_prior_std = (50 m, 50 m)`
-
-the public-product sequence result becomes:
-
-| Path | Horizontal RMSE [m] | CEP95 [m] |
-| --- | ---: | ---: |
-| Live INS | 104.322 | 187.937 |
-| Tuned observe-only sequence | 91.721 | 139.566 |
-| Tuned bounded-lag smoother | 98.144 | 172.432 |
-
-Interpretation:
-
-- the first public-product benchmark win in the repo is now real, but it is a **tuned observe-only sequence** win, not yet a validated delayed-output win
-- the tuned lag smoother also improves RMSE and CEP95, but it still shows nonzero lag-output horizontal HMI (`16.65%`), so it is not promotable yet
-- the public-product result survives only after retuning the sequence priors to stay much closer to the INS than the default synthetic-benchmark settings did
-- that means the next high-impact work is not more PF feedback machinery; it is **productizing public-product preparation and sequence-configuration benchmarking by map regime**
-
-This stage was valuable because it showed the first real public-product sequence win, but also made clear that a short-route gravity-only story was still too fragile. The promoted 2026-04-12 maritime demo moved beyond that by using a longer denied mission and a gravity-led multi-modal passive stack.
-
----
-
-## Current recommended product framing
-
-The correct product claim is now much clearer than it was when this report began.
-
-Do not frame the system as:
-
-- a standalone gravimeter replacing GNSS
-- a universal global navigator
-- a closed-loop gravity-feedback INS already ready for production
-
-Do frame it as:
-
-- a **GPS-denied passive navigation subsystem**
-- with **INS as the real-time propagator**
-- **gravity as the primary non-GNSS Earth-signature**
-- **gradient and bathymetry as ambiguity-reducing passive context**
-- and a **bounded-lag Earth-signature output** as the currently promotable improvement path
-
-This is the first framing that matches both the physics and the results.
-
----
-
-## The core problem: why PF feedback fails
-
-This is not a tuning problem. It is a **structural observability problem**.
-
-Scalar gravity at a point gives a 1D measurement in 3D position space. The iso-gravity contours on any typical map are elongated curves. The PF posterior is therefore **ridge-shaped**: well-constrained perpendicular to the local gravity gradient, poorly constrained along it.
-
-Feeding this posterior back as a pseudo-position measurement treats a ridge as if it were a point. The INS receives a confident but wrong constraint along the ridge direction. That is why it diverges.
-
-**Evidence from the repo:** The PF's predicted disturbance spread across particles is only ~0.14 mGal versus ~1 mGal measurement noise. The ESS stays near maximum (~127/128). The particles are not being separated — the scalar measurement is too ambiguous to distinguish them in the current configuration.
-
----
-
-## The plan: prioritized implementation backlog
-
-### Priority 1 — Directional PF feedback (immediate, weeks 1-2)
-
-**Goal:** Convert PF feedback from dangerous/off to information-aware/safe.
-
-**What to build:**
-
-1. **Eigendecompose the PF posterior covariance in local NED.** After each PF update, compute the 3×3 position covariance of the weighted particle cloud. Extract eigenvalues (λ₁ ≤ λ₂ ≤ λ₃) and corresponding eigenvectors (e₁, e₂, e₃).
-
-2. **Inject a rank-1 directional pseudo-measurement along the well-constrained direction only.** The measurement model becomes:
-   - H = e₁ᵀ (the unit vector along the smallest-eigenvalue direction)
-   - z = e₁ᵀ · (PF posterior mean − INS position), projected scalar
-   - R = λ₁ (the PF posterior variance in that direction)
-   - This is a standard linear measurement update through the existing fusion interface
-
-3. **Add acceptance gates based on observability indicators:**
-   - Condition ratio: λ₃/λ₁ must exceed a threshold (ridge is well-defined)
-   - ESS must be below a threshold (particles were actually discriminated)
-   - Local map gradient norm must exceed minimum (there is information here)
-   - Require N consecutive informative updates before first injection
-   - Cap correction magnitude per update
-
-4. **Add adaptive covariance inflation:** inflation = f(ESS, entropy, gradient norm, eigenvalue ratio). High ambiguity → huge inflation. Well-conditioned posterior → smaller inflation.
-
-**Files to modify:**
-- `src/gravnav/estimators/map_match_pf.py` — add posterior eigendecomposition and directional measurement extraction to `MapMatchPFUpdateResult`
-- `src/gravnav/estimators/fusion.py` — add a directional pseudo-measurement constructor (rank-1 H matrix from eigenvector)
-- `src/gravnav/simulation/runner.py` — wire directional feedback through the acceptance gate logic
-- New: `src/gravnav/estimators/feedback_policy.py` — encapsulate gate conditions, adaptive inflation, persistence counters
-
-**Success criterion:** Closed-loop PF feedback that beats the observe-only baseline (currently 90.3 m RMSE) without ever making it worse. Even a 5-10% improvement with guaranteed stability is a breakthrough relative to the current state.
-
-**Outcome (2026-04-09 benchmark, seed 42):** Implemented as `DirectionalFeedbackController` in `src/gravnav/estimators/feedback_policy.py` with the full rank-1 + acceptance-gate machinery. Ran head-to-head against observe-only on `maritime_baseline`. Two failure modes found and fixed:
-
-| Iteration | Horizontal RMSE | CEP95 | HMI horiz | Finding |
-| --- | ---: | ---: | ---: | --- |
-| Observe-only baseline | 103.5 m | 190.0 m | 0.0 % | — |
-| Directional FB (full 3D eigendecomp) | 113.8 m | 220.5 m | 39.5 % | Smallest-eigenvalue direction was almost always `(0, 0, 1)` — the controller fires along vertical because depth aiding already makes that axis tight. Vertical bias accumulates, cross-couples through EKF into east. |
-| Directional FB (`horizontal_only=True`) | 120.0 m | 248.6 m | — | Fires 20/1020 updates along real horizontal eigenvectors, but the PF mean is *biased relative to truth* (NE of INS when truth is SW of INS), so even small, inflated corrections pull INS the wrong way. |
-| Gate sweep (4 configs) | 103.5–104.6 m | 190.0–192.0 m | 0.0–24.0 % | Any config that actually applies feedback ties or hurts RMSE and degrades integrity. Strict gates (`min_eigenvalue_ratio≥8`, `persistence_count≥3`, `max_correction_norm_m=2`, `base_inflation=15`) tie the baseline exactly at **103.5 m / 0 % HMI** because feedback never fires — a safe no-op. |
-
-**Root cause:** The PF posterior itself is miscalibrated. The reported σ along the constrained direction is ~5 m but the true PF-to-truth distance is tens of metres — the scalar gravity likelihood collapses into a sharp but *biased* mode along a ridge. This is a **structural observability limit of scalar gravity on a smooth map**, not a gate-tuning problem. No re-weighting of a biased estimator recovers the lost information.
-
-**Lock-in:** Defaults in `DirectionalFeedbackSpec` set to the conservative "safe no-op" config. Directional feedback code path is verified, tested, and ready to be re-enabled as soon as a second, orthogonal measurement channel makes the posterior honest.
-
-**Decision:** Priority 1 is effectively complete in the *machinery* sense (code + gates + tests), but the *performance* success criterion is blocked on Priority 3. Proceed directly to Priority 3.
-
----
-
-### Priority 2 — Observability analysis module (weeks 1-2, parallel with Priority 1)
-
-**Goal:** Quantify when and where gravity navigation actually works.
-
-**What to build:**
-
-1. **Local gravity map Jacobian:** G = [∂δg/∂lat, ∂δg/∂lon, ∂δg/∂h] computed from finite differences of the map at each position.
-
-2. **Trajectory-window observability Gramian:**
-   ```
-   O = Σ_k  Φ(t₀, t_k)ᵀ  G_kᵀ  R_k⁻¹  G_k  Φ(t₀, t_k)
-   ```
-   Accumulated over a sliding window. Eigenvalues of O indicate which position directions are observable.
-
-3. **Navigation information density metric:** A scalar summary (e.g., log-det of O, or minimum eigenvalue) that indicates how much position information the gravity measurements provide at each trajectory segment.
-
-4. **Feedback-allowed flag:** Binary policy — feedback is safe when the Gramian eigenvalues exceed thresholds. This feeds directly into the acceptance gates in Priority 1.
-
-**Files to create:**
-- `src/gravnav/analysis/observability.py` — Gramian computation, eigenvalue extraction, information density scoring
-- `src/gravnav/analysis/__init__.py`
-
-**Files to modify:**
-- `src/gravnav/simulation/runner.py` — compute and log observability at each update
-- `src/gravnav/plots/nav_plots.py` — add observability heatmap / eigenvalue timeline plot
-
----
-
-### Priority 3 — Gravity gradient measurement model (weeks 2-3)
-
-**Goal:** Break scalar ambiguity by adding gradient information.
-
-**What to build:**
-
-1. **Vertical gravity gradient (Γ_zz) from map finite differences:** Even without a physical gradiometer, simulate gradient measurements by evaluating the map at (lat, lon, h ± Δh) and computing the vertical derivative. Add measurement noise appropriate to a quantum gradiometer (~10 E = 10⁻⁸ s⁻²).
-
-2. **Gradient likelihood in the PF:** The PF update becomes a 2D likelihood — gravity disturbance AND gradient must both match. This collapses the posterior ridge dramatically.
-
-3. **Extended measurement model:** For the INS fusion path, gradient adds an independent measurement with a different H matrix (spatial second derivative of gravity), improving the observability rank from 1 to 2 at each point.
-
-**Files to create:**
-- `src/gravnav/sensors/gravity_gradiometer.py` — gradient measurement model, noise model, map-derived gradient computation
-- `tests/test_gravity_gradiometer.py`
-
-**Files to modify:**
-- `src/gravnav/estimators/map_match_pf.py` — add optional gradient likelihood term
-- `src/gravnav/simulation/runner.py` — wire gradient measurements into the update loop
-- Configs: add gradiometer sensor specification
-
----
-
-### Priority 4 — Sequence-based matching: Viterbi/HMM (weeks 3-5)
-
-**Goal:** Exploit trajectory history instead of matching point-by-point.
-
-**What to build:**
-
-1. **Sliding-window HMM/Viterbi matcher:** Discretize candidate positions on a grid centered on the INS estimate. At each timestep, compute transition probabilities from INS velocity and emission probabilities from gravity (and gradient) likelihoods. Run Viterbi over the window to find the most-likely trajectory.
-
-2. **Delayed pseudo-measurement injection:** The sequence matcher produces a trajectory estimate, not a point estimate. Inject the correction at the center of the window (delayed but more accurate).
-
-3. **Comparison benchmark vs. PF:** Same scenario, same sensors, compare PF vs. Viterbi on accuracy, computational cost, and stability.
-
-**Files to create:**
-- `src/gravnav/estimators/gravity_sequence_match.py` — HMM/Viterbi implementation
-- `tests/test_sequence_match.py`
-
-**Files to modify:**
-- `src/gravnav/simulation/runner.py` — add sequence matcher as an alternative estimator path
-
-**Outcome (2026-04-09 benchmark, seed 42):** Implemented as `GravitySequenceMatcher` in `src/gravnav/estimators/gravity_sequence_match.py` and wired into `src/gravnav/simulation/runner.py`, `src/gravnav/simulation/results.py`, `src/gravnav/simulation/metrics.py`, `scripts/run_single_scenario.py`, and `scripts/benchmark_filters.py`. The first implementation is deliberately **observe-only**: it emits delayed trajectory estimates and metrics, but does not yet feed delayed corrections into the live INS.
-
-Benchmark on `maritime_baseline`:
-
-| Configuration | INS horizontal RMSE | Map-matcher horizontal RMSE | Map-matcher CEP95 | Finding |
-| --- | ---: | ---: | ---: | --- |
-| PF observe-only | 103.5 m | 98.94 m | 180.59 m | Reference PF result |
-| PF + gradient | 103.5 m | 96.90 m | 178.54 m | Best current PF result |
-| Sequence only | 103.5 m | 99.04 m | 179.50 m | Roughly ties scalar PF |
-| Sequence + gradient | 103.5 m | **92.81 m** | **168.13 m** | Best current map-matching estimator |
-
-**Interpretation:** Sequence matching is now justified as a first-class estimator path. History helps enough to beat the current PF on the map-matcher estimate itself, especially once gradient likelihood is included. But because the current implementation is observe-only, the INS metrics stay flat at the validated baseline. That means the next architectural step is **not** more pointwise PF tuning; it is designing a delayed sequence-to-INS feedback path that respects the delayed-estimate timing.
-
-**Decision:** Priority 4 is implemented and benchmarked successfully in observe-only mode. The next work should focus on delayed feedback / smoothing-aware fusion for sequence outputs, or move in parallel on Priority 5 if sensor-physics fidelity becomes the bottleneck.
-
-**Follow-up (2026-04-09 delayed-feedback experiment):** Implemented an initial `SequenceFeedbackController` that transfers the delayed sequence-estimated horizontal INS bias to the current state with covariance inflation proportional to delay. This path is wired into `src/gravnav/estimators/feedback_policy.py`, `src/gravnav/simulation/runner.py`, `src/gravnav/estimators/fusion.py`, and the CLI/benchmark scripts.
+| `photonic_gravity` | `sequence` | 161.608 | 206.035 | 278.771 | 330.615 | 0.000 |
+| `photonic_gravity_bathymetry` | `sequence` | 161.608 | 199.773 | 278.771 | 330.615 | 0.000 |
+| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 161.608 | 195.002 | 278.771 | 311.620 | 0.696 |
 
 Result:
 
-| Configuration | INS horizontal RMSE | Finding |
-| --- | ---: | --- |
-| Default conservative gate | 103.5 m | Safe no-op, zero applied updates |
-| Active tune A (`peak>=0.05`, inflation 3.0, transfer RW 0.6) | 7.2 km | Catastrophic divergence |
-| Active tune B (`peak>=0.05`, inflation 6.0, transfer RW 1.0) | 828 m | Still far worse than baseline |
-| Active tune C (`peak>=0.05`, inflation 10.0, transfer RW 1.5, max corr 50 m) | 214.6 m | Less bad, still clearly worse |
+- Helgeland still fails
+- the lag output remains non-promotable because RMSE, CEP95, and HMI all fail
 
-**Conclusion:** A simple current-state transfer of delayed sequence bias is structurally inadequate. The delayed sequence estimate is useful, but not in the form “apply this old horizontal offset to the current INS state.” The next serious closed-loop step is a replay/smoother-aware delayed-update design, not more tuning of this transfer controller.
+## Telemetry Diagnosis
 
-**Follow-up (2026-04-09 fixed-lag replay experiment):** Implemented a replay-aware delayed sequence feedback path. In this mode, the delayed sequence estimate is fused into the INS state at the delayed time, then the runner replays the stored IMU, depth, and velocity-aid measurements forward to the present. The sequence matcher is reset after an applied replay update so subsequent windows use consistent INS centers. This path is wired into `src/gravnav/estimators/feedback_policy.py`, `src/gravnav/simulation/runner.py`, `scripts/run_single_scenario.py`, and `scripts/benchmark_filters.py`.
+Median photonic telemetry on the promoted lag path:
 
-Result on `maritime_baseline`, seed 42:
+| Region | Valid fraction | Median contrast | Tilt exceedance fraction | Dominant rejection |
+| --- | ---: | ---: | ---: | --- |
+| `norwegian_margin` | 0.764 | 0.677 | 0.227 | `tilt_limit` |
+| `helgeland_offshore` | 0.764 | 0.677 | 0.227 | `tilt_limit` |
 
-| Configuration | INS horizontal RMSE | CEP95 | HMI horiz | Applied updates | Finding |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Sequence + gradient observe-only | 103.5 m | 190.0 m | 0.0 % | 0 | Reference |
-| Replay feedback, conservative default | 103.5 m | 190.0 m | 0.0 % | 0 | Safe no-op |
-| Replay feedback, relaxed (`peak>=0.03`, `max_std<=120 m`, `max_corr<=50 m`, inflation `10.0`) | 113.1 m | 220.1 m | 38.5 % | 93 | Much less destructive than bias-transfer, but still worse than observe-only |
+This is the decisive branch result.
 
-**Interpretation:** The replay architecture is the correct structural move because it applies the estimate at the time it actually describes. But that alone is not enough. Even with lag replay, the current horizontal pseudo-measurement remains biased enough that active updates degrade both INS accuracy and integrity.
+Norwegian margin passes under this exact sensor envelope. Helgeland fails under the same sensor envelope. So the remaining bottleneck is **not** primarily the photonic sensor model. It is the regional packaging and Earth-signature distinctiveness story for the second region.
 
-**Follow-up (2026-04-09 directional delayed-measurement experiment):** Upgraded the replay controller to support a richer delayed measurement model: instead of always injecting the full 2D horizontal posterior mean offset, the controller can eigendecompose the horizontal posterior covariance and inject only the best-constrained horizontal component as a rank-1 directional measurement at the delayed state. This is the sequence-side analogue of the earlier PF directional feedback idea, but now combined with lag replay.
+## Branch Decision
 
-Result on `maritime_baseline`, seed 42:
+The next branch should be:
 
-| Configuration | INS horizontal RMSE | CEP95 | HMI horiz | Applied updates | Finding |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Replay, full-horizontal relaxed (`peak>=0.03`, `max_std<=120 m`, `max_corr<=50 m`, inflation `10.0`) | 113.1 m | 220.1 m | 38.5 % | 93 | Better than bias-transfer, but still unsafe |
-| Replay, directional horizontal safe (`ratio>=1.15`, `peak>=0.03`, `max_std<=120 m`, `max_corr<=30 m`, inflation `10.0`) | 108.1 m | 211.5 m | **0.0 %** | 38 | Best current active delayed-feedback result; safer, but still worse than observe-only |
+- `feature/regional-telemetry-hardening`
 
-**Interpretation:** The richer delayed measurement model helps. Directional replay removes the integrity collapse seen in relaxed full-horizontal replay and gets much closer to the observe-only baseline. But it still does not actually beat the baseline. That means the remaining issue is not just “full 2D correction is too aggressive”; it is that the delayed posterior itself is still not accurate enough for direct pseudo-measurement injection.
+Why:
 
-**Decision:** Priority 4 remains complete only in the observe-only sense. The repo now contains:
-- a clearly bad current-state transfer controller
-- a better-structured full-horizontal lag-replay controller
-- an even better directional lag-replay controller
+- the digital twin is now credible enough for diagnosis
+- first-region performance survives the sensor upgrade
+- second-region failure is still real
+- telemetry shows that Helgeland is failing under the same sensor conditions that still allow Norwegian margin to beat INS
 
-None is yet acceptable as a production feedback path. The next serious step is no longer “add replay” or “add directional geometry”; it is “add replay plus retrodiction/smoother-aware delayed-update logic or a richer delayed state model.”
+What should **not** happen next:
 
-**Follow-up (2026-04-09 bounded-lag sequence smoother output):** Implemented the planned **fixed-lag smoothed navigation track as a first-class delayed estimator output**, without feeding it back into the live INS. The core pieces are:
+- do not add magnetic aiding yet
+- do not reopen PF-to-INS feedback
+- do not retune the photonic model against navigation outcome
 
-- `SequenceAnchorEstimate` and anchor export from `GravitySequenceMatcher`
-- `SequenceLagSmootherSpec` / `SequenceLagSmootherController`
-- lag-buffered replay over stored IMU/depth/velocity history
-- `SimulationEstimatorLog.lag_smoothed_states`
-- lag-smoothed metrics and benchmark reporting
+## Next Most Impactful Work
 
-Two implementation bugs had to be fixed before this path became meaningful:
+### 1. Regional telemetry hardening
 
-1. sequence outputs were initially keyed by the matcher's internal update index instead of truth-step time, so the lag smoother silently fell back to replay for most of the run
-2. the default lag was initially interpreted in raw truth steps instead of **measurement-update lag**, which was wrong whenever gravity updates were downsampled relative to the truth grid
+Build a region-aware failure analysis layer for the frozen demo packs:
 
-After fixing those, the lag-smoothed path became a real delayed navigation estimator instead of a no-op.
+- align navigation error spikes with photonic telemetry degradations
+- correlate matcher failure with local gravity texture, bathymetry texture, and route geometry
+- quantify where Helgeland loses distinctiveness relative to Norwegian margin
 
-Primary benchmark on `maritime_baseline`, seed `42`:
+Deliverable:
 
-| Path | Horizontal RMSE | CEP95 | Vertical RMSE | HMI horiz |
-| --- | ---: | ---: | ---: | ---: |
-| Live INS baseline | 103.5 m | 190.0 m | 0.821 m | 0.0 % |
-| Sequence + gradient observe-only matcher | 92.8 m | 168.1 m | — | — |
-| **Bounded-lag smoothed navigation output** | **98.3 m** | **181.9 m** | **0.583 m** | **0.0 %** |
+- one compact two-region diagnostic report that attributes failure segment-by-segment
 
-Acceptance checks from the plan:
+### 2. Demo-pack hardening, not new modalities
 
-| Scenario | Seed | Live INS RMSE | Lag-smoothed RMSE | Live CEP95 | Lag-smoothed CEP95 | HMI horiz |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `maritime_baseline` | 42 | 103.5 m | 98.3 m | 190.0 m | 181.9 m | 0.0 % |
-| `maritime_baseline` | 123 | 85.7 m | 80.2 m | 153.2 m | 150.3 m | 0.0 % |
-| `maritime_baseline` | 777 | 249.2 m | 234.0 m | 425.3 m | 413.8 m | 0.0 % |
-| `uuv_long_endurance` | 42 | 1014.8 m | 1005.0 m | 2319.3 m | 2295.5 m | 0.0 % |
+Strengthen the frozen second-region package without changing the estimator family:
 
-**Interpretation:** This is the first delayed navigation path in the repo that actually clears the success criterion of this phase:
+- keep the photonic digital twin fixed
+- keep gravity and bathymetry only
+- improve route packaging and map-window realism using only region information, not navigation outcome
 
-- it beats the live INS on the primary maritime benchmark
-- it also improves CEP95
-- the gain survives the small multi-seed maritime check
-- it also survives one additional scenario
-- horizontal HMI remains zero in all tested runs
+Success criterion:
 
-**Decision:** The bounded-lag sequence smoother is now a successful, validated **delayed-output estimator**. It should remain separate from the real-time INS in this phase. That is the right boundary: the repo now has a credible delayed navigation product, but it still does **not** have a validated closed-loop sequence-feedback solution.
+- second region must beat live INS without nonzero horizontal HMI under the same sensor model
 
----
+### 3. Only after that, consider the next passive cue
 
-### Priority 5 — Photonic gravimeter physics model (weeks 3-5, parallel with Priority 4)
+If the two-region gravity-led story becomes stable, then add the next orthogonal passive channel:
 
-**Goal:** Model the instrument you actually want to build, not a generic scalar sensor.
+- magnetic aiding
 
-**What to build:**
+But not before the two-region regional story is clean.
 
-1. **Atom interferometer phase response:** φ = k_eff · g · T², where T is tunable interrogation time and k_eff depends on laser wavelength and momentum transfer order.
+## Reproduction Commands
 
-2. **Quantum-noise-limited sensitivity:** Δg = 1/(k_eff · T² · √N), derivable from first principles given atom number N, interrogation time T, and effective wavevector k_eff.
+Calibration:
 
-3. **Systematic effects:** AC Stark (light) shifts, wavefront aberrations, Coriolis coupling in the interferometer (depends on platform rotation rate — couples to IMU), two-photon light shift.
-
-4. **Vibration rejection model:** Simultaneous classical accelerometer used to post-correct atom interferometer fringes. The residual after correction is the actual measurement noise floor.
-
-5. **Optional multi-axis / gradiometer configuration:** Same atoms, different interrogation geometry → gravity vector components or gradient.
-
-**Files to create:**
-- `src/gravnav/sensors/photonic_gravimeter.py` — physics-based atom interferometer model
-- `configs/sensors/photonic_gravimeter_coldatom.json`
-- `tests/test_photonic_gravimeter.py`
-
----
-
-### Priority 6 — Fill scaffold files and harden infrastructure (weeks 2-4, ongoing)
-
-**What to build:**
-
-1. `scripts/run_monte_carlo.py` — batch scenario execution with parameter sweeps
-2. `scripts/make_synthetic_map.py` — CLI for generating gravity maps with controlled anomaly spectra
-3. `scripts/benchmark_filters.py` — automated comparison: INS-only / INS+depth+vel / INS+gravity observe-only / INS+directional PF feedback / INS+Viterbi
-4. `tests/test_gravimeter.py` — moving-base recovery, noise model, bandwidth filtering
-5. `tests/test_map_match_pf.py` — posterior convergence, ESS behavior, eigenvalue extraction
-6. `pyproject.toml` — full metadata, dependencies, console entry points
-7. YAML config population (mirror all JSON configs)
-8. Wire residuals/NIS into integrity snapshots (currently zeroed out)
-
----
-
-### Priority 7 — Real Earth data, regional scope (weeks 5-8)
-
-**Goal:** Move from synthetic maps to real geophysical products. Start with one high-contrast maritime theater, not global.
-
-**Data sources to integrate:**
-
-| Product | Coverage | Resolution | Use |
-| --- | --- | --- | --- |
-| ICGEM (EGM2008 / EIGEN-6C4) | Global | ~5 arc-min (degree 2190) | Static gravity field |
-| GRACE / GRACE-FO (via ICGEM) | Global | ~300 km | Temporal gravity variations |
-| GEBCO_2025 | Global | 15 arc-sec | Bathymetry/topography |
-| WMM2025 / IGRF-14 | Global | Degree 133/13 | Magnetic field |
-| ERA5 | Global | 0.25° hourly | Atmospheric state |
-| HYCOM GOFS 3.1 | Global ocean | 1/12° | Ocean currents, T/S |
-| FES2022b | Global ocean | 1/16° | Tides and tide loading |
-
-**Files to create:**
-- `src/gravnav/datasets/gravity_loader.py` — ICGEM spherical harmonic evaluation or grid interpolation
-- `src/gravnav/datasets/bathymetry_loader.py` — GEBCO NetCDF reader
-- `src/gravnav/datasets/magnetic_loader.py` — WMM/IGRF evaluation
-- `src/gravnav/datasets/tidal_model.py` — FES2022b tidal gravity prediction
-- `src/gravnav/datasets/__init__.py`
-- `data/gravity_maps/README.md` — map format specification (coordinate convention, units, reference height, interpolation method, temporal validity, source provenance, uncertainty layers, land/ocean masking, version metadata)
-
-**First test region:** Pick a region with strong gravity gradients and good survey coverage (e.g., Mid-Atlantic Ridge, Mariana Trench approach, or Norwegian continental margin). Prove that the full pipeline works with real data before going global.
-
----
-
-### Priority 8 — ML Layer 1: residual correction network (weeks 6-10)
-
-**Goal:** Learn to predict and remove nuisance terms from gravimeter measurements.
-
-**Architecture:** Temporal convolutional network (TCN) with dilated convolutions.
-
-**Input features (per timestep):**
-- Raw gravimeter output
-- IMU specific force (3-axis) and angular rate (3-axis)
-- Platform velocity and attitude estimates
-- Vertical acceleration spectral features (sea-state proxy)
-- Temperature, depth/pressure
-
-**Output:** Predicted residual (scalar) + heteroscedastic uncertainty (scalar)
-
-**Loss:** Negative log-likelihood with learned variance:
-```
-L = 0.5 · log(σ²_pred) + 0.5 · (y_true − y_pred)² / σ²_pred
+```bash
+python3 scripts/run_photonic_calibration.py \
+  --output-dir /tmp/gravnav_photonic_calibration
 ```
 
-**Training data:** Simulated trajectories with known truth (compute actual residuals), later augmented with real survey data where post-processed GNSS truth is available.
+Norwegian-margin rerun:
 
-**Files to create:**
-- `src/gravnav/ml/residual_correction.py` — TCN architecture, training loop, inference wrapper
-- `src/gravnav/ml/__init__.py`
-- `scripts/train_residual_model.py`
-- `configs/ml/residual_tcn.yaml`
+```bash
+python3 scripts/run_maritime_demo.py \
+  --demo-pack-manifest data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json \
+  --output-dir /tmp/gravnav_photonic_nm
+```
 
-**Integration:** The residual model sits between raw gravimeter output and the PF/Viterbi measurement model. It produces a corrected gravity disturbance with calibrated uncertainty.
+Helgeland rerun:
 
----
+```bash
+python3 scripts/run_maritime_demo.py \
+  --demo-pack-manifest data/bathymetry/processed/helgeland_offshore_demo_pack.json \
+  --output-dir /tmp/gravnav_photonic_hel
+```
 
-### Priority 9 — Multi-modal fusion expansion (months 2-3)
+Branch checkpoint:
 
-**Goal:** Gravity is one channel, not the whole system.
-
-**Measurement channels to add:**
-- Magnetic field vector (3-component, from WMM/IGRF map + anomaly)
-- Bathymetry / echo-sounder (map matching against GEBCO)
-- Tidal gravity signature (time-varying, predictable from FES2022b)
-- Ocean current profile (from HYCOM, as nuisance correction or weak position constraint)
-
-**Each channel needs:**
-- Sensor model (measurement + noise + bias)
-- Map/model interface (lookup expected value at position)
-- Likelihood function for PF/Viterbi
-- Observability contribution to the Gramian
-
-**Architectural upgrade:** Move toward a layered estimator:
-- Layer A: high-rate INS mechanization + bias states
-- Layer B: physics observation models (gravity, gradient, magnetic, bathymetry, tidal)
-- Layer C: global inference (PF/Viterbi/factor-graph hybrid, integrity, route planning)
-
----
-
-### Priority 10 — Monte Carlo studies and benchmarking (months 2-3)
-
-**Benchmark matrix:**
-
-| Configuration | What it tests |
-| --- | --- |
-| INS only | Pure dead-reckoning drift baseline |
-| INS + depth + velocity | Sensor aiding without map matching |
-| INS + scalar gravity (observe-only PF) | Current validated baseline |
-| INS + scalar gravity (directional feedback) | Priority 1 result |
-| INS + scalar + gradient | Priority 3 addition |
-| INS + Viterbi sequence matcher | Priority 4 addition |
-| INS + multi-modal (gravity + magnetic + bathymetry) | Priority 9 result |
-| INS + ML residual correction + multi-modal | Priority 8 + 9 result |
-
-**Scenario variations:**
-- High-gradient region vs. flat/ambiguous region
-- Short mission (30 min) vs. long mission (24 hr) vs. very long (7 days)
-- Surface vessel vs. deep UUV
-- Calm seas vs. rough weather
-- Good initial position vs. large initial error (adversarial)
-
----
-
-## Longer-horizon research directions (months 3-6+)
-
-These are promising but speculative. Pursue after Priorities 1-10 are solid.
-
-### Neural Earth field (SIREN / Fourier feature network)
-Train an implicit neural representation F(lat, lon, h, t) → multi-modal signature vector. Compression target: global gravity field at navigation-useful resolution in ~100 MB. Use SIREN architecture (sinusoidal activations match spherical harmonic structure). Progressive training from low to high spherical harmonic degree.
-
-### Tidal gravity exploitation
-Lunar/solar tidal signatures (~100 μGal) are predictable functions of (position, time). Over 24-hour missions, tidal phase constrains time independently; amplitude pattern constrains latitude; ocean loading signature constrains coastal proximity. Requires ~1 μGal sensitivity (achievable with cold-atom instruments).
-
-### Spectral fingerprinting
-Match gravity spectrograms (short-time Fourier transform over sliding windows) instead of point values. Different regions have different spectral textures. A 10-minute spectrogram is far more globally distinctive than a single scalar value. Use VGGish-style CNN to produce compact embeddings for fast nearest-neighbor matching.
-
-### Information-theoretic route planning
-Optimize trajectory for navigation information gain: I(w) = expected posterior entropy reduction at waypoint w. Fly perpendicular to iso-gravity contours. Slow down in flat regions to probe vertical gradient. Seek high-gradient corridors when possible.
-
-### Learned proposal PF (ML Layer 3)
-Use a sequence model (set transformer with temporal attention) to propose particles in high-likelihood regions. Training via contrastive learning: discriminate true trajectory segments from hard negatives displaced by 1-10 km. This replaces the INS-only proposal with a learned proposal that dramatically reduces required particle count.
-
-### Sagnac rotation sensing
-If the photonic architecture supports it: ring interferometer or matter-wave Sagnac gyroscope gives absolute rotation rate → absolute latitude from Ω·sin(φ) and absolute heading reference independent of magnetics.
-
-### Synthetic aperture gravimetry
-Combine gravity measurements along a trajectory to solve for local mass density at finer resolution than individual measurement footprint. Computationally expensive but could dramatically improve map-matching distinctiveness.
-
-### Collaborative fleet SLAM
-Multiple vehicles share gravity-signature-correlated relative constraints (not absolute positions) via distributed factor graph. Gravity-based loop closure across a fleet.
-
----
-
-## Key references
-
-### Gravity-aided navigation algorithms
-- Li, Greentree, Moran — "Gravity-aided navigation using Viterbi map matching algorithm," Journal of Navigation (2024). Sequence-based HMM/Viterbi formulation; explicitly highlights sensor noise, spatial uncertainty, and map ambiguity.
-
-### Quantum / moving-platform gravimetry
-- Jensen et al. — "Airborne gravimetry with quantum technology: observations from Iceland and Greenland," ESSD (2025). Moving-platform quantum gravimetry data products and hybrid processing.
-- Bidel et al. — "Absolute marine gravimetry with matter-wave interferometry," Nature Communications (2018). Moving-platform atom gravimetry ambiguity and INS/motion correction requirements.
-- Nature — "Quantum sensing for gravity cartography" (2022). Gravity gradient sensing direction.
-
-### Neural implicit representations
-- Sitzmann et al. — "Implicit Neural Representations with Periodic Activation Functions" (SIREN), NeurIPS 2020. Foundation architecture for continuous fields with sinusoidal activations.
-
-### Earth data products
-- GEBCO_2025 — Global terrain/bathymetry, 15 arc-second grid (August 2025)
-- WMM2025 — World Magnetic Model for navigation (current standard)
-- IGRF-14 — Geomagnetic reference model, 2025-2030 predictive interval
-- ICGEM — Global gravity models + GRACE/GRACE-FO temporal solutions
-- ERA5 — Hourly global atmospheric reanalysis, 1940-present
-- HYCOM GOFS 3.1 — Operational 1/12° global ocean prediction
-- FES2022b — Global ocean tide model and atlas
-
-### Multi-modal underwater navigation
-- Reviews of terrain-aided navigation for underwater vehicles (bathymetric SLAM, observability-aware planning, gravity + geomagnetic combined aiding)
-
-### Observability and information-theoretic planning
-- Cadena et al. — "Past, Present, and Future of SLAM," IEEE T-RO 2016
-- DiFrancesco et al. — "Gravity Gradiometer Systems," Geophysical Prospecting 2009
-- GOCE mission — Spaceborne gravity gradiometry demonstration
-
----
-
-## One-sentence summary
-
-**The immediate next move is to swap the Norwegian fixture for a real public regional gravity product and rerun the same benchmark stack before adding more estimator complexity; physics realism is now the bottleneck, not missing filter variants.**
+```bash
+python3 scripts/generate_photonic_branch_checkpoint.py \
+  --region-one-name norwegian_margin \
+  --region-one-summary /tmp/gravnav_photonic_nm/hardware_tied_maritime_demo_summary.json \
+  --region-one-photonic-summary /tmp/gravnav_photonic_nm/hardware_tied_maritime_demo_photonic_summary.json \
+  --region-two-name helgeland_offshore \
+  --region-two-summary /tmp/gravnav_photonic_hel/hardware_tied_maritime_demo_summary.json \
+  --region-two-photonic-summary /tmp/gravnav_photonic_hel/hardware_tied_maritime_demo_photonic_summary.json \
+  --calibration-summary /tmp/gravnav_photonic_calibration/photonic_calibration_summary.json \
+  --output-dir /tmp/gravnav_photonic_checkpoint
+```
