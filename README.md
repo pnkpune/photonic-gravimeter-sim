@@ -2,7 +2,7 @@
 
 `photonic-gravimeter-sim` is a GPS-denied navigation simulation stack for passive, stealth-compatible missions. The design target is not a standalone gravimeter. It is an INS-centered navigation subsystem where gravity is the primary geophysical anchor and other passive data channels are allowed to reduce ambiguity without relying on GNSS.
 
-The repo is maritime/UUV-first. The current best result is a realistic Norwegian-margin demo where a bounded-lag Earth-signature output built from a mission-mode photonic gravimeter, gravity gradient likelihood, and bathymetry beats the INS-only baseline across all acceptance seeds with zero horizontal HMI.
+The repo is maritime/UUV-first. The current best result is a realistic Norwegian-margin demo where a bounded-lag Earth-signature output built from a mission-mode photonic gravimeter, gravity gradient likelihood, and bathymetry beats the INS-only baseline across all acceptance seeds with zero horizontal HMI. That result is still region-specific: the first frozen second-region validation on Helgeland offshore failed, so the repo does not yet claim a two-region validated passive stack.
 
 ## Current Status
 
@@ -16,12 +16,14 @@ The stack is well past scaffolding. It now includes:
 - bounded-lag sequence smoothing as a separate delayed navigation output
 - observability analysis, metrics, plots, reports, and regional dataset loaders
 - Norwegian regional gravity and bathymetry demo-pack support
+- second-region validation workflow for Helgeland offshore using the same estimator family
 
 What is recommended today:
 
 - keep the live INS as the real-time navigation backbone
 - use gravity-led sequence matching as the global Earth-signature estimator
 - use the bounded-lag Earth-signature output as the promoted passive correction product when it retains zero HMI
+- treat the current promoted result as a strong single-region demo, not yet a generalized multi-region claim
 
 What is not promoted:
 
@@ -104,6 +106,49 @@ This is the first robust in-repo result that satisfies the practical product bar
 - it preserves the live INS as the real-time backbone
 - it reports the geophysical improvement as a bounded-lag passive navigation output, which is operationally credible
 
+## Second-Region Validation
+
+The second-region validation branch kept the stack semi-frozen:
+
+- live INS + depth + velocity
+- mission-mode photonic gravimeter
+- gravity gradiometer likelihood
+- bathymetry as supporting passive context
+- observe-only sequence matcher
+- bounded-lag Earth-signature output
+
+The first region reran unchanged through the new demo-pack path, but the same architecture did not generalize to Helgeland offshore under the locked public-offshore profile.
+
+Locked public-offshore profile:
+
+- `window_size = 11`
+- `grid_half_span_m = [100.0, 100.0]`
+- `grid_spacing_m = [20.0, 20.0]`
+- `transition_std_m = [15.0, 15.0]`
+- `center_prior_std_m = [50.0, 50.0]`
+- `bathymetry_meas_std_m = 2.0`
+- `bathymetry_weight = 3.5`
+- `map_match_every_steps = 1`
+
+Two-region validation outcome:
+
+| Region | Frozen profile | Live INS RMSE [m] | Promoted RMSE [m] | Live INS CEP95 [m] | Promoted CEP95 [m] | HMI zero all seeds | Outcome |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `norwegian_margin` | `norwegian_margin_maritime_demo` | 241.526 | 197.371 | 427.030 | 374.722 | `True` | `PASS` |
+| `helgeland_offshore` | `public_offshore_locked` | 161.608 | 199.273 | 278.771 | 331.707 | `False` | `FAIL` |
+
+Why Helgeland failed:
+
+- even `photonic_gravity` alone was worse than live INS on median RMSE: `209.549 m` vs `161.608 m`
+- the promoted lag output had nonzero horizontal HMI on every seed, with median `0.790`
+- seed `123` was about `79.2%` worse than live INS on horizontal RMSE
+
+Current branch decision:
+
+- do not promote a two-region passive-navigation claim yet
+- do not add magnetic aiding next
+- next branch should harden regional demo-pack realism and route-selection robustness first
+
 ## Why This Matters
 
 The repo is no longer proving only that gravity can look good on a synthetic map. It now demonstrates a more realistic story:
@@ -178,7 +223,7 @@ python3 scripts/benchmark_filters.py
 
 Current regression status:
 
-- `44 passed`
+- `49 passed`
 
 The promoted maritime demo was validated on acceptance seeds:
 
@@ -195,6 +240,7 @@ Validation boundary:
 - the delayed Earth-signature output is promoted because it beats INS-only across the acceptance seeds with `0.0` horizontal HMI
 - the live INS path is unchanged
 - this is not a claim that closed-loop gravity feedback into the real-time INS is solved
+- this is also not yet a claim that the same frozen passive stack generalizes across multiple offshore regions
 
 ## Realism Notes
 
@@ -221,7 +267,7 @@ If the goal is a credible GPS-denied passive-navigation demo, the current best s
 - supporting passive ambiguity reduction: gradient plus bathymetry
 - reported navigation product: bounded-lag Earth-signature output
 
-That is the first current repo path that is both technically defensible and better than INS-only under realistic denied-navigation conditions.
+That is the first current repo path that is both technically defensible and better than INS-only under realistic denied-navigation conditions, but today it remains a single-region promoted result rather than a generalized offshore claim.
 
 ## Main Reference Docs
 

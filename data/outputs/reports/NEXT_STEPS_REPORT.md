@@ -1,8 +1,8 @@
 # Next-Steps Report: From Gravity-Aided INS to Earth-Signature Navigator
 
 **Merged roadmap synthesized from independent analyses by Claude (Opus) and ChatGPT (o1-pro)**
-**Date: 2026-04-12**
-**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, PF feedback disabled, 44 tests passing**
+**Date: 2026-04-13**
+**Repo state: validated maritime baseline, bounded-lag sequence smoother implemented, Norwegian-margin regional benchmark path added, public-product Norwegian benchmark path added, hardware-tied maritime demo promoted, second-region validation failed on Helgeland offshore, PF feedback disabled, 49 tests passing**
 
 ---
 
@@ -66,6 +66,65 @@ Per-seed promoted output result:
 | `777` | 364.901 | 306.314 | 58.587 | 0.000 |
 
 This is the first in-repo result that is both technically defensible and operationally relevant to the actual goal: **reducing denied-mission INS drift without GNSS by using gravity-led passive Earth-signature aiding.**
+
+---
+
+## Second-region validation outcome (2026-04-13)
+
+The next planned gate was a clean semi-frozen second-region validation on `feature/second-region-validation`:
+
+- keep the same estimator family
+- keep the same passive stack class
+- add only a new regional demo pack and a locked offshore sequence profile
+- require the promoted output to remain `photonic_gravity_bathymetry_lag`
+
+Chosen second region:
+
+- primary: `helgeland_offshore`
+- frozen profile: `public_offshore_locked`
+
+Locked offshore profile:
+
+- `window_size = 11`
+- `grid_half_span_m = [100.0, 100.0]`
+- `grid_spacing_m = [20.0, 20.0]`
+- `transition_std_m = [15.0, 15.0]`
+- `center_prior_std_m = [50.0, 50.0]`
+- `gravity_meas_std_mps2 = 1.2e-05`
+- `gradient_meas_std_per_s2 = 1.0e-08`
+- `bathymetry_meas_std_m = 2.0`
+- `bathymetry_weight = 3.5`
+- `height_std_m = 2.0`
+- `map_match_every_steps = 1`
+- `use_gradiometer = true`
+- `use_lag_smoother = true`
+
+Acceptance result:
+
+| Region | Profile | Live INS RMSE [m] | Promoted RMSE [m] | Live INS CEP95 [m] | Promoted CEP95 [m] | HMI zero all seeds | Outcome |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `norwegian_margin` | `norwegian_margin_maritime_demo` | 241.526 | 197.371 | 427.030 | 374.722 | `True` | `PASS` |
+| `helgeland_offshore` | `public_offshore_locked` | 161.608 | 199.273 | 278.771 | 331.707 | `False` | `FAIL` |
+
+Important Helgeland details:
+
+- even `photonic_gravity` alone was worse than live INS on median RMSE: `209.549 m` vs `161.608 m`
+- the promoted lag output had median horizontal HMI `0.790`
+- seed `123` was `79.2%` worse than live INS on horizontal RMSE
+- the acceptance gate failed on all three criteria that mattered: RMSE, CEP95, and HMI
+
+What this means:
+
+- the Norwegian-margin promoted result is stable and still reruns unchanged through the new demo-pack-driven path
+- the current gravity-led passive stack does **not** yet generalize across a second offshore region under a locked profile
+- the correct next branch is **not** `feature/magnetic-passive-aiding`
+- the correct next branch is **`feature/regional-demo-pack-hardening`**
+
+Reasoning:
+
+- adding magnetic now would blur whether the failure came from missing modality or from weak regional packaging / route selection
+- the Helgeland failure is too strong to wave away as a small robustness issue
+- we need a stable two-region gravity-led passive story before layering in another signature channel
 
 ---
 
