@@ -122,6 +122,39 @@ def load_regional_manifest(path: str | Path) -> RegionalGravityMapManifest:
     )
 
 
+def _resolve_manifest_ref(path_ref: str | Path, *, manifest_path: Path) -> Path:
+    ref = Path(path_ref).expanduser()
+    if ref.is_absolute():
+        return ref.resolve()
+    candidate = (manifest_path.parent / ref).resolve()
+    if candidate.exists():
+        return candidate
+    project_root = _project_root()
+    root_candidate = (project_root / ref).resolve()
+    if root_candidate.exists():
+        return root_candidate
+    if ref.parts and ref.parts[0] in {"configs", "data", "scripts", "src", "tests"}:
+        return root_candidate
+    return candidate
+
+
+def load_regional_map_from_manifest(
+    path: str | Path,
+) -> tuple[GravityGridMap, RegionalGravityMapManifest, Path, Path]:
+    manifest_path = Path(path).expanduser().resolve()
+    manifest = load_regional_manifest(manifest_path)
+    processed_map_path = _resolve_manifest_ref(
+        manifest.processed_map_path,
+        manifest_path=manifest_path,
+    )
+    return (
+        GravityGridMap.from_npz(processed_map_path),
+        manifest,
+        processed_map_path,
+        manifest_path,
+    )
+
+
 def _validate_regular_grid(
     lat_deg: np.ndarray,
     lon_deg: np.ndarray,

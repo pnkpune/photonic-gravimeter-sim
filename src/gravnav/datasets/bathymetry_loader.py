@@ -19,7 +19,12 @@ from typing import Any, Optional
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from ..physics.gravity_map import GravityGridMap
 from ..physics.gravity_map import bilinear_interpolate_rectilinear
+from .gravity_loader import (
+    RegionalGravityMapManifest,
+    load_regional_map_from_manifest,
+)
 from ..utils.config import find_project_root
 
 FloatArray = NDArray[np.float64]
@@ -360,6 +365,24 @@ class RegionalDemoPackManifest:
         return p
 
 
+@dataclass(frozen=True)
+class ResolvedRegionalDemoPack:
+    """Concrete assets resolved from one demo-pack manifest."""
+
+    manifest: RegionalDemoPackManifest
+    manifest_path: Path
+    gravity_manifest: RegionalGravityMapManifest
+    gravity_manifest_path: Path
+    gravity_map: GravityGridMap
+    gravity_map_path: Path
+    bathymetry_manifest: RegionalBathymetryManifest
+    bathymetry_manifest_path: Path
+    bathymetry_grid: BathymetryGrid
+    bathymetry_grid_path: Path
+    scenario_path: Path
+    sequence_profile_path: Path
+
+
 def load_bathymetry_manifest(path: str | Path) -> RegionalBathymetryManifest:
     p = Path(path).expanduser().resolve()
     return RegionalBathymetryManifest.from_mapping(
@@ -371,6 +394,85 @@ def load_demo_pack_manifest(path: str | Path) -> RegionalDemoPackManifest:
     p = Path(path).expanduser().resolve()
     return RegionalDemoPackManifest.from_mapping(
         json.loads(p.read_text(encoding="utf-8"))
+    )
+
+
+def _resolve_manifest_ref(path_ref: str | Path, *, manifest_path: Path) -> Path:
+    ref = Path(path_ref).expanduser()
+    if ref.is_absolute():
+        return ref.resolve()
+    candidate = (manifest_path.parent / ref).resolve()
+    if candidate.exists():
+        return candidate
+    project_root = _project_root()
+    root_candidate = (project_root / ref).resolve()
+    if root_candidate.exists():
+        return root_candidate
+    if ref.parts and ref.parts[0] in {"configs", "data", "scripts", "src", "tests"}:
+        return root_candidate
+    return candidate
+
+
+def load_bathymetry_grid_from_manifest(
+    path: str | Path,
+) -> tuple[BathymetryGrid, RegionalBathymetryManifest, Path, Path]:
+    manifest_path = Path(path).expanduser().resolve()
+    manifest = load_bathymetry_manifest(manifest_path)
+    processed_grid_path = _resolve_manifest_ref(
+        manifest.processed_grid_path,
+        manifest_path=manifest_path,
+    )
+    return (
+        BathymetryGrid.from_npz(processed_grid_path),
+        manifest,
+        processed_grid_path,
+        manifest_path,
+    )
+
+
+def resolve_regional_demo_pack(path: str | Path) -> ResolvedRegionalDemoPack:
+    manifest_path = Path(path).expanduser().resolve()
+    manifest = load_demo_pack_manifest(manifest_path)
+    gravity_map, gravity_manifest, gravity_map_path, gravity_manifest_path = (
+        load_regional_map_from_manifest(
+            _resolve_manifest_ref(
+                manifest.gravity_manifest_path,
+                manifest_path=manifest_path,
+            )
+        )
+    )
+    (
+        bathymetry_grid,
+        bathymetry_manifest,
+        bathymetry_grid_path,
+        bathymetry_manifest_path,
+    ) = load_bathymetry_grid_from_manifest(
+        _resolve_manifest_ref(
+            manifest.bathymetry_manifest_path,
+            manifest_path=manifest_path,
+        )
+    )
+    scenario_path = _resolve_manifest_ref(
+        manifest.scenario_path,
+        manifest_path=manifest_path,
+    )
+    sequence_profile_path = _resolve_manifest_ref(
+        manifest.sequence_profile_path,
+        manifest_path=manifest_path,
+    )
+    return ResolvedRegionalDemoPack(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        gravity_manifest=gravity_manifest,
+        gravity_manifest_path=gravity_manifest_path,
+        gravity_map=gravity_map,
+        gravity_map_path=gravity_map_path,
+        bathymetry_manifest=bathymetry_manifest,
+        bathymetry_manifest_path=bathymetry_manifest_path,
+        bathymetry_grid=bathymetry_grid,
+        bathymetry_grid_path=bathymetry_grid_path,
+        scenario_path=scenario_path,
+        sequence_profile_path=sequence_profile_path,
     )
 
 
@@ -561,9 +663,12 @@ __all__ = [
     "RAW_RELATIVE_DIR",
     "RegionalBathymetryManifest",
     "RegionalDemoPackManifest",
+    "ResolvedRegionalDemoPack",
     "ensure_regional_bathymetry_grid",
+    "load_bathymetry_grid_from_manifest",
     "load_bathymetry_manifest",
     "load_demo_pack_manifest",
     "load_regular_csv_bathymetry_grid",
     "process_regular_csv_bathymetry_grid",
+    "resolve_regional_demo_pack",
 ]

@@ -30,8 +30,9 @@ import numpy as np
 
 from gravnav.datasets.bathymetry_loader import (
     BathymetryGrid,
+    ResolvedRegionalDemoPack,
     ensure_regional_bathymetry_grid,
-    load_demo_pack_manifest,
+    resolve_regional_demo_pack,
 )
 from gravnav.physics.gravity_map import GravityGridMap
 from gravnav.plots.nav_plots import plot_ground_track_local_ned, plot_position_error_ned
@@ -71,7 +72,7 @@ DEFAULT_GRADIOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravity_gradiometer
 DEFAULT_BATHY_SENSOR_CONFIG = PROJECT_ROOT / "configs/sensors/bathymetry_sensor.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/outputs/reports/maritime_demo"
 DEFAULT_GRAVITY_MAP = PROJECT_ROOT / "data/gravity_maps/processed/norwegian_margin_gravity_map.npz"
-DEFAULT_DEMO_PACK = PROJECT_ROOT / "data/bathymetry/processed/norwegian_margin_public_demo_pack.json"
+DEFAULT_DEMO_PACK = PROJECT_ROOT / "data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json"
 PREP_SCRIPT = PROJECT_ROOT / "scripts/prepare_norwegian_maritime_demo.py"
 
 
@@ -99,6 +100,10 @@ def _ensure_demo_pack() -> None:
     if DEFAULT_DEMO_PACK.exists():
         return
     subprocess.run([sys.executable, str(PREP_SCRIPT)], check=True, cwd=PROJECT_ROOT)
+
+
+def _load_demo_pack_assets(path: Path) -> ResolvedRegionalDemoPack:
+    return resolve_regional_demo_pack(path)
 
 
 def _build_runner_config(
@@ -300,6 +305,12 @@ def _write_report(
     path: Path,
     *,
     scenario: ScenarioSpec,
+    demo_pack_path: Path | None,
+    demo_pack_region: str | None,
+    gravity_map_path: Path,
+    gravity_manifest_path: Path | None,
+    bathymetry_grid_path: Path | None,
+    bathymetry_manifest_path: Path | None,
     profile_path: Path,
     profile: dict[str, Any],
     rows: list[dict[str, Any]],
@@ -329,8 +340,12 @@ def _write_report(
         "## Scope",
         "",
         f"- scenario: `{scenario.name}`",
-        "- theater: Norwegian-margin fixture gravity map + GEBCO bathymetry fixture",
-        f"- gravity map runtime source: `{DEFAULT_GRAVITY_MAP}`",
+        f"- demo pack manifest: `{demo_pack_path}`" if demo_pack_path is not None else "- demo pack manifest: `None (direct asset selection)`",
+        f"- demo pack region: `{demo_pack_region}`" if demo_pack_region is not None else "- demo pack region: `n/a`",
+        f"- gravity map runtime source: `{gravity_map_path}`",
+        f"- gravity manifest: `{gravity_manifest_path}`" if gravity_manifest_path is not None else "- gravity manifest: `n/a`",
+        f"- bathymetry grid source: `{bathymetry_grid_path}`" if bathymetry_grid_path is not None else "- bathymetry grid source: `n/a`",
+        f"- bathymetry manifest: `{bathymetry_manifest_path}`" if bathymetry_manifest_path is not None else "- bathymetry manifest: `n/a`",
         "- estimator: observe-only sequence matcher with gravity always enabled",
         "- live INS path unchanged",
         f"- sample period: `{dt_s:.1f} s`",
@@ -398,6 +413,14 @@ def _write_report(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Norwegian maritime photonic demo.")
+    parser.add_argument(
+        "--demo-pack-manifest",
+        default=str(DEFAULT_DEMO_PACK),
+        help=(
+            "Optional demo-pack manifest. When it exists, it overrides the scenario, "
+            "sequence profile, gravity-map, and bathymetry asset selection."
+        ),
+    )
     parser.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     parser.add_argument("--sequence-profile", default=str(DEFAULT_SEQUENCE_PROFILE))
     parser.add_argument("--imu-config", default=str(DEFAULT_IMU_CONFIG))
@@ -426,23 +449,41 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    _ensure_demo_pack()
-    load_demo_pack_manifest(DEFAULT_DEMO_PACK)
+    demo_pack_path = Path(args.demo_pack_manifest).expanduser().resolve()
+    if demo_pack_path == DEFAULT_DEMO_PACK:
+        _ensure_demo_pack()
 
-    scenario_path = Path(args.scenario).expanduser().resolve()
-    profile_path = Path(args.sequence_profile).expanduser().resolve()
-    gravity_map_path = Path(args.gravity_map).expanduser().resolve()
+    demo_pack_assets: ResolvedRegionalDemoPack | None = None
+    gravity_manifest_path: Path | None = None
+    bathymetry_grid_path: Path | None = None
+    bathymetry_manifest_path: Path | None = None
+    if demo_pack_path.exists():
+        demo_pack_assets = _load_demo_pack_assets(demo_pack_path)
+        scenario_path = demo_pack_assets.scenario_path
+        profile_path = demo_pack_assets.sequence_profile_path
+        gravity_map_path = demo_pack_assets.gravity_map_path
+        gravity_map = demo_pack_assets.gravity_map
+        bathymetry_map = demo_pack_assets.bathymetry_grid
+        gravity_manifest_path = demo_pack_assets.gravity_manifest_path
+        bathymetry_grid_path = demo_pack_assets.bathymetry_grid_path
+        bathymetry_manifest_path = demo_pack_assets.bathymetry_manifest_path
+    else:
+        scenario_path = Path(args.scenario).expanduser().resolve()
+        profile_path = Path(args.sequence_profile).expanduser().resolve()
+        gravity_map_path = Path(args.gravity_map).expanduser().resolve()
+        gravity_map = GravityGridMap.from_npz(gravity_map_path)
+        bathymetry_map, _, bathymetry_grid_path, bathymetry_manifest_path = (
+            ensure_regional_bathymetry_grid(
+                "norwegian_margin_public",
+                project_root=PROJECT_ROOT,
+            )
+        )
     output_dir = Path(args.output_dir).expanduser().resolve()
     initial_position_offset_ned_m = tuple(float(x) for x in args.initial_position_offset_ned_m)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scenario = _load_scenario(scenario_path)
     profile = _load_sequence_profile(profile_path)
-    gravity_map = GravityGridMap.from_npz(gravity_map_path)
-    bathymetry_map, _, _, _ = ensure_regional_bathymetry_grid(
-        "norwegian_margin_public",
-        project_root=PROJECT_ROOT,
-    )
 
     imu_spec = _load_spec(Path(args.imu_config).expanduser().resolve(), IMUSpec)
     gravimeter_spec = _load_spec(Path(args.gravimeter_config).expanduser().resolve(), GravimeterSpec)
@@ -514,6 +555,12 @@ def main() -> int:
     _write_report(
         report_path,
         scenario=scenario,
+        demo_pack_path=(demo_pack_assets.manifest_path if demo_pack_assets is not None else None),
+        demo_pack_region=(demo_pack_assets.manifest.region_name if demo_pack_assets is not None else None),
+        gravity_map_path=gravity_map_path,
+        gravity_manifest_path=gravity_manifest_path,
+        bathymetry_grid_path=bathymetry_grid_path,
+        bathymetry_manifest_path=bathymetry_manifest_path,
         profile_path=profile_path,
         profile=profile,
         rows=rows,

@@ -46,7 +46,7 @@ DEFAULT_GRAVITY_MANIFEST = PROJECT_ROOT / "data/gravity_maps/processed/norwegian
 DEFAULT_RAW_BATHY = PROJECT_ROOT / "data/bathymetry/raw/norwegian_margin_public" / RAW_FIXTURE_NAME
 DEFAULT_PROCESSED_BATHY = PROJECT_ROOT / "data/bathymetry/processed" / PROCESSED_GRID_NAME
 DEFAULT_BATHY_MANIFEST = PROJECT_ROOT / "data/bathymetry/processed" / PROCESSED_MANIFEST_NAME
-DEFAULT_DEMO_PACK_MANIFEST = PROJECT_ROOT / "data/bathymetry/processed" / DEMO_PACK_MANIFEST_NAME
+DEFAULT_DEMO_PACK_MANIFEST = PROJECT_ROOT / "data/bathymetry/processed" / "norwegian_margin_maritime_demo_pack.json"
 
 
 def _query_gebco_elevation_m(lat_deg: float, lon_deg: float) -> float:
