@@ -135,6 +135,48 @@ def _build_runner_config(
                 1.0 if not use_bathymetry else float(profile.get("bathymetry_weight", 1.0))
             ),
             height_std_m=float(profile.get("height_std_m", 2.0)),
+            adaptive_grid_enabled=bool(profile.get("adaptive_grid_enabled", True)),
+            expanded_grid_half_span_m=profile.get(
+                "expanded_grid_half_span_m",
+                [2.0 * float(v) for v in profile["grid_half_span_m"]],
+            ),
+            expanded_grid_spacing_m=profile.get(
+                "expanded_grid_spacing_m",
+                list(profile["grid_spacing_m"]),
+            ),
+            adaptive_expand_edge_mass_fraction=float(
+                profile.get("adaptive_expand_edge_mass_fraction", 0.20)
+            ),
+            adaptive_expand_support_radius_fraction=float(
+                profile.get("adaptive_expand_support_radius_fraction", 0.85)
+            ),
+            adaptive_contract_edge_mass_fraction=float(
+                profile.get("adaptive_contract_edge_mass_fraction", 0.05)
+            ),
+            adaptive_contract_support_radius_fraction=float(
+                profile.get("adaptive_contract_support_radius_fraction", 0.55)
+            ),
+            ambiguity_support_threshold_peak_fraction=float(
+                profile.get("ambiguity_support_threshold_peak_fraction", 0.05)
+            ),
+            ambiguity_edge_mass_fraction=float(
+                profile.get("ambiguity_edge_mass_fraction", 0.20)
+            ),
+            ambiguity_support_radius_fraction=float(
+                profile.get("ambiguity_support_radius_fraction", 0.85)
+            ),
+            ambiguity_min_posterior_ess_fraction=float(
+                profile.get("ambiguity_min_posterior_ess_fraction", 0.03)
+            ),
+            ambiguity_max_peak_probability=float(
+                profile.get("ambiguity_max_peak_probability", 0.85)
+            ),
+            ambiguity_min_gravity_information_ratio=float(
+                profile.get("ambiguity_min_gravity_information_ratio", 0.50)
+            ),
+            ambiguity_min_bathymetry_information_ratio=float(
+                profile.get("ambiguity_min_bathymetry_information_ratio", 0.50)
+            ),
         ),
         gravity_meas_std_mps2=float(profile["gravity_meas_std_mps2"]),
         use_gradiometer=bool(profile.get("use_gradiometer", True)),
@@ -228,38 +270,158 @@ def _run_case(
     return result, metrics
 
 
-def _metrics_row(label: str, metrics: ScenarioMetricsSummary) -> dict[str, float | str | None]:
+def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | None:
+    updates = list(result.estimators.sequence_updates)
+    if len(updates) == 0:
+        return None
+
+    failure_counts: dict[str, int] = {}
+    grid_mode_counts: dict[str, int] = {}
+    edge_mass: list[float] = []
+    ess_fraction: list[float] = []
+    gravity_info: list[float] = []
+    bathy_info: list[float] = []
+    support_radius_fraction: list[float] = []
+
+    for update in updates:
+        diag = update.ambiguity_diagnostics
+        failure = str(diag.dominant_failure_mode)
+        failure_counts[failure] = failure_counts.get(failure, 0) + 1
+        grid_mode = str(diag.grid_mode)
+        grid_mode_counts[grid_mode] = grid_mode_counts.get(grid_mode, 0) + 1
+        edge_mass.append(float(diag.edge_mass_fraction))
+        ess_fraction.append(float(diag.posterior_candidate_ess_fraction))
+        gravity_info.append(float(diag.gravity_information_ratio))
+        if diag.bathymetry_information_ratio is not None:
+            bathy_info.append(float(diag.bathymetry_information_ratio))
+        support_radius_fraction.append(
+            max(
+                float(diag.support_radius_n_m) / max(float(diag.grid_half_span_m[0]), 1.0e-9),
+                float(diag.support_radius_e_m) / max(float(diag.grid_half_span_m[1]), 1.0e-9),
+            )
+        )
+
+    total = float(len(updates))
+    return {
+        "num_updates": len(updates),
+        "informative_fraction": failure_counts.get("informative", 0) / total,
+        "edge_clipped_fraction": failure_counts.get("edge_clipped", 0) / total,
+        "prior_dominated_fraction": failure_counts.get("prior_dominated", 0) / total,
+        "flat_signature_fraction": failure_counts.get("flat_signature", 0) / total,
+        "bathymetry_noninformative_fraction": (
+            failure_counts.get("bathymetry_noninformative", 0) / total
+        ),
+        "expanded_grid_fraction": grid_mode_counts.get("expanded", 0) / total,
+        "median_edge_mass_fraction": float(np.median(edge_mass)),
+        "p90_edge_mass_fraction": float(np.quantile(edge_mass, 0.90)),
+        "median_posterior_ess_fraction": float(np.median(ess_fraction)),
+        "median_gravity_information_ratio": float(np.median(gravity_info)),
+        "median_bathymetry_information_ratio": (
+            None if len(bathy_info) == 0 else float(np.median(bathy_info))
+        ),
+        "median_support_radius_fraction": float(np.median(support_radius_fraction)),
+        "failure_mode_counts": failure_counts,
+        "grid_mode_counts": grid_mode_counts,
+    }
+
+
+def _select_reported_output(
+    metrics: ScenarioMetricsSummary,
+    *,
+    ambiguity: dict[str, Any] | None,
+) -> tuple[str, str]:
+    lag = metrics.lag_smoothed_position_error
+    seq = metrics.sequence_position_error
+    ins = metrics.ins_position_error
+    lag_integ = metrics.lag_smoothed_integrity
+
+    if ambiguity is None or seq is None or ins is None:
+        return "live_ins", "no_sequence_diagnostics"
+
+    edge_clipped = float(ambiguity["edge_clipped_fraction"])
+    median_edge_mass = float(ambiguity["median_edge_mass_fraction"])
+    median_support_radius = float(ambiguity["median_support_radius_fraction"])
+    median_ess = float(ambiguity["median_posterior_ess_fraction"])
+    median_gravity_info = float(ambiguity["median_gravity_information_ratio"])
+    median_bathy_info = ambiguity["median_bathymetry_information_ratio"]
+    if median_bathy_info is not None:
+        median_bathy_info = float(median_bathy_info)
+
+    lag_allowed = (
+        lag is not None
+        and lag_integ is not None
+        and float(lag_integ.fraction_hazardously_misleading_horizontal) == 0.0
+        and edge_clipped <= 0.15
+        and median_edge_mass <= 0.12
+        and median_support_radius <= 0.75
+        and median_ess >= 0.02
+        and (median_bathy_info is None or median_bathy_info >= 0.10)
+    )
+    if lag_allowed:
+        return "lag_smoothed", "lag_confident"
+
+    sequence_allowed = (
+        edge_clipped <= 0.25
+        and median_edge_mass <= 0.20
+        and median_support_radius <= 0.85
+        and median_ess >= 0.02
+        and (median_gravity_info >= 0.10 or (median_bathy_info is not None and median_bathy_info >= 0.10))
+    )
+    if sequence_allowed:
+        return "sequence", "lag_rejected_or_unavailable"
+
+    if edge_clipped > 0.35 or median_support_radius > 0.90:
+        return "live_ins", "edge_coverage_limited"
+    if median_gravity_info < 0.10 and (median_bathy_info is None or median_bathy_info < 0.10):
+        return "live_ins", "flat_signature"
+    if median_ess < 0.02:
+        return "live_ins", "prior_dominated"
+    return "live_ins", "sequence_ambiguous"
+
+
+def _metrics_row(
+    label: str,
+    metrics: ScenarioMetricsSummary,
+    *,
+    ambiguity: dict[str, Any] | None,
+) -> dict[str, float | str | None]:
     ins = metrics.ins_position_error
     seq = metrics.sequence_position_error
     lag = metrics.lag_smoothed_position_error
     integ = metrics.integrity
     lag_integ = metrics.lag_smoothed_integrity
-    earth_rmse = (
-        None
-        if lag is None and seq is None and ins is None
-        else float(lag.horizontal_rmse_m if lag is not None else seq.horizontal_rmse_m if seq is not None else ins.horizontal_rmse_m)
+    reported_mode, reported_reason = _select_reported_output(
+        metrics,
+        ambiguity=ambiguity,
     )
-    earth_cep95 = (
-        None
-        if lag is None and seq is None and ins is None
-        else float(lag.cep95_m if lag is not None else seq.cep95_m if seq is not None else ins.cep95_m)
-    )
-    earth_hmi = (
-        None
-        if lag_integ is None and integ is None
-        else float(
-            lag_integ.fraction_hazardously_misleading_horizontal
-            if lag_integ is not None
-            else integ.fraction_hazardously_misleading_horizontal
+    if reported_mode == "lag_smoothed" and lag is not None:
+        earth_rmse = float(lag.horizontal_rmse_m)
+        earth_cep95 = float(lag.cep95_m)
+        earth_hmi = (
+            None
+            if lag_integ is None
+            else float(lag_integ.fraction_hazardously_misleading_horizontal)
         )
-    )
-    earth_mode = (
-        "lag_smoothed"
-        if lag is not None
-        else "sequence"
-        if seq is not None
-        else "live_ins"
-    )
+    elif reported_mode == "sequence" and seq is not None:
+        earth_rmse = float(seq.horizontal_rmse_m)
+        earth_cep95 = float(seq.cep95_m)
+        earth_hmi = (
+            None
+            if integ is None
+            else float(integ.fraction_hazardously_misleading_horizontal)
+        )
+    elif ins is not None:
+        earth_rmse = float(ins.horizontal_rmse_m)
+        earth_cep95 = float(ins.cep95_m)
+        earth_hmi = (
+            None
+            if integ is None
+            else float(integ.fraction_hazardously_misleading_horizontal)
+        )
+    else:
+        earth_rmse = None
+        earth_cep95 = None
+        earth_hmi = None
     return {
         "label": label,
         "ins_horizontal_rmse_m": None if ins is None else float(ins.horizontal_rmse_m),
@@ -273,7 +435,45 @@ def _metrics_row(label: str, metrics: ScenarioMetricsSummary) -> dict[str, float
         "earth_signature_horizontal_rmse_m": earth_rmse,
         "earth_signature_cep95_m": earth_cep95,
         "earth_signature_hmi_horizontal": earth_hmi,
-        "earth_signature_mode": earth_mode,
+        "earth_signature_mode": reported_mode,
+        "reported_output_mode": reported_mode,
+        "reported_output_reason": reported_reason,
+        "ambiguity_informative_fraction": None
+        if ambiguity is None
+        else float(ambiguity["informative_fraction"]),
+        "ambiguity_edge_clipped_fraction": None
+        if ambiguity is None
+        else float(ambiguity["edge_clipped_fraction"]),
+        "ambiguity_prior_dominated_fraction": None
+        if ambiguity is None
+        else float(ambiguity["prior_dominated_fraction"]),
+        "ambiguity_flat_signature_fraction": None
+        if ambiguity is None
+        else float(ambiguity["flat_signature_fraction"]),
+        "ambiguity_expanded_grid_fraction": None
+        if ambiguity is None
+        else float(ambiguity["expanded_grid_fraction"]),
+        "ambiguity_median_edge_mass_fraction": None
+        if ambiguity is None
+        else float(ambiguity["median_edge_mass_fraction"]),
+        "ambiguity_median_support_radius_fraction": None
+        if ambiguity is None
+        else float(ambiguity["median_support_radius_fraction"]),
+        "ambiguity_median_posterior_ess_fraction": None
+        if ambiguity is None
+        else float(ambiguity["median_posterior_ess_fraction"]),
+        "ambiguity_median_gravity_information_ratio": None
+        if ambiguity is None
+        else float(ambiguity["median_gravity_information_ratio"]),
+        "ambiguity_median_bathymetry_information_ratio": None
+        if ambiguity is None or ambiguity["median_bathymetry_information_ratio"] is None
+        else float(ambiguity["median_bathymetry_information_ratio"]),
+        "ambiguity_failure_mode_counts": None
+        if ambiguity is None
+        else dict(ambiguity["failure_mode_counts"]),
+        "ambiguity_grid_mode_counts": None
+        if ambiguity is None
+        else dict(ambiguity["grid_mode_counts"]),
     }
 
 
@@ -338,7 +538,13 @@ def _write_report(
         photonic_by_label.setdefault(str(row["label"]), []).append(row)
 
     def median(label: str, key: str) -> float:
-        vals = [float(r[key]) for r in by_label[label] if r[key] is not None]
+        vals = [
+            float(r[key])
+            for r in by_label[label]
+            if key in r and r[key] is not None
+        ]
+        if len(vals) == 0:
+            return float("nan")
         return float(np.median(vals))
 
     def photonic_median(label: str, key: str) -> float | None:
@@ -396,20 +602,49 @@ def _write_report(
         "",
         "## Median Results Across Seeds",
         "",
-        "| Mode | Reported Earth-signature output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | Reported output | Reason | Live INS RMSE [m] | Reported RMSE [m] | Live INS CEP95 [m] | Reported CEP95 [m] | HMI horiz |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for label in ordered_labels:
         if label not in by_label:
             continue
         lines.append(
-            f"| `{label}` | `{by_label[label][0]['earth_signature_mode']}` | "
+            f"| `{label}` | "
+            f"`{by_label[label][0].get('reported_output_mode', by_label[label][0].get('earth_signature_mode', 'live_ins'))}` | "
+            f"`{by_label[label][0].get('reported_output_reason', 'n/a')}` | "
             f"{median(label, 'ins_horizontal_rmse_m'):.3f} | "
             f"{median(label, 'earth_signature_horizontal_rmse_m'):.3f} | "
             f"{median(label, 'ins_cep95_m'):.3f} | "
             f"{median(label, 'earth_signature_cep95_m'):.3f} | "
             f"{median(label, 'earth_signature_hmi_horizontal'):.3f} |"
         )
+    if any(
+        any(row.get("ambiguity_informative_fraction") is not None for row in by_label[label])
+        for label in by_label
+    ):
+        lines.extend(
+            [
+                "",
+                "## Sequence Ambiguity Summary",
+                "",
+                "| Mode | Informative frac | Edge-clipped frac | Prior-dominated frac | Flat-signature frac | Expanded-grid frac | Median edge mass | Median support radius frac | Median gravity info ratio |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for label in ordered_labels:
+            if label not in by_label:
+                continue
+            lines.append(
+                f"| `{label}` | "
+                f"{median(label, 'ambiguity_informative_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_edge_clipped_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_prior_dominated_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_flat_signature_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_expanded_grid_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_median_edge_mass_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_median_support_radius_fraction'):.3f} | "
+                f"{median(label, 'ambiguity_median_gravity_information_ratio'):.3f} |"
+            )
     if "photonic_gravity_bathymetry_lag" in by_label:
         lines.extend(
             [
@@ -459,11 +694,11 @@ def _write_report(
             "",
             f"- photonic gravity beats live INS on median RMSE: `{median('photonic_gravity', 'sequence_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
             f"- photonic gravity plus bathymetry beats photonic gravity on median RMSE: `{median('photonic_gravity_bathymetry', 'sequence_horizontal_rmse_m') < median('photonic_gravity', 'sequence_horizontal_rmse_m')}`",
-            f"- lag-smoothed photonic gravity plus bathymetry beats live INS on median RMSE: `{median('photonic_gravity_bathymetry_lag', 'lag_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
-            f"- lag-smoothed photonic gravity plus bathymetry beats live INS on median CEP95: `{median('photonic_gravity_bathymetry_lag', 'lag_cep95_m') < median('live_ins', 'ins_cep95_m')}`",
+            f"- reported output beats live INS on median RMSE: `{median('photonic_gravity_bathymetry_lag', 'earth_signature_horizontal_rmse_m') < median('live_ins', 'ins_horizontal_rmse_m')}`",
+            f"- reported output beats live INS on median CEP95: `{median('photonic_gravity_bathymetry_lag', 'earth_signature_cep95_m') < median('live_ins', 'ins_cep95_m')}`",
             "- gravity remains the primary discriminator because the photonic-gravity path is compared directly against live INS before bathymetry is added.",
             "- bathymetry is treated as supporting passive context, not as a replacement for the gravity signature.",
-            "- the recommended demo output is the bounded-lag Earth-signature track when it retains zero horizontal HMI.",
+            "- the recommended demo output is selected adaptively: lag when confidence is high, sequence when lag is too ambiguous, otherwise live INS.",
             "",
         ]
     )
@@ -589,7 +824,12 @@ def main() -> int:
                 dt_s=float(args.dt_s),
                 initial_position_offset_ned_m=initial_position_offset_ned_m,
             )
-            row = _metrics_row(label, metrics)
+            ambiguity_summary = _sequence_ambiguity_summary_from_result(result)
+            row = _metrics_row(
+                label,
+                metrics,
+                ambiguity=ambiguity_summary,
+            )
             row["seed"] = seed
             photonic_summary = _photonic_summary_from_result(result)
             if photonic_summary is not None:

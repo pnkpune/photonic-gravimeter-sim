@@ -936,9 +936,29 @@ class SimulationEstimatorLog:
             "sequence_predicted_disturbance_mean_mps2": np.empty(n, dtype=np.float64),
             "sequence_predicted_disturbance_std_mps2": np.empty(n, dtype=np.float64),
             "sequence_used_gradient": np.empty(n, dtype=bool),
+            "sequence_used_bathymetry": np.empty(n, dtype=bool),
             "sequence_viterbi_log_score": np.empty(n, dtype=np.float64),
             "sequence_viterbi_offset_ned_m": np.empty((n, 3), dtype=np.float64),
             "sequence_posterior_mean_offset_ned_m": np.empty((n, 3), dtype=np.float64),
+            "sequence_posterior_candidate_ess": np.empty(n, dtype=np.float64),
+            "sequence_posterior_candidate_ess_fraction": np.empty(n, dtype=np.float64),
+            "sequence_edge_mass_fraction": np.empty(n, dtype=np.float64),
+            "sequence_support_radius_n_m": np.empty(n, dtype=np.float64),
+            "sequence_support_radius_e_m": np.empty(n, dtype=np.float64),
+            "sequence_horizontal_covariance_eigenvalue_ratio": np.empty(
+                n, dtype=np.float64
+            ),
+            "sequence_grid_saturated_north": np.empty(n, dtype=bool),
+            "sequence_grid_saturated_east": np.empty(n, dtype=bool),
+            "sequence_grid_saturated_any": np.empty(n, dtype=bool),
+            "sequence_gravity_predicted_spread_mps2": np.empty(n, dtype=np.float64),
+            "sequence_gravity_information_ratio": np.empty(n, dtype=np.float64),
+            "sequence_bathymetry_predicted_spread_m": np.empty(n, dtype=np.float64),
+            "sequence_bathymetry_information_ratio": np.empty(n, dtype=np.float64),
+            "sequence_grid_mode": np.empty(n, dtype=object),
+            "sequence_grid_half_span_m": np.empty((n, 2), dtype=np.float64),
+            "sequence_grid_spacing_m": np.empty((n, 2), dtype=np.float64),
+            "sequence_dominant_failure_mode": np.empty(n, dtype=object),
         }
 
         for k, upd in enumerate(self.sequence_updates):
@@ -980,6 +1000,9 @@ class SimulationEstimatorLog:
             out["sequence_used_gradient"][k] = bool(
                 _get_required_attr(upd, "used_gradient")
             )
+            out["sequence_used_bathymetry"][k] = bool(
+                _get_required_attr(upd, "used_bathymetry")
+            )
             out["sequence_viterbi_log_score"][k] = float(
                 _get_required_attr(upd, "viterbi_log_score")
             )
@@ -991,7 +1014,64 @@ class SimulationEstimatorLog:
                 _get_required_attr(upd, "posterior_mean_offset_ned_m"),
                 name="posterior_mean_offset_ned_m",
             )
+            diag = _get_required_attr(upd, "ambiguity_diagnostics")
+            out["sequence_posterior_candidate_ess"][k] = float(
+                _get_required_attr(diag, "posterior_candidate_ess")
+            )
+            out["sequence_posterior_candidate_ess_fraction"][k] = float(
+                _get_required_attr(diag, "posterior_candidate_ess_fraction")
+            )
+            out["sequence_edge_mass_fraction"][k] = float(
+                _get_required_attr(diag, "edge_mass_fraction")
+            )
+            out["sequence_support_radius_n_m"][k] = float(
+                _get_required_attr(diag, "support_radius_n_m")
+            )
+            out["sequence_support_radius_e_m"][k] = float(
+                _get_required_attr(diag, "support_radius_e_m")
+            )
+            out["sequence_horizontal_covariance_eigenvalue_ratio"][k] = float(
+                _get_required_attr(diag, "horizontal_covariance_eigenvalue_ratio")
+            )
+            out["sequence_grid_saturated_north"][k] = bool(
+                _get_required_attr(diag, "grid_saturated_north")
+            )
+            out["sequence_grid_saturated_east"][k] = bool(
+                _get_required_attr(diag, "grid_saturated_east")
+            )
+            out["sequence_grid_saturated_any"][k] = bool(
+                _get_required_attr(diag, "grid_saturated_any")
+            )
+            out["sequence_gravity_predicted_spread_mps2"][k] = float(
+                _get_required_attr(diag, "gravity_predicted_spread_mps2")
+            )
+            out["sequence_gravity_information_ratio"][k] = float(
+                _get_required_attr(diag, "gravity_information_ratio")
+            )
+            bathy_spread = getattr(diag, "bathymetry_predicted_spread_m", np.nan)
+            out["sequence_bathymetry_predicted_spread_m"][k] = (
+                np.nan if bathy_spread is None else float(bathy_spread)
+            )
+            bathy_info = getattr(diag, "bathymetry_information_ratio", np.nan)
+            out["sequence_bathymetry_information_ratio"][k] = (
+                np.nan if bathy_info is None else float(bathy_info)
+            )
+            out["sequence_grid_mode"][k] = str(_get_required_attr(diag, "grid_mode"))
+            out["sequence_grid_half_span_m"][k] = _as_float_array(
+                _get_required_attr(diag, "grid_half_span_m")
+            ).reshape(2)
+            out["sequence_grid_spacing_m"][k] = _as_float_array(
+                _get_required_attr(diag, "grid_spacing_m")
+            ).reshape(2)
+            out["sequence_dominant_failure_mode"][k] = str(
+                _get_required_attr(diag, "dominant_failure_mode")
+            )
 
+        out["sequence_grid_mode"] = np.asarray(out["sequence_grid_mode"], dtype=str)
+        out["sequence_dominant_failure_mode"] = np.asarray(
+            out["sequence_dominant_failure_mode"],
+            dtype=str,
+        )
         return out
 
     def integrity_history_arrays(self) -> dict[str, np.ndarray]:

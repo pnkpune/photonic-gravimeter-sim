@@ -93,6 +93,31 @@ def _logsumexp(x: FloatArray, axis: int) -> FloatArray:
 
 
 @dataclass
+class SequenceAmbiguityDiagnostics:
+    """
+    Compact posterior-ambiguity and grid-coverage diagnostics.
+    """
+
+    posterior_candidate_ess: float
+    posterior_candidate_ess_fraction: float
+    edge_mass_fraction: float
+    support_radius_n_m: float
+    support_radius_e_m: float
+    horizontal_covariance_eigenvalue_ratio: float
+    grid_saturated_north: bool
+    grid_saturated_east: bool
+    grid_saturated_any: bool
+    gravity_predicted_spread_mps2: float
+    gravity_information_ratio: float
+    bathymetry_predicted_spread_m: Optional[float]
+    bathymetry_information_ratio: Optional[float]
+    dominant_failure_mode: str
+    grid_mode: str
+    grid_half_span_m: FloatArray
+    grid_spacing_m: FloatArray
+
+
+@dataclass
 class GravitySequenceMatcherSpec:
     """
     Configuration for the sliding-window sequence matcher.
@@ -122,6 +147,12 @@ class GravitySequenceMatcherSpec:
         Relative weight applied to the bathymetry log-likelihood term.
     height_std_m : float, default=2
         Vertical covariance floor used when packaging delayed estimates.
+    adaptive_grid_enabled : bool, default=False
+        Enable bounded two-level grid adaptation based on ambiguity/coverage.
+    expanded_grid_half_span_m : scalar or shape (2,), optional
+        Recovery-grid half-span. Defaults to 2x the nominal span.
+    expanded_grid_spacing_m : scalar or shape (2,), optional
+        Recovery-grid spacing. Defaults to a scale preserving nominal grid count.
     name : str, default="gravity_sequence_match"
         Human-readable identifier.
     """
@@ -136,6 +167,20 @@ class GravitySequenceMatcherSpec:
     bathymetry_meas_std_m: Optional[float] = None
     bathymetry_weight: float = 1.0
     height_std_m: float = 2.0
+    adaptive_grid_enabled: bool = False
+    expanded_grid_half_span_m: Optional[ArrayLike | float] = None
+    expanded_grid_spacing_m: Optional[ArrayLike | float] = None
+    adaptive_expand_edge_mass_fraction: float = 0.20
+    adaptive_expand_support_radius_fraction: float = 0.85
+    adaptive_contract_edge_mass_fraction: float = 0.05
+    adaptive_contract_support_radius_fraction: float = 0.55
+    ambiguity_support_threshold_peak_fraction: float = 0.05
+    ambiguity_edge_mass_fraction: float = 0.20
+    ambiguity_support_radius_fraction: float = 0.85
+    ambiguity_min_posterior_ess_fraction: float = 0.03
+    ambiguity_max_peak_probability: float = 0.85
+    ambiguity_min_gravity_information_ratio: float = 0.50
+    ambiguity_min_bathymetry_information_ratio: float = 0.50
     name: str = "gravity_sequence_match"
 
     def __post_init__(self) -> None:
@@ -179,6 +224,95 @@ class GravitySequenceMatcherSpec:
             name="bathymetry_weight",
         )
         self.height_std_m = _positive_scalar(self.height_std_m, name="height_std_m")
+        self.adaptive_grid_enabled = bool(self.adaptive_grid_enabled)
+        if self.expanded_grid_half_span_m is None:
+            self.expanded_grid_half_span_m = 2.0 * self.grid_half_span_m
+        else:
+            self.expanded_grid_half_span_m = _axis2(
+                self.expanded_grid_half_span_m,
+                name="expanded_grid_half_span_m",
+            )
+        if self.expanded_grid_spacing_m is None:
+            scale = self.expanded_grid_half_span_m / self.grid_half_span_m
+            self.expanded_grid_spacing_m = self.grid_spacing_m * scale
+        else:
+            self.expanded_grid_spacing_m = _axis2(
+                self.expanded_grid_spacing_m,
+                name="expanded_grid_spacing_m",
+            )
+        if np.any(self.expanded_grid_half_span_m <= 0.0):
+            raise ValueError("expanded_grid_half_span_m must be positive.")
+        if np.any(self.expanded_grid_spacing_m <= 0.0):
+            raise ValueError("expanded_grid_spacing_m must be positive.")
+        self.adaptive_expand_edge_mass_fraction = float(
+            self.adaptive_expand_edge_mass_fraction
+        )
+        self.adaptive_expand_support_radius_fraction = float(
+            self.adaptive_expand_support_radius_fraction
+        )
+        self.adaptive_contract_edge_mass_fraction = float(
+            self.adaptive_contract_edge_mass_fraction
+        )
+        self.adaptive_contract_support_radius_fraction = float(
+            self.adaptive_contract_support_radius_fraction
+        )
+        self.ambiguity_support_threshold_peak_fraction = float(
+            self.ambiguity_support_threshold_peak_fraction
+        )
+        self.ambiguity_edge_mass_fraction = float(self.ambiguity_edge_mass_fraction)
+        self.ambiguity_support_radius_fraction = float(
+            self.ambiguity_support_radius_fraction
+        )
+        self.ambiguity_min_posterior_ess_fraction = float(
+            self.ambiguity_min_posterior_ess_fraction
+        )
+        self.ambiguity_max_peak_probability = float(
+            self.ambiguity_max_peak_probability
+        )
+        self.ambiguity_min_gravity_information_ratio = float(
+            self.ambiguity_min_gravity_information_ratio
+        )
+        self.ambiguity_min_bathymetry_information_ratio = float(
+            self.ambiguity_min_bathymetry_information_ratio
+        )
+        if not (0.0 <= self.adaptive_expand_edge_mass_fraction <= 1.0):
+            raise ValueError("adaptive_expand_edge_mass_fraction must be in [0, 1].")
+        if not (0.0 <= self.adaptive_contract_edge_mass_fraction <= 1.0):
+            raise ValueError(
+                "adaptive_contract_edge_mass_fraction must be in [0, 1]."
+            )
+        if not (
+            0.0
+            < self.adaptive_contract_support_radius_fraction
+            < self.adaptive_expand_support_radius_fraction
+            <= 1.0
+        ):
+            raise ValueError(
+                "adaptive support-radius fractions must satisfy "
+                "0 < contract < expand <= 1."
+            )
+        if not (0.0 < self.ambiguity_support_threshold_peak_fraction <= 1.0):
+            raise ValueError(
+                "ambiguity_support_threshold_peak_fraction must be in (0, 1]."
+            )
+        if not (0.0 <= self.ambiguity_edge_mass_fraction <= 1.0):
+            raise ValueError("ambiguity_edge_mass_fraction must be in [0, 1].")
+        if not (0.0 < self.ambiguity_support_radius_fraction <= 1.0):
+            raise ValueError("ambiguity_support_radius_fraction must be in (0, 1].")
+        if not (0.0 < self.ambiguity_min_posterior_ess_fraction <= 1.0):
+            raise ValueError(
+                "ambiguity_min_posterior_ess_fraction must be in (0, 1]."
+            )
+        if not (0.0 < self.ambiguity_max_peak_probability <= 1.0):
+            raise ValueError("ambiguity_max_peak_probability must be in (0, 1].")
+        if self.ambiguity_min_gravity_information_ratio < 0.0:
+            raise ValueError(
+                "ambiguity_min_gravity_information_ratio must be nonnegative."
+            )
+        if self.ambiguity_min_bathymetry_information_ratio < 0.0:
+            raise ValueError(
+                "ambiguity_min_bathymetry_information_ratio must be nonnegative."
+            )
 
 
 @dataclass
@@ -258,6 +392,7 @@ class SequenceMatchUpdateResult:
     viterbi_log_score: float
     viterbi_offset_ned_m: FloatArray
     posterior_mean_offset_ned_m: FloatArray
+    ambiguity_diagnostics: SequenceAmbiguityDiagnostics
     anchor_estimates: tuple[SequenceAnchorEstimate, ...] = ()
 
 
@@ -279,6 +414,11 @@ class _SequenceObservation:
     log_emission: FloatArray
     predicted_disturbance_mps2: FloatArray
     predicted_bathymetry_m: Optional[FloatArray]
+    gravity_meas_std_mps2: float
+    bathymetry_meas_std_m: Optional[float]
+    grid_mode: str
+    grid_half_span_m: FloatArray
+    grid_spacing_m: FloatArray
     used_gradient: bool
     used_bathymetry: bool
 
@@ -302,24 +442,50 @@ class GravitySequenceMatcher:
         self.spec = spec
         self.map_model = map_model
         self.bathymetry_map = bathymetry_map
-        self._grid_offsets_ned_m = self._build_candidate_grid_offsets()
-        self._transition_log = self._build_transition_log_matrix()
+        self._grid_catalog = {
+            "nominal": {
+                "half_span_m": np.asarray(self.spec.grid_half_span_m, dtype=np.float64),
+                "spacing_m": np.asarray(self.spec.grid_spacing_m, dtype=np.float64),
+            },
+            "expanded": {
+                "half_span_m": np.asarray(
+                    self.spec.expanded_grid_half_span_m,
+                    dtype=np.float64,
+                ),
+                "spacing_m": np.asarray(
+                    self.spec.expanded_grid_spacing_m,
+                    dtype=np.float64,
+                ),
+            },
+        }
+        for grid in self._grid_catalog.values():
+            grid["offsets_ned_m"] = self._build_candidate_grid_offsets(
+                grid["half_span_m"],
+                grid["spacing_m"],
+            )
+        self._transition_log_cache: dict[tuple[str, str], FloatArray] = {}
         self._window: Deque[_SequenceObservation] = deque(maxlen=self.spec.window_size)
         self._next_global_index = 0
         self._last_emitted_global_index = -1
+        self._active_grid_mode = "nominal"
 
     def reset(self) -> None:
         """Clear internal history and start a fresh sequence."""
         self._window.clear()
         self._next_global_index = 0
         self._last_emitted_global_index = -1
+        self._active_grid_mode = "nominal"
 
-    def _build_candidate_grid_offsets(self) -> FloatArray:
+    def _build_candidate_grid_offsets(
+        self,
+        half_span_m: FloatArray,
+        spacing_m: FloatArray,
+    ) -> FloatArray:
         """
-        Build the fixed local candidate grid in NED coordinates.
+        Build one local candidate grid in NED coordinates.
         """
-        half_n, half_e = self.spec.grid_half_span_m
-        step_n, step_e = self.spec.grid_spacing_m
+        half_n, half_e = np.asarray(half_span_m, dtype=np.float64)
+        step_n, step_e = np.asarray(spacing_m, dtype=np.float64)
 
         north_axis = np.arange(-half_n, half_n + 0.5 * step_n, step_n, dtype=np.float64)
         east_axis = np.arange(-half_e, half_e + 0.5 * step_e, step_e, dtype=np.float64)
@@ -334,9 +500,29 @@ class GravitySequenceMatcher:
         )
         return offsets.astype(np.float64)
 
-    def _build_transition_log_matrix(self) -> FloatArray:
+    def _grid_definition(
+        self,
+        mode: str,
+    ) -> tuple[FloatArray, FloatArray, FloatArray]:
         """
-        Build the candidate-to-candidate transition log-likelihood matrix.
+        Return `(offsets, half_span, spacing)` for a named grid mode.
+        """
+        if mode not in self._grid_catalog:
+            raise KeyError(f"Unknown grid mode {mode!r}.")
+        grid = self._grid_catalog[mode]
+        return (
+            np.asarray(grid["offsets_ned_m"], dtype=np.float64),
+            np.asarray(grid["half_span_m"], dtype=np.float64),
+            np.asarray(grid["spacing_m"], dtype=np.float64),
+        )
+
+    def _transition_log_between(
+        self,
+        prev_obs: _SequenceObservation,
+        curr_obs: _SequenceObservation,
+    ) -> FloatArray:
+        """
+        Build or reuse the transition log-likelihood matrix between two grids.
 
         Consecutive windows are centered on consecutive INS states, so the
         expected candidate offset relative to the INS center is approximately
@@ -344,18 +530,35 @@ class GravitySequenceMatcher:
         therefore penalizes changes in local grid offset from one step to the
         next.
         """
-        prev_offsets = self._grid_offsets_ned_m[:, :2]
-        curr_offsets = self._grid_offsets_ned_m[:, :2]
+        cache_key = (str(prev_obs.grid_mode), str(curr_obs.grid_mode))
+        cached = self._transition_log_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        prev_offsets = np.asarray(prev_obs.candidate_offsets_ned_m[:, :2], dtype=np.float64)
+        curr_offsets = np.asarray(curr_obs.candidate_offsets_ned_m[:, :2], dtype=np.float64)
         delta = curr_offsets[None, :, :] - prev_offsets[:, None, :]
         sigma = self.spec.transition_std_m
         var = sigma**2
-        return (
+        log_t = (
             -0.5
             * np.sum(
                 (delta**2) / var[None, None, :] + np.log(2.0 * np.pi * var[None, None, :]),
                 axis=2,
             )
         ).astype(np.float64)
+        self._transition_log_cache[cache_key] = log_t
+        return log_t
+
+    @staticmethod
+    def _horizontal_axis_edge_mask(
+        offsets_axis_m: FloatArray,
+        *,
+        half_span_m: float,
+        spacing_m: float,
+    ) -> NDArray[np.bool_]:
+        tol = max(1.0e-9, 0.51 * float(spacing_m))
+        return np.abs(np.abs(offsets_axis_m) - float(half_span_m)) <= tol
 
     def _anchor_local_indices(self, target_local_index: int, window_size: int) -> tuple[int, ...]:
         """
@@ -422,6 +625,181 @@ class GravitySequenceMatcher:
         clearance = water_depth - platform_depth
         return np.maximum(clearance, 0.0).astype(np.float64)
 
+    def _ambiguity_diagnostics(
+        self,
+        obs: _SequenceObservation,
+        weights: FloatArray,
+    ) -> SequenceAmbiguityDiagnostics:
+        """
+        Summarize posterior ambiguity and candidate-grid coverage for one update.
+        """
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if w.shape[0] != obs.candidate_offsets_ned_m.shape[0]:
+            raise ValueError("weights shape does not match candidate grid.")
+        total = float(np.sum(w))
+        if not np.isfinite(total) or total <= 0.0:
+            fallback = np.zeros_like(w)
+            fallback[0] = 1.0
+            w = fallback
+        else:
+            w = w / total
+
+        ess = float(1.0 / np.sum(np.maximum(w, 0.0) ** 2))
+        ess_fraction = ess / max(float(w.size), 1.0)
+        peak_probability = float(np.max(w))
+
+        offsets = np.asarray(obs.candidate_offsets_ned_m[:, :2], dtype=np.float64)
+        half_span = np.asarray(obs.grid_half_span_m, dtype=np.float64)
+        spacing = np.asarray(obs.grid_spacing_m, dtype=np.float64)
+
+        north_edge = self._horizontal_axis_edge_mask(
+            offsets[:, 0],
+            half_span_m=float(half_span[0]),
+            spacing_m=float(spacing[0]),
+        )
+        east_edge = self._horizontal_axis_edge_mask(
+            offsets[:, 1],
+            half_span_m=float(half_span[1]),
+            spacing_m=float(spacing[1]),
+        )
+        edge_mask = north_edge | east_edge
+        edge_mass_fraction = float(np.sum(w[edge_mask]))
+
+        support_threshold = peak_probability * self.spec.ambiguity_support_threshold_peak_fraction
+        support_mask = w >= support_threshold
+        if not np.any(support_mask):
+            support_mask[int(np.argmax(w))] = True
+        support_offsets = offsets[support_mask]
+        support_radius_n = float(np.max(np.abs(support_offsets[:, 0]))) if support_offsets.size else 0.0
+        support_radius_e = float(np.max(np.abs(support_offsets[:, 1]))) if support_offsets.size else 0.0
+        support_radius_fraction_n = support_radius_n / max(float(half_span[0]), 1.0e-9)
+        support_radius_fraction_e = support_radius_e / max(float(half_span[1]), 1.0e-9)
+
+        mean_offset = np.sum(w[:, None] * offsets, axis=0)
+        centered = offsets - mean_offset[None, :]
+        if offsets.shape[0] == 1:
+            horiz_cov = np.diag(np.array([0.0, 0.0], dtype=np.float64))
+        else:
+            horiz_cov = np.sum(
+                w[:, None, None] * centered[:, :, None] * centered[:, None, :],
+                axis=0,
+            ).astype(np.float64)
+        eigvals = np.linalg.eigvalsh(horiz_cov)
+        eigvals = np.maximum(eigvals, 0.0)
+        principal_ratio = float((eigvals[-1] + 1.0e-12) / (eigvals[0] + 1.0e-12))
+
+        gravity_values = np.asarray(obs.predicted_disturbance_mps2, dtype=np.float64)
+        gravity_valid = gravity_values[np.isfinite(gravity_values)]
+        gravity_spread = (
+            float(np.std(gravity_valid))
+            if gravity_valid.size > 1
+            else 0.0
+        )
+        gravity_information_ratio = gravity_spread / max(obs.gravity_meas_std_mps2, 1.0e-12)
+
+        bathy_spread: Optional[float] = None
+        bathy_information_ratio: Optional[float] = None
+        if obs.predicted_bathymetry_m is not None and obs.bathymetry_meas_std_m is not None:
+            bathy_values = np.asarray(obs.predicted_bathymetry_m, dtype=np.float64)
+            bathy_valid = bathy_values[np.isfinite(bathy_values)]
+            bathy_spread = float(np.std(bathy_valid)) if bathy_valid.size > 1 else 0.0
+            bathy_information_ratio = bathy_spread / max(obs.bathymetry_meas_std_m, 1.0e-12)
+
+        grid_saturated_north = bool(
+            float(np.sum(w[north_edge])) >= 0.5 * self.spec.ambiguity_edge_mass_fraction
+            or support_radius_fraction_n >= self.spec.ambiguity_support_radius_fraction
+        )
+        grid_saturated_east = bool(
+            float(np.sum(w[east_edge])) >= 0.5 * self.spec.ambiguity_edge_mass_fraction
+            or support_radius_fraction_e >= self.spec.ambiguity_support_radius_fraction
+        )
+        grid_saturated_any = bool(grid_saturated_north or grid_saturated_east)
+
+        gravity_informative = (
+            gravity_information_ratio >= self.spec.ambiguity_min_gravity_information_ratio
+        )
+        bathymetry_informative = (
+            obs.used_bathymetry
+            and bathy_information_ratio is not None
+            and bathy_information_ratio >= self.spec.ambiguity_min_bathymetry_information_ratio
+        )
+
+        if edge_mass_fraction >= self.spec.ambiguity_edge_mass_fraction or grid_saturated_any:
+            failure_mode = "edge_clipped"
+        elif (
+            obs.used_bathymetry
+            and bathy_information_ratio is not None
+            and gravity_informative
+            and bathy_information_ratio < self.spec.ambiguity_min_bathymetry_information_ratio
+        ):
+            failure_mode = "bathymetry_noninformative"
+        elif not (gravity_informative or bathymetry_informative):
+            failure_mode = "flat_signature"
+        elif (
+            ess_fraction < self.spec.ambiguity_min_posterior_ess_fraction
+            and peak_probability >= self.spec.ambiguity_max_peak_probability
+        ):
+            failure_mode = "prior_dominated"
+        elif (
+            obs.used_bathymetry
+            and bathy_information_ratio is not None
+            and bathy_information_ratio < self.spec.ambiguity_min_bathymetry_information_ratio
+        ):
+            failure_mode = "bathymetry_noninformative"
+        else:
+            failure_mode = "informative"
+
+        return SequenceAmbiguityDiagnostics(
+            posterior_candidate_ess=ess,
+            posterior_candidate_ess_fraction=ess_fraction,
+            edge_mass_fraction=edge_mass_fraction,
+            support_radius_n_m=support_radius_n,
+            support_radius_e_m=support_radius_e,
+            horizontal_covariance_eigenvalue_ratio=principal_ratio,
+            grid_saturated_north=grid_saturated_north,
+            grid_saturated_east=grid_saturated_east,
+            grid_saturated_any=grid_saturated_any,
+            gravity_predicted_spread_mps2=gravity_spread,
+            gravity_information_ratio=gravity_information_ratio,
+            bathymetry_predicted_spread_m=bathy_spread,
+            bathymetry_information_ratio=bathy_information_ratio,
+            dominant_failure_mode=failure_mode,
+            grid_mode=str(obs.grid_mode),
+            grid_half_span_m=np.asarray(obs.grid_half_span_m, dtype=np.float64),
+            grid_spacing_m=np.asarray(obs.grid_spacing_m, dtype=np.float64),
+        )
+
+    def _maybe_update_active_grid_mode(
+        self,
+        diagnostics: SequenceAmbiguityDiagnostics,
+    ) -> None:
+        """
+        Bounded two-level adaptive grid controller for subsequent observations.
+        """
+        if not self.spec.adaptive_grid_enabled:
+            self._active_grid_mode = "nominal"
+            return
+
+        support_radius_fraction = max(
+            diagnostics.support_radius_n_m
+            / max(float(diagnostics.grid_half_span_m[0]), 1.0e-9),
+            diagnostics.support_radius_e_m
+            / max(float(diagnostics.grid_half_span_m[1]), 1.0e-9),
+        )
+
+        if self._active_grid_mode == "nominal":
+            if (
+                diagnostics.edge_mass_fraction >= self.spec.adaptive_expand_edge_mass_fraction
+                or support_radius_fraction >= self.spec.adaptive_expand_support_radius_fraction
+            ):
+                self._active_grid_mode = "expanded"
+        else:
+            if (
+                diagnostics.edge_mass_fraction <= self.spec.adaptive_contract_edge_mass_fraction
+                and support_radius_fraction <= self.spec.adaptive_contract_support_radius_fraction
+            ):
+                self._active_grid_mode = "nominal"
+
     def _build_observation(
         self,
         *,
@@ -440,6 +818,10 @@ class GravitySequenceMatcher:
         Build one sequence-observation object around the current INS state.
         """
         state = _state_from_filter_or_state(ins_or_state)
+        grid_mode = str(self._active_grid_mode)
+        candidate_offsets, grid_half_span_m, grid_spacing_m = self._grid_definition(
+            grid_mode
+        )
         lat_c = float(state.nominal.lat_rad)
         lon_c = float(wrap_angle_pi(state.nominal.lon_rad))
         h_c = self._center_height_from_measurements(
@@ -448,7 +830,7 @@ class GravitySequenceMatcher:
             reference_surface_height_m=reference_surface_height_m,
         )
 
-        num_candidates = self._grid_offsets_ned_m.shape[0]
+        num_candidates = candidate_offsets.shape[0]
         lat = np.full(num_candidates, lat_c, dtype=np.float64)
         lon = np.full(num_candidates, lon_c, dtype=np.float64)
         h = np.full(num_candidates, h_c, dtype=np.float64)
@@ -456,7 +838,7 @@ class GravitySequenceMatcher:
             lat,
             lon,
             h,
-            self._grid_offsets_ned_m,
+            candidate_offsets,
         )
 
         pred_g = evaluate_gravity_map_disturbance(
@@ -477,7 +859,7 @@ class GravitySequenceMatcher:
             )
             log_emission += gravity_log
         log_emission += diagonal_gaussian_log_likelihood(
-            self._grid_offsets_ned_m[:, :2],
+            candidate_offsets[:, :2],
             self.spec.center_prior_std_m,
         )
 
@@ -555,15 +937,34 @@ class GravitySequenceMatcher:
             center_lat_rad=lat_c,
             center_lon_rad=lon_c,
             center_height_m=h_c,
-            candidate_offsets_ned_m=self._grid_offsets_ned_m.copy(),
+            candidate_offsets_ned_m=np.asarray(candidate_offsets, dtype=np.float64),
             candidate_lat_rad=lat,
             candidate_lon_rad=lon,
             candidate_height_m=h,
             log_emission=np.asarray(log_emission, dtype=np.float64),
             predicted_disturbance_mps2=np.asarray(pred_g, dtype=np.float64),
-            predicted_bathymetry_m=None if pred_bathymetry is None else np.asarray(pred_bathymetry, dtype=np.float64),
+            predicted_bathymetry_m=None
+            if pred_bathymetry is None
+            else np.asarray(pred_bathymetry, dtype=np.float64),
+            gravity_meas_std_mps2=float(gravity_meas_std_mps2),
+            bathymetry_meas_std_m=(
+                None
+                if measured_bathymetry_m is None
+                else (
+                    self.spec.bathymetry_meas_std_m
+                    if bathymetry_meas_std_m is None
+                    else float(bathymetry_meas_std_m)
+                )
+            ),
+            grid_mode=grid_mode,
+            grid_half_span_m=np.asarray(grid_half_span_m, dtype=np.float64),
+            grid_spacing_m=np.asarray(grid_spacing_m, dtype=np.float64),
             used_gradient=used_gradient,
             used_bathymetry=used_bathymetry,
+        )
+        local_weights = self._stable_posterior_weights(obs.log_emission, obs)
+        self._maybe_update_active_grid_mode(
+            self._ambiguity_diagnostics(obs, local_weights)
         )
         self._next_global_index += 1
         return obs
@@ -571,36 +972,47 @@ class GravitySequenceMatcher:
     def _run_window_inference(
         self,
         window: list[_SequenceObservation],
-    ) -> tuple[FloatArray, FloatArray, FloatArray, NDArray[np.int64]]:
+    ) -> tuple[
+        list[FloatArray],
+        list[FloatArray],
+        list[FloatArray],
+        list[NDArray[np.int64]],
+    ]:
         """
         Run forward/backward and Viterbi over the supplied window.
         """
         if len(window) == 0:
             raise ValueError("window must be non-empty.")
 
-        log_e = np.stack([obs.log_emission for obs in window], axis=0)
-        log_e = np.where(np.isfinite(log_e), log_e, -1.0e12)
-        num_steps, num_candidates = log_e.shape
+        log_e = [
+            np.where(np.isfinite(obs.log_emission), obs.log_emission, -1.0e12).astype(
+                np.float64
+            )
+            for obs in window
+        ]
+        num_steps = len(window)
 
-        alpha = np.empty((num_steps, num_candidates), dtype=np.float64)
-        beta = np.empty((num_steps, num_candidates), dtype=np.float64)
-        delta = np.empty((num_steps, num_candidates), dtype=np.float64)
-        psi = np.zeros((num_steps, num_candidates), dtype=np.int64)
+        alpha = [np.empty_like(le) for le in log_e]
+        beta = [np.empty_like(le) for le in log_e]
+        delta = [np.empty_like(le) for le in log_e]
+        psi = [np.zeros(le.shape[0], dtype=np.int64) for le in log_e]
 
-        alpha[0] = log_e[0]
-        delta[0] = log_e[0]
+        alpha[0] = log_e[0].copy()
+        delta[0] = log_e[0].copy()
 
         for t in range(1, num_steps):
-            trans_terms = alpha[t - 1][:, None] + self._transition_log
+            trans_log = self._transition_log_between(window[t - 1], window[t])
+            trans_terms = alpha[t - 1][:, None] + trans_log
             alpha[t] = log_e[t] + _logsumexp(trans_terms, axis=0)
 
-            delta_terms = delta[t - 1][:, None] + self._transition_log
+            delta_terms = delta[t - 1][:, None] + trans_log
             psi[t] = np.argmax(delta_terms, axis=0).astype(np.int64)
             delta[t] = log_e[t] + np.max(delta_terms, axis=0)
 
-        beta[-1] = 0.0
+        beta[-1] = np.zeros_like(log_e[-1], dtype=np.float64)
         for t in range(num_steps - 2, -1, -1):
-            beta_terms = self._transition_log + log_e[t + 1][None, :] + beta[t + 1][None, :]
+            trans_log = self._transition_log_between(window[t], window[t + 1])
+            beta_terms = trans_log + log_e[t + 1][None, :] + beta[t + 1][None, :]
             beta[t] = _logsumexp(beta_terms, axis=1)
 
         return alpha, beta, delta, psi
@@ -659,12 +1071,20 @@ class GravitySequenceMatcher:
     def _estimate_for_window_index(
         self,
         window: list[_SequenceObservation],
-        alpha: FloatArray,
-        beta: FloatArray,
-        delta: FloatArray,
-        psi: NDArray[np.int64],
+        alpha: list[FloatArray],
+        beta: list[FloatArray],
+        delta: list[FloatArray],
+        psi: list[NDArray[np.int64]],
         target_local_index: int,
-    ) -> tuple[SequenceAnchorEstimate, bool, bool, float, float, Optional[float]]:
+    ) -> tuple[
+        SequenceAnchorEstimate,
+        bool,
+        bool,
+        float,
+        float,
+        Optional[float],
+        SequenceAmbiguityDiagnostics,
+    ]:
         """
         Build one posterior/viterbi estimate for a selected window index.
 
@@ -730,11 +1150,13 @@ class GravitySequenceMatcher:
         peak_prob = float(np.max(weights))
         entropy = float(-np.sum(weights * np.log(np.maximum(weights, 1.0e-300))))
 
+        ambiguity = self._ambiguity_diagnostics(obs, weights)
+
         best_last = int(np.argmax(delta[-1]))
         path = np.empty(len(window), dtype=np.int64)
         path[-1] = best_last
         for t in range(len(window) - 1, 0, -1):
-            path[t - 1] = psi[t, path[t]]
+            path[t - 1] = psi[t][path[t]]
 
         best_idx = int(path[target])
         best_offset = obs.candidate_offsets_ned_m[best_idx].copy()
@@ -761,6 +1183,7 @@ class GravitySequenceMatcher:
             pred_g_mean,
             pred_g_std,
             pred_bath_mean,
+            ambiguity,
         )
 
     def _emit_result_for_index(
@@ -780,6 +1203,7 @@ class GravitySequenceMatcher:
             pred_g_mean,
             pred_g_std,
             pred_bath_mean,
+            ambiguity,
         ) = self._estimate_for_window_index(
             window,
             alpha,
@@ -823,7 +1247,8 @@ class GravitySequenceMatcher:
             predicted_disturbance_std_mps2=pred_g_std,
             used_gradient=used_gradient,
             used_bathymetry=used_bathymetry,
-            viterbi_log_score=float(delta[-1, best_last]),
+            ambiguity_diagnostics=ambiguity,
+            viterbi_log_score=float(delta[-1][best_last]),
             viterbi_offset_ned_m=np.asarray(target_anchor.viterbi_offset_ned_m, dtype=np.float64),
             posterior_mean_offset_ned_m=np.asarray(
                 target_anchor.posterior_mean_offset_ned_m,
@@ -960,6 +1385,7 @@ class GravitySequenceMatcher:
 __all__ = [
     "GravitySequenceMatcher",
     "GravitySequenceMatcherSpec",
+    "SequenceAmbiguityDiagnostics",
     "SequenceAnchorEstimate",
     "SequenceMatchEstimate",
     "SequenceMatchUpdateResult",

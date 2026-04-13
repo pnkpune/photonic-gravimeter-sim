@@ -287,7 +287,15 @@ def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> N
     delta = np.zeros((1, n), dtype=np.float64)
     psi = np.zeros((1, n), dtype=np.int64)
 
-    anchor, used_gradient, used_bathymetry, pred_g_mean, pred_g_std, pred_bath = matcher._estimate_for_window_index(
+    (
+        anchor,
+        used_gradient,
+        used_bathymetry,
+        pred_g_mean,
+        pred_g_std,
+        pred_bath,
+        ambiguity,
+    ) = matcher._estimate_for_window_index(
         window,
         alpha,
         beta,
@@ -304,6 +312,78 @@ def test_sequence_matcher_collapsed_posterior_falls_back_without_crashing() -> N
     assert np.isfinite(pred_g_mean)
     assert np.isfinite(pred_g_std)
     assert pred_bath is None
+    assert ambiguity.dominant_failure_mode in {
+        "informative",
+        "edge_clipped",
+        "flat_signature",
+        "prior_dominated",
+        "bathymetry_noninformative",
+    }
+
+
+def test_sequence_matcher_adaptive_grid_expands_after_edge_clipped_update() -> None:
+    lat0 = np.deg2rad(18.25)
+    lon0 = np.deg2rad(72.75)
+    h0 = 0.0
+    map_fn = _quadratic_map_factory(lat0, lon0, h0)
+
+    matcher = GravitySequenceMatcher(
+        GravitySequenceMatcherSpec(
+            window_size=3,
+            grid_half_span_m=(40.0, 40.0),
+            grid_spacing_m=(20.0, 20.0),
+            transition_std_m=(10.0, 10.0),
+            center_prior_std_m=(80.0, 80.0),
+            gravity_meas_std_mps2=2.0e-7,
+            adaptive_grid_enabled=True,
+            expanded_grid_half_span_m=(100.0, 100.0),
+            expanded_grid_spacing_m=(20.0, 20.0),
+            height_std_m=1.0,
+        ),
+        map_fn,
+    )
+
+    truth_offset = np.array([80.0, 0.0, 0.0], dtype=np.float64)
+    lat_true, lon_true, h_true = apply_ned_offsets_to_geodetic(
+        np.array([lat0], dtype=np.float64),
+        np.array([lon0], dtype=np.float64),
+        np.array([h0], dtype=np.float64),
+        truth_offset.reshape(1, 3),
+    )
+    g_meas = float(
+        map_fn(
+            np.array([lat_true[0]], dtype=np.float64),
+            np.array([lon_true[0]], dtype=np.float64),
+            np.array([h_true[0]], dtype=np.float64),
+        )[0]
+    )
+
+    matcher.update(
+        g_meas,
+        gravity_meas_std_mps2=2.0e-7,
+        ins_or_state=_make_state(
+            time_s=0.0,
+            lat_rad=lat0,
+            lon_rad=lon0,
+            height_m=h0,
+        ),
+        time_s=0.0,
+    )
+    assert matcher._window[-1].grid_mode == "nominal"
+    assert matcher._active_grid_mode == "expanded"
+
+    matcher.update(
+        g_meas,
+        gravity_meas_std_mps2=2.0e-7,
+        ins_or_state=_make_state(
+            time_s=1.0,
+            lat_rad=lat0,
+            lon_rad=lon0,
+            height_m=h0,
+        ),
+        time_s=1.0,
+    )
+    assert matcher._window[-1].grid_mode == "expanded"
 
 
 def test_runner_sequence_matcher_logs_updates_and_metrics() -> None:
@@ -347,6 +427,9 @@ def test_runner_sequence_matcher_logs_updates_and_metrics() -> None:
     arrays = result.estimators.sequence_history_arrays()
     assert arrays["sequence_time_s"].shape[0] == len(result.estimators.sequence_updates)
     assert arrays["sequence_covariance_ned_m2"].shape[1:] == (3, 3)
+    assert "sequence_edge_mass_fraction" in arrays
+    assert "sequence_dominant_failure_mode" in arrays
+    assert arrays["sequence_grid_half_span_m"].shape[1:] == (2,)
 
     summary = result.summary()
     assert summary.num_sequence_updates == len(result.estimators.sequence_updates)

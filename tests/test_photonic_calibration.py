@@ -119,5 +119,7 @@ def test_run_maritime_demo_smoke_for_frozen_demo_packs(tmp_path: Path) -> None:
             "photonic_gravity_bathymetry",
             "photonic_gravity_bathymetry_lag",
         }
+        assert all("reported_output_mode" in row for row in rows)
+        assert all("reported_output_reason" in row for row in rows)
         assert len(photonic_rows) == 3
         assert region_name in report_text
