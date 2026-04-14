@@ -12,6 +12,7 @@ from gravnav.datasets.bathymetry_loader import (
     RegionalBathymetryManifest,
     RegionalDemoPackManifest,
     load_bathymetry_grid_from_manifest,
+    process_regular_array_bathymetry_grid,
     resolve_regional_demo_pack,
 )
 from gravnav.datasets.current_loader import process_regular_csv_current_field
@@ -71,6 +72,46 @@ def test_bathymetry_manifests_round_trip() -> None:
 
     assert RegionalBathymetryManifest.from_mapping(bathy.to_mapping()) == bathy
     assert RegionalDemoPackManifest.from_mapping(demo.to_mapping()) == demo
+
+
+def test_process_regular_array_bathymetry_grid_round_trips(tmp_path: Path) -> None:
+    raw_tiff = tmp_path / "fixture.tif"
+    raw_tiff.write_bytes(b"fixture")
+    processed_npz = tmp_path / "fixture_bathymetry.npz"
+    manifest_path = tmp_path / "fixture_bathymetry.json"
+
+    grid, manifest = process_regular_array_bathymetry_grid(
+        lat_axis_deg=np.array([66.0, 66.1], dtype=np.float64),
+        lon_axis_deg=np.array([14.0, 14.1, 14.2], dtype=np.float64),
+        elevation_grid_m=np.array(
+            [
+                [-500.0, -510.0, -520.0],
+                [-530.0, -540.0, -550.0],
+            ],
+            dtype=np.float64,
+        ),
+        raw_data_path=raw_tiff,
+        processed_npz_path=processed_npz,
+        manifest_path=manifest_path,
+        region_name="fixture_region",
+        source_name="fixture_array",
+        source_kind="fixture_array_kind",
+        project_root=tmp_path,
+        metadata_extra={"fixture": True},
+    )
+
+    loaded, loaded_manifest, loaded_npz, loaded_manifest_path = load_bathymetry_grid_from_manifest(
+        manifest_path
+    )
+
+    assert grid.shape == (2, 3)
+    assert manifest.source_kind == "fixture_array_kind"
+    assert manifest.metadata["fixture"] is True
+    assert loaded.shape == (2, 3)
+    assert np.allclose(loaded.elevation_grid_m, grid.elevation_grid_m)
+    assert loaded_manifest.region_name == "fixture_region"
+    assert loaded_npz == processed_npz.resolve()
+    assert loaded_manifest_path == manifest_path.resolve()
 
 
 def test_demo_pack_resolution_uses_manifest_relative_paths(tmp_path: Path) -> None:
@@ -350,3 +391,104 @@ def test_run_maritime_demo_report_records_loaded_asset_sources(tmp_path: Path) -
     assert "/tmp/current_grid.npz" in report_text
     assert "/tmp/tide.json" in report_text
     assert "fixture_demo_region" in report_text
+
+
+def test_run_maritime_demo_hybrid_lag_ins_uses_only_runtime_safe_lag_samples() -> None:
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_maritime_demo.py"
+    spec = importlib.util.spec_from_file_location("run_maritime_demo_test_module_hybrid", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    diagnostics = [
+        SimpleNamespace(
+            gravity_information_ratio=0.20,
+            bathymetry_information_ratio=0.0,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+        ),
+        SimpleNamespace(
+            gravity_information_ratio=0.20,
+            bathymetry_information_ratio=0.0,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="prior_dominated",
+        ),
+    ]
+    hybrid = module._hybrid_lag_ins_from_runtime_signals(
+        ins_times_s=np.array([0.0, 1.0, 2.0], dtype=np.float64),
+        ins_error_ned_m=np.array(
+            [[10.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        ins_hmi_horizontal=np.array([False, False, False], dtype=bool),
+        lag_times_s=np.array([1.0, 2.0], dtype=np.float64),
+        lag_error_ned_m=np.array([[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=np.float64),
+        lag_hmi_horizontal=np.array([False, False], dtype=bool),
+        lag_alert_ok=np.array([True, True], dtype=bool),
+        sequence_times_s=np.array([1.0, 2.0], dtype=np.float64),
+        sequence_diagnostics=diagnostics,
+    )
+
+    assert hybrid is not None
+    assert hybrid["lag_selected_count"] == 1
+    assert np.isclose(hybrid["lag_selected_fraction"], 1.0 / 3.0)
+    assert np.isclose(
+        hybrid["position_error"].horizontal_rmse_m,
+        np.sqrt((10.0 ** 2 + 2.0 ** 2 + 10.0 ** 2) / 3.0),
+    )
+    assert hybrid["hmi_horizontal"] == 0.0
+
+
+def test_run_maritime_demo_hybrid_runtime_selector_uses_sequence_when_lag_unavailable() -> None:
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_maritime_demo.py"
+    spec = importlib.util.spec_from_file_location("run_maritime_demo_test_module_sequence", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    diagnostics = [
+        SimpleNamespace(
+            gravity_information_ratio=0.20,
+            bathymetry_information_ratio=0.30,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+        ),
+        SimpleNamespace(
+            gravity_information_ratio=0.20,
+            bathymetry_information_ratio=0.25,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+        ),
+    ]
+    hybrid = module._hybrid_earth_signature_from_runtime_signals(
+        ins_times_s=np.array([0.0, 1.0, 2.0], dtype=np.float64),
+        ins_error_ned_m=np.array(
+            [[10.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        ins_hmi_horizontal=np.array([False, False, False], dtype=bool),
+        lag_times_s=np.array([], dtype=np.float64),
+        lag_error_ned_m=np.empty((0, 3), dtype=np.float64),
+        lag_hmi_horizontal=np.array([], dtype=bool),
+        lag_alert_ok=np.array([], dtype=bool),
+        sequence_times_s=np.array([1.0, 2.0], dtype=np.float64),
+        sequence_error_ned_m=np.array([[4.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=np.float64),
+        sequence_hmi_horizontal=np.array([False, False], dtype=bool),
+        sequence_alert_ok=np.array([True, True], dtype=bool),
+        sequence_diagnostics=diagnostics,
+    )
+
+    assert hybrid is not None
+    assert hybrid["lag_selected_count"] == 0
+    assert hybrid["sequence_selected_count"] == 2
+    assert hybrid["ins_selected_count"] == 1
+    assert np.isclose(hybrid["sequence_selected_fraction"], 2.0 / 3.0)
+    assert np.isclose(
+        hybrid["position_error"].horizontal_rmse_m,
+        np.sqrt((10.0 ** 2 + 4.0 ** 2 + 5.0 ** 2) / 3.0),
+    )
+    assert hybrid["hmi_horizontal"] == 0.0

@@ -1,0 +1,220 @@
+{
+  "name": "nordland_offshore_maritime",
+  "initial_lat_deg": 67.1796167347923,
+  "initial_lon_deg": 17.367203700033567,
+  "initial_height_m": 0.0,
+  "initial_heading_deg": 119.99999999999997,
+  "default_dt_s": 1.0,
+  "description": "Public offshore maritime demo route selected inside nordland_offshore using the gravity-information score.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "off_grid_earth_signature_demo",
+    "region_name": "nordland_offshore",
+    "route_selection": {
+      "information_score": 15.910737906692464,
+      "value_std_mgal": 5.094068935885736,
+      "mean_horizontal_gradient_mgal_per_km": 15.840761807352285,
+      "cross_gradient_alignment": 0.6590502922791787
+    }
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_3"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_3"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_4"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_4"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_5"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_5"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_6"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_6"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_7"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_7"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_8"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_8"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_9"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_9"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_10"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "demo_turn_10"
+    },
+    {
+      "type": "straight",
+      "duration_s": 300.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "demo_leg_11"
+    }
+  ]
+}

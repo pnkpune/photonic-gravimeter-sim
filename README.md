@@ -1,135 +1,126 @@
 # photonic-gravimeter-sim
 
-`photonic-gravimeter-sim` is a GPS-denied navigation simulator for passive, stealth-compatible missions. The product target is not a standalone gravimeter. It is an INS-centered navigation stack where gravity is the primary Earth-signature anchor and other passive channels are allowed only to reduce ambiguity without reintroducing GNSS.
+`photonic-gravimeter-sim` is a GPS-denied navigation simulator for passive, stealth-compatible missions. The target product is an INS-centered navigation stack where gravity is the primary Earth-signature anchor and additional passive data are used only to reduce ambiguity without reintroducing GNSS.
 
-The current milestone tag is `v0.1-off-grid-maritime-demo`. The current working branch is `feature/photonic-digital-twin`.
+The frozen milestone tag is `v0.1-off-grid-maritime-demo`. Current development is on `feature/photonic-digital-twin`.
 
-## Branch Scope
+## Current Branch State
 
-This branch is intentionally narrow:
+This branch now contains two major layers on top of the milestone baseline:
 
-- keep the existing estimator family unchanged
-- replace the older mission-facing photonic wrapper with a phase-domain cold-atom digital twin
-- calibrate that sensor model against fixed operating regimes
-- rerun only the two frozen maritime demo packs:
-  - Norwegian margin
-  - Helgeland offshore
-- use telemetry to decide whether the remaining failure is sensor-limited or region-limited
+- a phase-domain photonic gravimeter digital twin
+- Priority 9 Norway-first public-data expansion
 
-This branch does not add magnetic aiding, new filter families, or more generic regional tooling.
+The estimator family is still unchanged:
 
-## Current Result
+- live INS + depth + velocity
+- observe-only gravity sequence matcher
+- bounded-lag delayed output
+- ambiguity-aware publication and fallback logic
 
-The digital twin is now calibrated and integrated behind the existing public sensor interface:
+No ML path is active on this branch. No GNSS is used in the demo paths.
 
-- `PhotonicGravimeterSpec`
-- `PhotonicGravimeterMeasurement`
-- `PhotonicGravimeterSensor`
+## Photonic Digital Twin
 
-It explicitly models:
+The photonic sensor path is no longer a simple noise wrapper. The current `PhotonicGravimeterSpec` / `PhotonicGravimeterSensor` path models:
 
 - Raman Mach-Zehnder phase accumulation with `k_eff T^2`
-- sensitivity-function vibration phase and accelerometer-assisted compensation
+- sensitivity-function vibration phase and accelerometer-assisted correction
 - gravity-gradient, Coriolis / rotation, chirp, Zeeman, Stark, and wavefront terms
 - fringe contrast, transition probability, phase inversion, cadence, warm-up, and validity gating
-- per-sample telemetry for branch diagnosis
+- per-sample telemetry for validity, contrast, residual phase, and rejection reasons
 
-## Calibration Checkpoint
-
-Three locked presets ship with the branch:
+Tracked calibration presets:
 
 - `photonic_gravimeter_lab_static`
 - `photonic_gravimeter_maritime_benign`
 - `photonic_gravimeter_maritime_rough`
 
-Calibration outcome from `scripts/run_photonic_calibration.py`:
+Calibration status remains coherent:
 
-| Preset | Key result | Outcome |
-| --- | --- | --- |
-| `lab_static` | zero-disturbance error `0`, doubled-`T` scale ratio `3.999918`, gradient and wavefront terms visible | pass |
-| `maritime_benign` | valid fraction `0.925`, median contrast `0.660`, vibration suppression `40.0x` | pass |
-| `maritime_rough` | vibration suppression `3.18x`, failures dominated by `low_contrast` and `tilt_limit` | pass as stressed regime |
+- `lab_static` passes the scale-factor and zero-disturbance checks
+- `maritime_benign` stays operational
+- `maritime_rough` is degraded for physical reasons, mainly `low_contrast` / `tilt_limit`
 
-Important interpretation:
+## Priority 9 Public-Data Expansion
 
-- the benign preset is operational
-- the rough preset is intentionally near the edge of usability
-- the rough regime is degraded for physical reasons, not numerical failure
+The Norway-first public-data stack now supports:
 
-## Frozen Demo Reruns
+- tide and datum correction
+- upgraded public bathymetry / acoustic terrain
+- scalar magnetic anomaly aiding
+- current-aware motion prior
 
-### Norwegian Margin
+Implemented public-data paths:
 
-Median across seeds `42/123/777` under the calibrated digital twin:
+- tide correction: [tides.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/physics/tides.py)
+- magnetic grid loader: [magnetic_loader.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/datasets/magnetic_loader.py)
+- magnetometer model: [magnetometer.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/magnetometer.py)
+- current grid loader: [current_loader.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/datasets/current_loader.py)
+- current-profile sensor: [current_profile.py](/Users/pranav/Downloads/photonic-gravimeter-sim/src/gravnav/sensors/current_profile.py)
+- EMODnet bathymetry prep: [prepare_public_emodnet_bathymetry.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/prepare_public_emodnet_bathymetry.py)
+- multimodal public-pack prep: [prepare_public_multimodal_norway.py](/Users/pranav/Downloads/photonic-gravimeter-sim/scripts/prepare_public_multimodal_norway.py)
 
-| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
+Current public sources used:
+
+- gravity: existing Norwegian regional gravity packs already in the repo workflow
+- bathymetry: EMODnet Bathymetry 2022 WCS tiles
+- magnetic: WMM2025 + WMMHR2025-derived anomaly path
+- currents: HYCOM GLBy0.08 point sampling
+
+## Current Three-Region Result
+
+The three frozen Norway public regions are:
+
+- Norwegian margin
+- Helgeland offshore
+- Nordland offshore
+
+All results below are medians across seeds `42/123/777`.
+
+| Region | Best validated reported output | Live INS RMSE [m] | Reported RMSE [m] | Live INS CEP95 [m] | Reported CEP95 [m] | Horizontal HMI |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `live_ins` | `live_ins` | 241.526 | 241.526 | 427.030 | 427.030 | 0.000 |
-| `surrogate_gravity` | `sequence` | 241.526 | 219.616 | 427.030 | 391.954 | 0.000 |
-| `photonic_gravity` | `sequence` | 241.526 | 219.837 | 427.030 | 395.241 | 0.000 |
-| `photonic_gravity_bathymetry` | `sequence` | 241.526 | 201.691 | 427.030 | 392.602 | 0.000 |
-| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 241.526 | 205.490 | 427.030 | 393.373 | 0.000 |
+| Norwegian margin | `photonic_gravity_tide_acoustic_magnetic` sequence | 241.526 | 219.124 | 427.030 | 393.852 | 0.000 |
+| Helgeland offshore | no validated Earth-signature promotion yet | 161.608 | 161.175 | 278.771 | 278.853 | 0.007 |
+| Nordland offshore | no validated Earth-signature promotion yet | 257.644 | 257.552 | 457.781 | 457.781 | 0.010 |
 
-Takeaway:
+What changed after the EMODnet upgrade:
 
-- the digital twin keeps the first-region win intact
-- the best first-region output on this branch is the observe-only `photonic_gravity_bathymetry` sequence estimate
-- the lag output is still safe here, but it is no longer the best median performer
+- Norwegian margin stayed usable, but EMODnet did not outperform the earlier regional bathymetry pack there.
+- Helgeland and Nordland stopped being terrain-starved. Raw sequence and lag tracks improved materially in informative windows.
+- The remaining blocker is now publication robustness. The runtime-safe selector only harvests a small fraction of the informative weak-region samples, and the evaluated hybrid output still leaks small horizontal HMI in Helgeland and Nordland.
 
-### Helgeland Offshore
+Important negative result:
 
-Median across seeds `42/123/777` under the same calibrated digital twin:
+- the current-aware prior degrades all three regions in the current public setup
+- the strongest current branch result is still the tide + acoustic + magnetic path without current-aware promotion
 
-| Mode | Reported output | Live INS RMSE [m] | Earth-signature RMSE [m] | Live INS CEP95 [m] | Earth-signature CEP95 [m] | HMI horiz |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `live_ins` | `live_ins` | 161.608 | 161.608 | 278.771 | 278.771 | 0.000 |
-| `surrogate_gravity` | `sequence` | 161.608 | 209.473 | 278.771 | 331.689 | 0.000 |
-| `photonic_gravity` | `sequence` | 161.608 | 206.035 | 278.771 | 330.615 | 0.000 |
-| `photonic_gravity_bathymetry` | `sequence` | 161.608 | 199.773 | 278.771 | 330.615 | 0.000 |
-| `photonic_gravity_bathymetry_lag` | `lag_smoothed` | 161.608 | 195.002 | 278.771 | 311.620 | 0.696 |
+## Current Diagnosis
 
-Takeaway:
+The main bottleneck is no longer missing sensor physics or missing public-data plumbing.
 
-- Helgeland still fails
-- the lag output is not promotable because RMSE, CEP95, and HMI all fail the acceptance gate
-- adding another modality now would blur the diagnosis
+What the branch now establishes:
 
-## Telemetry Diagnosis
+- the photonic model is credible enough to interpret navigation results as sensor-driven
+- public tide, magnetic, current, and EMODnet bathymetry paths are integrated end to end
+- EMODnet creates useful terrain information in the weak regions
+- the remaining problem is robust publication of partial Earth-signature wins, not lack of modality plumbing
 
-The new branch checkpoint compares photonic telemetry across the two frozen regions.
+Current practical diagnosis:
 
-Median photonic telemetry on the promoted `photonic_gravity_bathymetry_lag` path:
+- Norwegian margin is still a clean gravity-led win
+- Helgeland and Nordland have useful raw Earth-signature content but are not yet promotable because the evaluated reported output still shows nonzero horizontal HMI
+- current-aware correction is not ready for promotion
 
-| Region | Valid fraction | Median contrast | Tilt exceedance fraction | Dominant rejection |
-| --- | ---: | ---: | ---: | --- |
-| `norwegian_margin` | 0.764 | 0.677 | 0.227 | `tilt_limit` |
-| `helgeland_offshore` | 0.764 | 0.677 | 0.227 | `tilt_limit` |
+## Recommended Next Work
 
-That matters because:
+The next effective step is not another new modality. It is product-output hardening:
 
-- Norwegian margin passes under this exact sensor envelope
-- Helgeland fails under the same sensor envelope
-- the branch diagnosis is therefore `region_limited`, not `sensor_limited`
+- make the publication layer more locally selective without becoming overconfident
+- use the already integrated ambiguity diagnostics, covariance, and modality-specific information ratios more effectively
+- keep evaluating against zero-HMI acceptance, not just RMSE gains
 
-Current next-branch decision:
-
-- `feature/regional-telemetry-hardening`
-
-## What This Branch Established
-
-- the photonic model is now physically credible enough to interpret navigation results as sensor-driven rather than wrapper-driven
-- first-region performance survives the physics upgrade
-- second-region failure is still real
-- the remaining bottleneck is regional distinctiveness and telemetry-aware demo-pack hardening, not a missing photonic phase term
-
-## What Not To Do Next
-
-Do not do these on top of this branch result:
-
-- add magnetic aiding yet
-- reopen PF-to-INS feedback
-- retune the digital twin against navigation outcome
-- claim a generalized multi-region off-grid result
+Only after that is stable should new channels or ML be considered.
 
 ## Core Commands
 
@@ -140,54 +131,61 @@ python3 scripts/run_photonic_calibration.py \
   --output-dir /tmp/gravnav_photonic_calibration
 ```
 
-Run the Norwegian-margin frozen demo pack:
+Prepare a public Norway multimodal demo pack from an existing bathymetry demo pack:
+
+```bash
+python3 scripts/prepare_public_multimodal_norway.py \
+  --demo-pack-manifest data/bathymetry/processed/helgeland_offshore_demo_pack.json
+```
+
+Upgrade a public demo pack to EMODnet bathymetry:
+
+```bash
+python3 scripts/prepare_public_emodnet_bathymetry.py \
+  --demo-pack-manifest data/bathymetry/processed/helgeland_offshore_priority9_demo_pack.json
+```
+
+Run the three public Norway demo packs:
 
 ```bash
 python3 scripts/run_maritime_demo.py \
-  --demo-pack-manifest data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json \
-  --output-dir /tmp/gravnav_photonic_nm
+  --demo-pack-manifest data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json \
+  --output-dir /tmp/gravnav_priority9_emodnet_nm
 ```
-
-Run the Helgeland frozen demo pack:
 
 ```bash
 python3 scripts/run_maritime_demo.py \
-  --demo-pack-manifest data/bathymetry/processed/helgeland_offshore_demo_pack.json \
-  --output-dir /tmp/gravnav_photonic_hel
+  --demo-pack-manifest data/bathymetry/processed/helgeland_offshore_priority9_emodnet_demo_pack.json \
+  --output-dir /tmp/gravnav_priority9_emodnet_hel
 ```
 
-Generate the branch checkpoint report:
-
 ```bash
-python3 scripts/generate_photonic_branch_checkpoint.py \
-  --region-one-name norwegian_margin \
-  --region-one-summary /tmp/gravnav_photonic_nm/hardware_tied_maritime_demo_summary.json \
-  --region-one-photonic-summary /tmp/gravnav_photonic_nm/hardware_tied_maritime_demo_photonic_summary.json \
-  --region-two-name helgeland_offshore \
-  --region-two-summary /tmp/gravnav_photonic_hel/hardware_tied_maritime_demo_summary.json \
-  --region-two-photonic-summary /tmp/gravnav_photonic_hel/hardware_tied_maritime_demo_photonic_summary.json \
-  --calibration-summary /tmp/gravnav_photonic_calibration/photonic_calibration_summary.json \
-  --output-dir /tmp/gravnav_photonic_checkpoint
+python3 scripts/run_maritime_demo.py \
+  --demo-pack-manifest data/bathymetry/processed/nordland_offshore_priority9_emodnet_demo_pack.json \
+  --output-dir /tmp/gravnav_priority9_emodnet_nord
 ```
 
-Run the full regression suite:
+Run the targeted regression coverage used for the current branch checkpoint:
 
 ```bash
-PYTHONPATH=src python3 -m pytest -q
+PYTHONPATH=src python3 -m pytest \
+  tests/test_bathymetry_loader.py \
+  tests/test_prepare_public_emodnet_bathymetry.py \
+  tests/test_prepare_public_multimodal_norway.py -q
 ```
 
 ## Validation
 
-Current regression status:
+Latest targeted regression status on this branch:
 
-- `58 passed`
+- `16 passed` for the public-bathymetry and public-multimodal preparation path
 
-Primary branch artifacts are generated, not tracked:
+Latest public three-region demo artifacts from this work:
 
-- calibration summary and report
-- frozen-region demo summaries and reports
-- photonic branch checkpoint summary and report
+- [/private/tmp/gravnav_priority9_emodnet_nm_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nm_hybrid2/hardware_tied_maritime_demo_report.md)
+- [/private/tmp/gravnav_priority9_emodnet_hel_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_hel_hybrid2/hardware_tied_maritime_demo_report.md)
+- [/private/tmp/gravnav_priority9_emodnet_nord_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nord_hybrid2/hardware_tied_maritime_demo_report.md)
 
-The tracked source of truth for branch intent is:
+The tracked roadmap remains:
 
-- [data/outputs/reports/NEXT_STEPS_REPORT.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/NEXT_STEPS_REPORT.md)
+- [NEXT_STEPS_REPORT.md](/Users/pranav/Downloads/photonic-gravimeter-sim/data/outputs/reports/NEXT_STEPS_REPORT.md)

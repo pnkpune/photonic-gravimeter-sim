@@ -790,6 +790,82 @@ def process_regular_csv_bathymetry_grid(
     return grid, manifest
 
 
+def process_regular_array_bathymetry_grid(
+    *,
+    lat_axis_deg: ArrayLike,
+    lon_axis_deg: ArrayLike,
+    elevation_grid_m: ArrayLike,
+    raw_data_path: str | Path,
+    processed_npz_path: str | Path,
+    manifest_path: str | Path,
+    region_name: str,
+    source_name: str,
+    source_kind: str = "regular_grid_array",
+    reference_surface_height_m: float = 0.0,
+    default_method: str = "linear",
+    bounds_error: bool = False,
+    fill_value_m: float = np.nan,
+    metadata_extra: Optional[dict[str, Any]] = None,
+    project_root: str | Path | None = None,
+) -> tuple[BathymetryGrid, RegionalBathymetryManifest]:
+    root = _project_root(project_root)
+    raw_path = Path(raw_data_path).expanduser().resolve()
+    grid = BathymetryGrid(
+        lat_axis_deg=np.asarray(lat_axis_deg, dtype=np.float64),
+        lon_axis_deg=np.asarray(lon_axis_deg, dtype=np.float64),
+        elevation_grid_m=np.asarray(elevation_grid_m, dtype=np.float64),
+        reference_surface_height_m=reference_surface_height_m,
+        default_method=default_method,
+        bounds_error=bounds_error,
+        fill_value_m=fill_value_m,
+        name=f"{region_name}_bathymetry_grid",
+        metadata={
+            "region_name": region_name,
+            "source_name": source_name,
+            "source_kind": source_kind,
+            "raw_data_path": str(raw_path),
+            **({} if metadata_extra is None else dict(metadata_extra)),
+        },
+    )
+    processed_path = grid.to_npz(processed_npz_path)
+    manifest_target = Path(manifest_path).expanduser().resolve()
+    manifest = RegionalBathymetryManifest(
+        region_name=region_name,
+        source_name=source_name,
+        source_kind=source_kind,
+        raw_data_path=_relative_to_root(raw_path, project_root=root),
+        processed_grid_path=_relative_to_root(processed_path, project_root=root),
+        manifest_path=_relative_to_root(manifest_target, project_root=root),
+        elevation_units="m",
+        reference_surface_height_m=float(reference_surface_height_m),
+        lat_bounds_deg=grid.lat_bounds_deg,
+        lon_bounds_deg=grid.lon_bounds_deg,
+        spacing_deg=(
+            _axis_spacing_deg(np.asarray(grid.lat_axis_deg, dtype=np.float64)),
+            _axis_spacing_deg(np.asarray(grid.lon_axis_deg, dtype=np.float64)),
+        ),
+        shape=grid.shape,
+        interpolation=str(grid.default_method),
+        notes=[
+            "Processed into BathymetryGrid NPZ cache for regional maritime demo use.",
+            "Elevation is relative to the reference surface; water depth is max(0, href - elevation).",
+        ],
+        metadata={
+            "grid_name": grid.name,
+            "bounds_error": bool(grid.bounds_error),
+            "fill_value_m": (
+                None
+                if not np.isfinite(float(grid.fill_value_m))
+                else float(grid.fill_value_m)
+            ),
+            "raw_loader": "process_regular_array_bathymetry_grid",
+            **({} if metadata_extra is None else dict(metadata_extra)),
+        },
+    )
+    manifest.write_json(manifest_target)
+    return grid, manifest
+
+
 def ensure_regional_bathymetry_grid(
     region_name: str,
     *,
@@ -858,6 +934,7 @@ __all__ = [
     "load_bathymetry_manifest",
     "load_demo_pack_manifest",
     "load_regular_csv_bathymetry_grid",
+    "process_regular_array_bathymetry_grid",
     "process_regular_csv_bathymetry_grid",
     "resolve_regional_demo_pack",
 ]

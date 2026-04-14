@@ -23,4 +23,8 @@ data/gravity_maps/processed/
 data/gravity_maps/synthetic/
 data/bathymetry/raw/
 data/bathymetry/processed/
+data/magnetic/raw/
+data/magnetic/processed/
+data/current/raw/
+data/current/processed/
 data/trajectories/
