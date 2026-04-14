@@ -4,6 +4,39 @@
 
 The frozen milestone tag is `v0.1-off-grid-maritime-demo`. Current development is on `feature/photonic-digital-twin`.
 
+## Accuracy Summary
+
+What has helped accuracy the most so far, ranked by demonstrated impact:
+
+1. `sequence-based gravity matching`
+2. `bathymetry / acoustic terrain aiding`
+3. `bounded-lag smoothing`
+4. `scalar magnetic anomaly aiding`
+5. `PF + gradient`
+6. `tide / datum correction`
+
+Main validated numbers:
+
+- synthetic Norway benchmark:
+  - live INS `103.512 m`
+  - best PF `96.902 m`
+  - best sequence `92.808 m`
+  - best lag-smoothed output `98.268 m`
+- frozen realistic Norwegian-margin demo at milestone:
+  - live INS `241.526 m`
+  - photonic gravity + bathymetry `197.839 m`
+  - photonic gravity + bathymetry lag `197.371 m`
+  - horizontal HMI `0.000`
+- current public three-region branch result:
+  - Norwegian margin best validated reported output: `219.124 m` vs live INS `241.526 m`
+  - Helgeland and Nordland now have useful raw Earth-signature windows, but reported-output promotion is still blocked by nonzero HMI
+
+What has not helped:
+
+- `current-aware prior` currently degrades all three public regions
+- direct feedback / replay / recentering heuristics have not produced a robust win
+- the photonic digital twin improved realism and diagnostics, not raw accuracy by itself
+
 ## Current Branch State
 
 This branch now contains two major layers on top of the milestone baseline:
