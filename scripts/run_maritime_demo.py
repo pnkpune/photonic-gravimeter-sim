@@ -522,6 +522,74 @@ def _time_key(time_s: float) -> int:
     return int(round(float(time_s) * 1000.0))
 
 
+def _support_radius_fraction_from_diag(diag: Any) -> float:
+    half_span = np.asarray(
+        getattr(diag, "grid_half_span_m", np.array([1.0, 1.0], dtype=np.float64)),
+        dtype=np.float64,
+    ).reshape(-1)
+    if half_span.shape[0] < 2:
+        half_span = np.array([1.0, 1.0], dtype=np.float64)
+    north_frac = float(getattr(diag, "support_radius_n_m", 0.0)) / max(
+        float(half_span[0]),
+        1.0e-9,
+    )
+    east_frac = float(getattr(diag, "support_radius_e_m", 0.0)) / max(
+        float(half_span[1]),
+        1.0e-9,
+    )
+    return max(north_frac, east_frac)
+
+
+def _runtime_confidence_level(
+    *,
+    diag: Any | None,
+    alert_ok: bool,
+    protection_level_m: float | None,
+    horizontal_alert_limit_m: float,
+) -> str:
+    if diag is None or not alert_ok:
+        return "none"
+
+    local_info = max(
+        float(getattr(diag, "gravity_information_ratio", 0.0)),
+        float(getattr(diag, "bathymetry_information_ratio", 0.0) or 0.0),
+        float(getattr(diag, "magnetic_information_ratio", 0.0) or 0.0),
+    )
+    informative = (
+        not bool(getattr(diag, "grid_saturated_any", False))
+        and str(getattr(diag, "dominant_failure_mode", "")) == "informative"
+    )
+    if not informative:
+        return "none"
+
+    edge_mass = float(getattr(diag, "edge_mass_fraction", 1.0))
+    ess_fraction = float(getattr(diag, "posterior_candidate_ess_fraction", 0.0))
+    support_radius_fraction = _support_radius_fraction_from_diag(diag)
+    protection_ratio = (
+        np.inf
+        if protection_level_m is None
+        else float(protection_level_m) / max(float(horizontal_alert_limit_m), 1.0e-9)
+    )
+
+    if (
+        local_info >= 0.20
+        and edge_mass <= 0.08
+        and ess_fraction >= 0.05
+        and support_radius_fraction <= 0.65
+        and protection_ratio <= 0.60
+    ):
+        return "enter"
+    if (
+        local_info >= 0.12
+        and edge_mass <= 0.12
+        and ess_fraction >= 0.03
+        and support_radius_fraction <= 0.80
+        and protection_ratio <= 0.80
+    ):
+        return "stay"
+    return "none"
+
+
 def _hybrid_lag_ins_from_runtime_signals(
     *,
     ins_times_s: np.ndarray,
@@ -609,16 +677,30 @@ def _hybrid_earth_signature_from_runtime_signals(
     sequence_error_ned_m: np.ndarray,
     sequence_hmi_horizontal: np.ndarray,
     sequence_alert_ok: np.ndarray,
+    lag_protection_level_m: np.ndarray | None = None,
+    sequence_protection_level_m: np.ndarray | None = None,
     sequence_diagnostics: list[Any],
+    horizontal_alert_limit_m: float = 100.0,
+    enter_consecutive_steps: int = 2,
 ) -> dict[str, Any] | None:
     if ins_times_s.size == 0 or ins_error_ned_m.shape[0] == 0:
         return None
+
+    if lag_protection_level_m is None:
+        lag_protection_level_m = np.full(lag_times_s.shape, np.nan, dtype=np.float64)
+    if sequence_protection_level_m is None:
+        sequence_protection_level_m = np.full(
+            sequence_times_s.shape,
+            np.nan,
+            dtype=np.float64,
+        )
 
     lag_by_time = {
         _time_key(t): (
             np.asarray(lag_error_ned_m[idx], dtype=np.float64),
             bool(lag_hmi_horizontal[idx]),
             bool(lag_alert_ok[idx]),
+            float(lag_protection_level_m[idx]),
         )
         for idx, t in enumerate(np.asarray(lag_times_s, dtype=np.float64))
     }
@@ -627,6 +709,7 @@ def _hybrid_earth_signature_from_runtime_signals(
             np.asarray(sequence_error_ned_m[idx], dtype=np.float64),
             bool(sequence_hmi_horizontal[idx]),
             bool(sequence_alert_ok[idx]),
+            float(sequence_protection_level_m[idx]),
             diag,
         )
         for idx, (t, diag) in enumerate(
@@ -639,42 +722,74 @@ def _hybrid_earth_signature_from_runtime_signals(
     lag_selected = 0
     sequence_selected = 0
     ins_selected = 0
+    lag_enter_streak = 0
+    sequence_enter_streak = 0
+    active_mode = "ins"
 
     for idx, t in enumerate(np.asarray(ins_times_s, dtype=np.float64)):
         time_key = _time_key(t)
         lag_item = lag_by_time.get(time_key)
         sequence_item = sequence_by_time.get(time_key)
 
-        use_lag = False
-        use_sequence = False
-        if sequence_item is not None:
-            _, _, seq_alert_ok, diag = sequence_item
-            local_info = max(
-                float(getattr(diag, "gravity_information_ratio", 0.0)),
-                float(getattr(diag, "bathymetry_information_ratio", 0.0) or 0.0),
-                float(getattr(diag, "magnetic_information_ratio", 0.0) or 0.0),
+        diag = None if sequence_item is None else sequence_item[4]
+        sequence_level = (
+            "none"
+            if sequence_item is None
+            else _runtime_confidence_level(
+                diag=diag,
+                alert_ok=bool(sequence_item[2]),
+                protection_level_m=float(sequence_item[3]),
+                horizontal_alert_limit_m=horizontal_alert_limit_m,
             )
-            informative = (
-                not bool(getattr(diag, "grid_saturated_any", False))
-                and str(getattr(diag, "dominant_failure_mode", "")) == "informative"
-                and local_info >= 0.10
+        )
+        lag_level = (
+            "none"
+            if lag_item is None
+            else _runtime_confidence_level(
+                diag=diag,
+                alert_ok=bool(lag_item[2]),
+                protection_level_m=float(lag_item[3]),
+                horizontal_alert_limit_m=horizontal_alert_limit_m,
             )
-            if lag_item is not None:
-                _, _, lag_ok = lag_item
-                use_lag = informative and lag_ok
-            use_sequence = informative and seq_alert_ok and not use_lag
+        )
 
-        if use_lag and lag_item is not None:
-            lag_err, lag_hmi, _ = lag_item
+        lag_enter_streak = lag_enter_streak + 1 if lag_level == "enter" else 0
+        sequence_enter_streak = (
+            sequence_enter_streak + 1 if sequence_level == "enter" else 0
+        )
+
+        if active_mode == "lag":
+            if lag_level in {"enter", "stay"}:
+                pass
+            elif sequence_enter_streak >= enter_consecutive_steps:
+                active_mode = "sequence"
+            else:
+                active_mode = "ins"
+        elif active_mode == "sequence":
+            if lag_enter_streak >= enter_consecutive_steps:
+                active_mode = "lag"
+            elif sequence_level in {"enter", "stay"}:
+                pass
+            else:
+                active_mode = "ins"
+        else:
+            if lag_enter_streak >= enter_consecutive_steps:
+                active_mode = "lag"
+            elif sequence_enter_streak >= enter_consecutive_steps:
+                active_mode = "sequence"
+
+        if active_mode == "lag" and lag_item is not None:
+            lag_err, lag_hmi, _, _ = lag_item
             chosen_error.append(np.asarray(lag_err, dtype=np.float64))
             chosen_hmi.append(bool(lag_hmi))
             lag_selected += 1
-        elif use_sequence and sequence_item is not None:
-            seq_err, seq_hmi, _, _ = sequence_item
+        elif active_mode == "sequence" and sequence_item is not None:
+            seq_err, seq_hmi, _, _, _ = sequence_item
             chosen_error.append(np.asarray(seq_err, dtype=np.float64))
             chosen_hmi.append(bool(seq_hmi))
             sequence_selected += 1
         else:
+            active_mode = "ins"
             chosen_error.append(np.asarray(ins_error_ned_m[idx], dtype=np.float64))
             chosen_hmi.append(bool(ins_hmi_horizontal[idx]))
             ins_selected += 1
@@ -761,11 +876,19 @@ def _runtime_hybrid_lag_ins_summary(result: Any) -> dict[str, Any] | None:
             ],
             dtype=bool,
         )
+        lag_hpl_m = np.asarray(
+            [
+                float(getattr(getattr(snap, "protection_levels", None), "horizontal_m", np.nan))
+                for snap in lag_snaps
+            ],
+            dtype=np.float64,
+        )
     else:
         lag_times = np.empty(0, dtype=np.float64)
         lag_err = np.empty((0, 3), dtype=np.float64)
         lag_hmi = np.empty(0, dtype=bool)
         lag_alert_ok = np.empty(0, dtype=bool)
+        lag_hpl_m = np.empty(0, dtype=np.float64)
 
     seq_times = np.asarray(
         [float(getattr(upd, "time_s")) for upd in result.estimators.sequence_updates],
@@ -781,6 +904,7 @@ def _runtime_hybrid_lag_ins_summary(result: Any) -> dict[str, Any] | None:
     seq_diags = [upd.ambiguity_diagnostics for upd in result.estimators.sequence_updates]
     seq_hmi = np.empty(seq_times.size, dtype=bool)
     seq_alert_ok = np.empty(seq_times.size, dtype=bool)
+    seq_hpl_m = np.empty(seq_times.size, dtype=np.float64)
     for idx, (upd, err) in enumerate(zip(result.estimators.sequence_updates, seq_err)):
         pls = protection_levels_from_covariance_ned(
             upd.estimate.covariance_ned_m2,
@@ -791,6 +915,7 @@ def _runtime_hybrid_lag_ins_summary(result: Any) -> dict[str, Any] | None:
             pls.horizontal_m <= 100.0 and horizontal_err > 100.0
         )
         seq_alert_ok[idx] = bool(pls.horizontal_within_alert_limit)
+        seq_hpl_m[idx] = float(pls.horizontal_m)
 
     return _hybrid_earth_signature_from_runtime_signals(
         ins_times_s=ins_times,
@@ -800,11 +925,15 @@ def _runtime_hybrid_lag_ins_summary(result: Any) -> dict[str, Any] | None:
         lag_error_ned_m=lag_err,
         lag_hmi_horizontal=lag_hmi,
         lag_alert_ok=lag_alert_ok,
+        lag_protection_level_m=lag_hpl_m,
         sequence_times_s=seq_times,
         sequence_error_ned_m=seq_err,
         sequence_hmi_horizontal=seq_hmi,
         sequence_alert_ok=seq_alert_ok,
+        sequence_protection_level_m=seq_hpl_m,
         sequence_diagnostics=seq_diags,
+        horizontal_alert_limit_m=100.0,
+        enter_consecutive_steps=2,
     )
 
 

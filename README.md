@@ -29,7 +29,7 @@ Main validated numbers:
   - horizontal HMI `0.000`
 - current public three-region branch result:
   - Norwegian margin best validated reported output: `219.124 m` vs live INS `241.526 m`
-  - Helgeland and Nordland now have useful raw Earth-signature windows, but reported-output promotion is still blocked by nonzero HMI
+  - Helgeland and Nordland now have useful raw Earth-signature windows, but the latest strict stateful selector falls back to INS there to keep HMI at `0.000`
 
 What has not helped:
 
@@ -114,14 +114,15 @@ All results below are medians across seeds `42/123/777`.
 | Region | Best validated reported output | Live INS RMSE [m] | Reported RMSE [m] | Live INS CEP95 [m] | Reported CEP95 [m] | Horizontal HMI |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Norwegian margin | `photonic_gravity_tide_acoustic_magnetic` sequence | 241.526 | 219.124 | 427.030 | 393.852 | 0.000 |
-| Helgeland offshore | no validated Earth-signature promotion yet | 161.608 | 161.175 | 278.771 | 278.853 | 0.007 |
-| Nordland offshore | no validated Earth-signature promotion yet | 257.644 | 257.552 | 457.781 | 457.781 | 0.010 |
+| Helgeland offshore | strict selector falls back to `live_ins` | 161.608 | 161.608 | 278.771 | 278.771 | 0.000 |
+| Nordland offshore | strict selector falls back to `live_ins` | 257.644 | 257.644 | 457.781 | 457.781 | 0.000 |
 
 What changed after the EMODnet upgrade:
 
 - Norwegian margin stayed usable, but EMODnet did not outperform the earlier regional bathymetry pack there.
 - Helgeland and Nordland stopped being terrain-starved. Raw sequence and lag tracks improved materially in informative windows.
-- The remaining blocker is now publication robustness. The runtime-safe selector only harvests a small fraction of the informative weak-region samples, and the evaluated hybrid output still leaks small horizontal HMI in Helgeland and Nordland.
+- A stricter stateful selector was then tested. It removed the weak-region HMI leak completely, but only by falling all the way back to INS in Helgeland and Nordland.
+- That means publication-policy hardening was necessary, but it is not sufficient to create a promotable weak-region win.
 
 Important negative result:
 
@@ -142,16 +143,18 @@ What the branch now establishes:
 Current practical diagnosis:
 
 - Norwegian margin is still a clean gravity-led win
-- Helgeland and Nordland have useful raw Earth-signature content but are not yet promotable because the evaluated reported output still shows nonzero horizontal HMI
+- Helgeland and Nordland have useful raw Earth-signature content, but the current safe publication policy can only preserve integrity there by reverting to INS
 - current-aware correction is not ready for promotion
+- output-policy hardening alone is now close to exhausted as a source of new gains
 
 ## Recommended Next Work
 
-The next effective step is not another new modality. It is product-output hardening:
+The next effective step is not another new modality and not ML. The next effective step is a stronger delayed-output estimator:
 
-- make the publication layer more locally selective without becoming overconfident
-- use the already integrated ambiguity diagnostics, covariance, and modality-specific information ratios more effectively
-- keep evaluating against zero-HMI acceptance, not just RMSE gains
+- move beyond publication heuristics toward a better delayed-output formulation
+- keep the current gravity-led multi-modal stack fixed
+- improve the delayed-output path itself rather than only changing which existing path gets published
+- likely direction: smoother / factor-graph-style delayed estimation, or another structured delayed estimator that uses the same passive channels but produces a better-calibrated posterior
 
 Only after that is stable should new channels or ML be considered.
 
@@ -211,13 +214,13 @@ PYTHONPATH=src python3 -m pytest \
 
 Latest targeted regression status on this branch:
 
-- `16 passed` for the public-bathymetry and public-multimodal preparation path
+- `17 passed` for the public-bathymetry, multimodal preparation, and stateful selector path
 
 Latest public three-region demo artifacts from this work:
 
-- [/private/tmp/gravnav_priority9_emodnet_nm_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nm_hybrid2/hardware_tied_maritime_demo_report.md)
-- [/private/tmp/gravnav_priority9_emodnet_hel_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_hel_hybrid2/hardware_tied_maritime_demo_report.md)
-- [/private/tmp/gravnav_priority9_emodnet_nord_hybrid2/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nord_hybrid2/hardware_tied_maritime_demo_report.md)
+- [/private/tmp/gravnav_priority9_emodnet_nm_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nm_hybrid3/hardware_tied_maritime_demo_report.md)
+- [/private/tmp/gravnav_priority9_emodnet_hel_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_hel_hybrid3/hardware_tied_maritime_demo_report.md)
+- [/private/tmp/gravnav_priority9_emodnet_nord_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nord_hybrid3/hardware_tied_maritime_demo_report.md)
 
 The tracked roadmap remains:
 

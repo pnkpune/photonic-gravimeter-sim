@@ -455,6 +455,11 @@ def test_run_maritime_demo_hybrid_runtime_selector_uses_sequence_when_lag_unavai
             magnetic_information_ratio=0.0,
             grid_saturated_any=False,
             dominant_failure_mode="informative",
+            edge_mass_fraction=0.02,
+            posterior_candidate_ess_fraction=0.10,
+            support_radius_n_m=10.0,
+            support_radius_e_m=10.0,
+            grid_half_span_m=np.array([100.0, 100.0], dtype=np.float64),
         ),
         SimpleNamespace(
             gravity_information_ratio=0.20,
@@ -462,6 +467,11 @@ def test_run_maritime_demo_hybrid_runtime_selector_uses_sequence_when_lag_unavai
             magnetic_information_ratio=0.0,
             grid_saturated_any=False,
             dominant_failure_mode="informative",
+            edge_mass_fraction=0.03,
+            posterior_candidate_ess_fraction=0.08,
+            support_radius_n_m=12.0,
+            support_radius_e_m=12.0,
+            grid_half_span_m=np.array([100.0, 100.0], dtype=np.float64),
         ),
     ]
     hybrid = module._hybrid_earth_signature_from_runtime_signals(
@@ -475,20 +485,105 @@ def test_run_maritime_demo_hybrid_runtime_selector_uses_sequence_when_lag_unavai
         lag_error_ned_m=np.empty((0, 3), dtype=np.float64),
         lag_hmi_horizontal=np.array([], dtype=bool),
         lag_alert_ok=np.array([], dtype=bool),
+        lag_protection_level_m=np.array([], dtype=np.float64),
         sequence_times_s=np.array([1.0, 2.0], dtype=np.float64),
         sequence_error_ned_m=np.array([[4.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=np.float64),
         sequence_hmi_horizontal=np.array([False, False], dtype=bool),
         sequence_alert_ok=np.array([True, True], dtype=bool),
+        sequence_protection_level_m=np.array([40.0, 42.0], dtype=np.float64),
         sequence_diagnostics=diagnostics,
+        horizontal_alert_limit_m=100.0,
+        enter_consecutive_steps=2,
+    )
+
+    assert hybrid is not None
+    assert hybrid["lag_selected_count"] == 0
+    assert hybrid["sequence_selected_count"] == 1
+    assert hybrid["ins_selected_count"] == 2
+    assert np.isclose(hybrid["sequence_selected_fraction"], 1.0 / 3.0)
+    assert np.isclose(
+        hybrid["position_error"].horizontal_rmse_m,
+        np.sqrt((10.0 ** 2 + 10.0 ** 2 + 5.0 ** 2) / 3.0),
+    )
+    assert hybrid["hmi_horizontal"] == 0.0
+
+
+def test_run_maritime_demo_hybrid_runtime_selector_stays_in_sequence_segment() -> None:
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_maritime_demo.py"
+    spec = importlib.util.spec_from_file_location("run_maritime_demo_test_module_sequence_segment", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    diagnostics = [
+        SimpleNamespace(
+            gravity_information_ratio=0.30,
+            bathymetry_information_ratio=0.40,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+            edge_mass_fraction=0.02,
+            posterior_candidate_ess_fraction=0.10,
+            support_radius_n_m=10.0,
+            support_radius_e_m=10.0,
+            grid_half_span_m=np.array([100.0, 100.0], dtype=np.float64),
+        ),
+        SimpleNamespace(
+            gravity_information_ratio=0.28,
+            bathymetry_information_ratio=0.35,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+            edge_mass_fraction=0.03,
+            posterior_candidate_ess_fraction=0.09,
+            support_radius_n_m=12.0,
+            support_radius_e_m=12.0,
+            grid_half_span_m=np.array([100.0, 100.0], dtype=np.float64),
+        ),
+        SimpleNamespace(
+            gravity_information_ratio=0.18,
+            bathymetry_information_ratio=0.20,
+            magnetic_information_ratio=0.0,
+            grid_saturated_any=False,
+            dominant_failure_mode="informative",
+            edge_mass_fraction=0.05,
+            posterior_candidate_ess_fraction=0.06,
+            support_radius_n_m=16.0,
+            support_radius_e_m=16.0,
+            grid_half_span_m=np.array([100.0, 100.0], dtype=np.float64),
+        ),
+    ]
+    hybrid = module._hybrid_earth_signature_from_runtime_signals(
+        ins_times_s=np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float64),
+        ins_error_ned_m=np.array(
+            [[10.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        ins_hmi_horizontal=np.array([False, False, False, False], dtype=bool),
+        lag_times_s=np.array([], dtype=np.float64),
+        lag_error_ned_m=np.empty((0, 3), dtype=np.float64),
+        lag_hmi_horizontal=np.array([], dtype=bool),
+        lag_alert_ok=np.array([], dtype=bool),
+        lag_protection_level_m=np.array([], dtype=np.float64),
+        sequence_times_s=np.array([1.0, 2.0, 3.0], dtype=np.float64),
+        sequence_error_ned_m=np.array(
+            [[4.0, 0.0, 0.0], [5.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        sequence_hmi_horizontal=np.array([False, False, False], dtype=bool),
+        sequence_alert_ok=np.array([True, True, True], dtype=bool),
+        sequence_protection_level_m=np.array([40.0, 42.0, 55.0], dtype=np.float64),
+        sequence_diagnostics=diagnostics,
+        horizontal_alert_limit_m=100.0,
+        enter_consecutive_steps=2,
     )
 
     assert hybrid is not None
     assert hybrid["lag_selected_count"] == 0
     assert hybrid["sequence_selected_count"] == 2
-    assert hybrid["ins_selected_count"] == 1
-    assert np.isclose(hybrid["sequence_selected_fraction"], 2.0 / 3.0)
+    assert hybrid["ins_selected_count"] == 2
+    assert np.isclose(hybrid["sequence_selected_fraction"], 0.5)
     assert np.isclose(
         hybrid["position_error"].horizontal_rmse_m,
-        np.sqrt((10.0 ** 2 + 4.0 ** 2 + 5.0 ** 2) / 3.0),
+        np.sqrt((10.0 ** 2 + 10.0 ** 2 + 5.0 ** 2 + 6.0 ** 2) / 4.0),
     )
-    assert hybrid["hmi_horizontal"] == 0.0
