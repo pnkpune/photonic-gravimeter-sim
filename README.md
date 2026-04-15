@@ -15,6 +15,36 @@ For the full roadmap and historical planning context, see [data/outputs/reports/
 
 ## Accuracy Summary
 
+Before reading the result tables, the key point is:
+
+- these are **run-level horizontal position-error statistics in meters**
+- they are **not** cumulative drift totals summed over days
+- `RMSE [m]` means root-mean-square horizontal error across all sampled times in a run
+- `CEP95 [m]` means empirical 95th-percentile horizontal error radius across the run
+- `HMI` means the fraction of sampled times where the reported solution was hazardously misleading relative to the horizontal alert limit
+
+Mission context for the headline numbers:
+
+- validated aided baseline:
+  - scenario: `maritime_baseline`
+  - duration: `2040 s` (`34 min`)
+  - purpose: prove the simulator and constrained INS aiding stack are numerically stable before gravity-feedback claims
+- synthetic Norway benchmark:
+  - scenario family: synthetic maritime denied-navigation benchmark
+  - purpose: compare INS, PF, sequence, and lag-smoothed estimators under controlled synthetic gravity distinctiveness
+- Norwegian-margin regional fixture benchmark:
+  - scenario family: maritime regional benchmark on the bundled Norwegian-margin gravity fixture
+  - purpose: test whether the synthetic estimator ranking survives on a real ingest/cache path
+- frozen realistic Norwegian-margin maritime demo:
+  - scenario: `norwegian_margin_maritime`
+  - duration: about `4500 s` (`1.25 h`)
+  - route pattern: `11` straight `300 s` legs plus `10` coordinated `120 s` turns at `4.0 m/s`
+  - purpose: first realistic off-grid maritime/UUV-style passive-navigation demo
+- current three-region public branch result:
+  - regions: Norwegian margin, Helgeland offshore, Nordland offshore
+  - aggregation: medians across seeds `42/123/777`
+  - purpose: test whether the same gravity-led passive stack generalizes across public Norway offshore regions while preserving integrity
+
 What has helped accuracy the most so far, ranked by demonstrated impact:
 
 1. `sequence-based gravity matching`
