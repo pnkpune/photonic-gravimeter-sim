@@ -83,6 +83,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--max-examples-per-region", type=int, default=64)
+    parser.add_argument(
+        "--num-offset-realizations-per-region",
+        type=int,
+        default=4,
+        help=(
+            "How many dead-reckoning drift realizations to generate per tracked region."
+        ),
+    )
     parser.add_argument("--patch-size", type=int, default=9)
     parser.add_argument("--patch-spacing-m", type=float, default=40.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -105,6 +113,9 @@ def main() -> int:
             patch_size=int(args.patch_size),
             patch_spacing_m=float(args.patch_spacing_m),
             max_examples_per_region=int(args.max_examples_per_region),
+            num_offset_realizations_per_region=int(
+                args.num_offset_realizations_per_region
+            ),
             random_seed=int(args.seed),
         ),
     )
@@ -114,6 +125,7 @@ def main() -> int:
         "num_examples": int(corpus.query_windows.shape[0]),
         "num_regions": int(len(corpus.region_names)),
         "region_names": list(corpus.region_names),
+        "region_example_counts": corpus.region_example_counts(),
         "query_window_shape": list(corpus.query_windows.shape),
         "candidate_shape": list(corpus.candidate_features.shape),
         "patch_tensor_shape": list(corpus.patch_tensors.shape),

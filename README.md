@@ -684,6 +684,7 @@ Build and train the experimental learned delayed localizer on a tracked real-dat
 ```bash
 python3 scripts/build_real_ocean_corpus.py \
   --demo-pack-manifests data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json \
+  --num-offset-realizations-per-region 4 \
   --output-dir /tmp/gravnav_ml_demo/corpus
 ```
 
@@ -705,6 +706,24 @@ python3 scripts/train_delayed_localizer.py \
   --corpus /tmp/gravnav_ml_demo/corpus/real_ocean_corpus.npz \
   --student-init /tmp/gravnav_ml_demo/student_init.npz \
   --output /tmp/gravnav_ml_demo/runtime_bundle.npz
+```
+
+Run leave-one-region-out validation across the three tracked Norway public packs:
+
+```bash
+python3 scripts/build_real_ocean_corpus.py \
+  --demo-pack-manifests \
+    data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json \
+    data/bathymetry/processed/helgeland_offshore_priority9_emodnet_demo_pack.json \
+    data/bathymetry/processed/nordland_offshore_priority9_emodnet_demo_pack.json \
+  --num-offset-realizations-per-region 4 \
+  --output-dir /tmp/gravnav_ml_cv/corpus
+```
+
+```bash
+python3 scripts/cross_validate_learned_localizer.py \
+  --corpus /tmp/gravnav_ml_cv/corpus/real_ocean_corpus.npz \
+  --output /tmp/gravnav_ml_cv/held_out_summary.json
 ```
 
 Run the learned delayed localizer through the existing maritime demo path:

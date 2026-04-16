@@ -329,6 +329,7 @@ class RealOceanCorpusSpec:
     patch_size: int = 9
     patch_spacing_m: float = 40.0
     max_examples_per_region: int = 96
+    num_offset_realizations_per_region: int = 1
     initial_offset_std_m: float = 90.0
     offset_random_walk_std_m: float = 6.0
     random_seed: int = 42
@@ -352,6 +353,10 @@ class RealOceanCorpus:
     region_names: tuple[str, ...]
     region_index: NDArray[np.int64]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def num_examples(self) -> int:
+        return int(self.query_windows.shape[0])
 
     def save_npz(self, path: str | Path) -> Path:
         p = Path(path).expanduser().resolve()
@@ -426,6 +431,86 @@ class RealOceanCorpus:
                 metadata=json.loads(str(data["metadata_json"].item())),
             )
 
+    def region_example_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for idx, name in enumerate(self.region_names):
+            counts[str(name)] = int(np.sum(self.region_index == idx))
+        return counts
+
+    def subset(
+        self,
+        mask: ArrayLike,
+        *,
+        name: str | None = None,
+    ) -> "RealOceanCorpus":
+        keep = np.asarray(mask, dtype=bool).reshape(-1)
+        if keep.shape[0] != self.num_examples:
+            raise ValueError(
+                f"subset mask length {keep.shape[0]} does not match corpus size {self.num_examples}."
+            )
+        if not np.any(keep):
+            raise ValueError("subset mask selects no examples.")
+
+        selected_region_names = [self.region_names[int(i)] for i in self.region_index[keep]]
+        unique_regions = tuple(dict.fromkeys(selected_region_names).keys())
+        region_name_to_idx = {region: idx for idx, region in enumerate(unique_regions)}
+        normalized_region_index = np.asarray(
+            [region_name_to_idx[name] for name in selected_region_names],
+            dtype=np.int64,
+        )
+        metadata = dict(self.metadata)
+        metadata["subset_name"] = str(name) if name is not None else "subset"
+        metadata["subset_region_example_counts"] = {
+            region: int(sum(1 for x in selected_region_names if x == region))
+            for region in unique_regions
+        }
+        return RealOceanCorpus(
+            spec=self.spec,
+            patch_tensors=self.patch_tensors[keep],
+            patch_summary_features=self.patch_summary_features[keep],
+            query_windows=self.query_windows[keep],
+            candidate_features=self.candidate_features[keep],
+            candidate_offsets_ned_m=self.candidate_offsets_ned_m[keep],
+            analytic_log_emission=self.analytic_log_emission[keep],
+            labels=self.labels[keep],
+            truth_offsets_ned_m=self.truth_offsets_ned_m[keep],
+            publishability_labels=self.publishability_labels[keep],
+            covariance_targets=self.covariance_targets[keep],
+            region_names=unique_regions,
+            region_index=normalized_region_index,
+            metadata=metadata,
+        )
+
+    def select_regions(
+        self,
+        *,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        name: str | None = None,
+    ) -> "RealOceanCorpus":
+        if include is not None and exclude is not None:
+            raise ValueError("select_regions accepts include or exclude, not both.")
+
+        if include is not None:
+            wanted = {str(x) for x in include}
+            mask = np.asarray(
+                [self.region_names[int(idx)] in wanted for idx in self.region_index],
+                dtype=bool,
+            )
+            subset_name = name or f"include:{','.join(sorted(wanted))}"
+            return self.subset(mask, name=subset_name)
+
+        if exclude is not None:
+            blocked = {str(x) for x in exclude}
+            mask = np.asarray(
+                [self.region_names[int(idx)] not in blocked for idx in self.region_index],
+                dtype=bool,
+            )
+            subset_name = name or f"exclude:{','.join(sorted(blocked))}"
+            return self.subset(mask, name=subset_name)
+
+        return self
+
 
 def load_real_ocean_corpus(path: str | Path) -> RealOceanCorpus:
     return RealOceanCorpus.from_npz(path)
@@ -467,9 +552,11 @@ def build_real_ocean_corpus(
     covariance_targets: list[float] = []
     region_names: list[str] = []
     region_index: list[int] = []
+    manifest_paths_resolved: list[str] = []
 
     for region_id, manifest_path in enumerate(demo_pack_manifests):
         pack = resolve_regional_demo_pack(manifest_path)
+        manifest_paths_resolved.append(str(Path(manifest_path).expanduser().resolve()))
         tide_corrector = _tide_corrector_from_demo_pack(pack)
         scenario = ScenarioSpec.from_mapping(load_config_mapping(pack.scenario_path))
         truth = build_truth_trajectory_from_scenario(scenario)
@@ -479,165 +566,165 @@ def build_real_ocean_corpus(
             bathymetry_map=pack.bathymetry_grid,
             magnetic_map=pack.magnetic_grid,
         )
-
-        query_history: list[FloatArray] = []
-        offset_ned = rng.normal(
-            0.0,
-            float(spec.initial_offset_std_m),
-            size=2,
-        ).astype(np.float64)
         sample_indices = _sample_indices(
             len(truth.time_s),
             spec.max_examples_per_region,
             window_size=int(spec.window_size),
         )
-
-        for k in range(len(truth.time_s)):
-            lat_true = float(truth.lat_rad[k])
-            lon_true = float(truth.lon_rad[k])
-            height_true = float(truth.height_m[k])
-            t_now = float(truth.time_s[k])
-            v_now = np.asarray(truth.v_ned_mps[k], dtype=np.float64)
-            offset_ned += rng.normal(
+        for realization_idx in range(int(spec.num_offset_realizations_per_region)):
+            query_history = []
+            offset_ned = rng.normal(
                 0.0,
-                float(spec.offset_random_walk_std_m),
+                float(spec.initial_offset_std_m),
                 size=2,
-            )
-            prior_lat, prior_lon, prior_h = apply_ned_offsets_to_geodetic(
-                np.array([lat_true], dtype=np.float64),
-                np.array([lon_true], dtype=np.float64),
-                np.array([height_true], dtype=np.float64),
-                np.array([[offset_ned[0], offset_ned[1], 0.0]], dtype=np.float64),
-            )
-            track_unit = _horizontal_track_unit_ned(v_now)
-            reference_surface_height_m = float(spec.reference_surface_height_m)
-            if tide_corrector is not None:
-                tide_sample = tide_corrector.evaluate(
-                    lat_deg=np.rad2deg(lat_true),
-                    lon_deg=np.rad2deg(lon_true),
-                    time_s=t_now,
+            ).astype(np.float64)
+
+            for k in range(len(truth.time_s)):
+                lat_true = float(truth.lat_rad[k])
+                lon_true = float(truth.lon_rad[k])
+                height_true = float(truth.height_m[k])
+                t_now = float(truth.time_s[k])
+                v_now = np.asarray(truth.v_ned_mps[k], dtype=np.float64)
+                offset_ned += rng.normal(
+                    0.0,
+                    float(spec.offset_random_walk_std_m),
+                    size=2,
                 )
-                reference_surface_height_m += float(tide_sample.sea_surface_height_m)
+                prior_lat, prior_lon, prior_h = apply_ned_offsets_to_geodetic(
+                    np.array([lat_true], dtype=np.float64),
+                    np.array([lon_true], dtype=np.float64),
+                    np.array([height_true], dtype=np.float64),
+                    np.array([[offset_ned[0], offset_ned[1], 0.0]], dtype=np.float64),
+                )
+                track_unit = _horizontal_track_unit_ned(v_now)
+                reference_surface_height_m = float(spec.reference_surface_height_m)
+                if tide_corrector is not None:
+                    tide_sample = tide_corrector.evaluate(
+                        lat_deg=np.rad2deg(lat_true),
+                        lon_deg=np.rad2deg(lon_true),
+                        time_s=t_now,
+                    )
+                    reference_surface_height_m += float(tide_sample.sea_surface_height_m)
 
-            query_feature = _measurement_feature_vector(
-                pack,
-                lat_rad=lat_true,
-                lon_rad=lon_true,
-                height_m=height_true,
-                reference_surface_height_m=reference_surface_height_m,
-                time_s=t_now,
-                tide_corrector=tide_corrector,
-            )
-            query_history.append(query_feature)
-            if len(query_history) < spec.window_size or k not in sample_indices:
-                continue
-
-            state = _make_state(
-                time_s=t_now,
-                lat_rad=float(prior_lat[0]),
-                lon_rad=float(prior_lon[0]),
-                height_m=float(prior_h[0]),
-                v_ned_mps=v_now,
-            )
-
-            matcher._active_grid_mode = "nominal"
-            obs = matcher._build_observation(
-                measured_disturbance_mps2=float(query_feature[0]),
-                gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
-                ins_or_state=state,
-                search_center_offset_ned_m=np.zeros(3, dtype=np.float64),
-                current_track_unit_ned=track_unit,
-                measured_gradient_per_s2=query_feature[1:3],
-                gradient_meas_std_per_s2=sequence_spec.gradient_meas_std_per_s2,
-                measured_bathymetry_m=(
-                    None if not np.isfinite(query_feature[3]) else float(query_feature[3])
-                ),
-                bathymetry_meas_std_m=sequence_spec.bathymetry_meas_std_m,
-                measured_bathymetry_gradient_m_per_m=(
-                    None
-                    if not np.isfinite(query_feature[4])
-                    else float(np.dot(track_unit[:2], query_feature[4:6]))
-                ),
-                bathymetry_gradient_meas_std_m_per_m=(
-                    sequence_spec.bathymetry_gradient_meas_std_m_per_m
-                ),
-                measured_bathymetry_rugosity_m=(
-                    None if not np.isfinite(query_feature[6]) else float(query_feature[6])
-                ),
-                bathymetry_rugosity_meas_std_m=(
-                    sequence_spec.bathymetry_rugosity_meas_std_m
-                ),
-                measured_magnetic_total_nt=(
-                    None if not np.isfinite(query_feature[7]) else float(query_feature[7])
-                ),
-                magnetic_meas_std_nt=sequence_spec.magnetic_meas_std_nt,
-                measured_magnetic_gradient_nt_per_m=(
-                    None
-                    if not np.isfinite(query_feature[8])
-                    else float(np.dot(track_unit[:2], query_feature[8:10]))
-                ),
-                magnetic_gradient_meas_std_nt_per_m=(
-                    sequence_spec.magnetic_gradient_meas_std_nt_per_m
-                ),
-                depth_measurement=None,
-                reference_surface_height_m=reference_surface_height_m,
-                time_s=t_now,
-            )
-
-            truth_offset = geodetic_offsets_to_local_ned(
-                np.array([lat_true], dtype=np.float64),
-                np.array([lon_true], dtype=np.float64),
-                np.array([height_true], dtype=np.float64),
-                lat_ref_rad=float(prior_lat[0]),
-                lon_ref_rad=float(prior_lon[0]),
-                height_ref_m=float(prior_h[0]),
-            )[0]
-            deltas = obs.candidate_offsets_ned_m[:, :2] - truth_offset[None, :2]
-            label = int(np.argmin(np.sum(deltas**2, axis=1)))
-            horizontal_error = float(np.linalg.norm(deltas[label]))
-            nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
-
-            patch = _patch_tensor(
-                pack,
-                lat_rad=lat_true,
-                lon_rad=lon_true,
-                height_m=height_true,
-                reference_surface_height_m=reference_surface_height_m,
-                time_s=t_now,
-                patch_offsets_ned_m=patch_offsets,
-                tide_corrector=tide_corrector,
-            )
-            patch_tensors.append(patch)
-            patch_summary_features.append(summarize_patch_tensor(patch))
-            query_windows.append(
-                np.stack(query_history[-spec.window_size :], axis=0).astype(np.float64)
-            )
-            candidate_features.append(
-                _candidate_feature_matrix(
+                query_feature = _measurement_feature_vector(
                     pack,
-                    candidate_lat_rad=obs.candidate_lat_rad,
-                    candidate_lon_rad=obs.candidate_lon_rad,
-                    candidate_height_m=obs.candidate_height_m,
+                    lat_rad=lat_true,
+                    lon_rad=lon_true,
+                    height_m=height_true,
                     reference_surface_height_m=reference_surface_height_m,
-                    current_track_unit_ned=track_unit,
                     time_s=t_now,
                     tide_corrector=tide_corrector,
                 )
-            )
-            candidate_offsets.append(
-                np.asarray(obs.candidate_offsets_ned_m, dtype=np.float64)
-            )
-            analytic_log_emission.append(np.asarray(obs.log_emission, dtype=np.float64))
-            labels.append(label)
-            truth_offsets.append(np.asarray(truth_offset, dtype=np.float64))
-            publishability_labels.append(
-                bool(horizontal_error <= max(0.5 * np.mean(sequence_spec.grid_spacing_m), 20.0))
-            )
-            covariance_targets.append(
-                float(max(horizontal_error**2 / max(nominal_cov, 1.0e-9), 0.25))
-            )
-            region_names.append(pack.manifest.region_name)
-            region_index.append(int(region_id))
+                query_history.append(query_feature)
+                if len(query_history) < spec.window_size or k not in sample_indices:
+                    continue
+
+                state = _make_state(
+                    time_s=t_now,
+                    lat_rad=float(prior_lat[0]),
+                    lon_rad=float(prior_lon[0]),
+                    height_m=float(prior_h[0]),
+                    v_ned_mps=v_now,
+                )
+
+                matcher._active_grid_mode = "nominal"
+                obs = matcher._build_observation(
+                    measured_disturbance_mps2=float(query_feature[0]),
+                    gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
+                    ins_or_state=state,
+                    search_center_offset_ned_m=np.zeros(3, dtype=np.float64),
+                    current_track_unit_ned=track_unit,
+                    measured_gradient_per_s2=query_feature[1:3],
+                    gradient_meas_std_per_s2=sequence_spec.gradient_meas_std_per_s2,
+                    measured_bathymetry_m=(
+                        None if not np.isfinite(query_feature[3]) else float(query_feature[3])
+                    ),
+                    bathymetry_meas_std_m=sequence_spec.bathymetry_meas_std_m,
+                    measured_bathymetry_gradient_m_per_m=(
+                        None
+                        if not np.isfinite(query_feature[4])
+                        else float(np.dot(track_unit[:2], query_feature[4:6]))
+                    ),
+                    bathymetry_gradient_meas_std_m_per_m=(
+                        sequence_spec.bathymetry_gradient_meas_std_m_per_m
+                    ),
+                    measured_bathymetry_rugosity_m=(
+                        None if not np.isfinite(query_feature[6]) else float(query_feature[6])
+                    ),
+                    bathymetry_rugosity_meas_std_m=(
+                        sequence_spec.bathymetry_rugosity_meas_std_m
+                    ),
+                    measured_magnetic_total_nt=(
+                        None if not np.isfinite(query_feature[7]) else float(query_feature[7])
+                    ),
+                    magnetic_meas_std_nt=sequence_spec.magnetic_meas_std_nt,
+                    measured_magnetic_gradient_nt_per_m=(
+                        None
+                        if not np.isfinite(query_feature[8])
+                        else float(np.dot(track_unit[:2], query_feature[8:10]))
+                    ),
+                    magnetic_gradient_meas_std_nt_per_m=(
+                        sequence_spec.magnetic_gradient_meas_std_nt_per_m
+                    ),
+                    depth_measurement=None,
+                    reference_surface_height_m=reference_surface_height_m,
+                    time_s=t_now,
+                )
+
+                truth_offset = geodetic_offsets_to_local_ned(
+                    np.array([lat_true], dtype=np.float64),
+                    np.array([lon_true], dtype=np.float64),
+                    np.array([height_true], dtype=np.float64),
+                    lat_ref_rad=float(prior_lat[0]),
+                    lon_ref_rad=float(prior_lon[0]),
+                    height_ref_m=float(prior_h[0]),
+                )[0]
+                deltas = obs.candidate_offsets_ned_m[:, :2] - truth_offset[None, :2]
+                label = int(np.argmin(np.sum(deltas**2, axis=1)))
+                horizontal_error = float(np.linalg.norm(deltas[label]))
+                nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
+
+                patch = _patch_tensor(
+                    pack,
+                    lat_rad=lat_true,
+                    lon_rad=lon_true,
+                    height_m=height_true,
+                    reference_surface_height_m=reference_surface_height_m,
+                    time_s=t_now,
+                    patch_offsets_ned_m=patch_offsets,
+                    tide_corrector=tide_corrector,
+                )
+                patch_tensors.append(patch)
+                patch_summary_features.append(summarize_patch_tensor(patch))
+                query_windows.append(
+                    np.stack(query_history[-spec.window_size :], axis=0).astype(np.float64)
+                )
+                candidate_features.append(
+                    _candidate_feature_matrix(
+                        pack,
+                        candidate_lat_rad=obs.candidate_lat_rad,
+                        candidate_lon_rad=obs.candidate_lon_rad,
+                        candidate_height_m=obs.candidate_height_m,
+                        reference_surface_height_m=reference_surface_height_m,
+                        current_track_unit_ned=track_unit,
+                        time_s=t_now,
+                        tide_corrector=tide_corrector,
+                    )
+                )
+                candidate_offsets.append(
+                    np.asarray(obs.candidate_offsets_ned_m, dtype=np.float64)
+                )
+                analytic_log_emission.append(np.asarray(obs.log_emission, dtype=np.float64))
+                labels.append(label)
+                truth_offsets.append(np.asarray(truth_offset, dtype=np.float64))
+                publishability_labels.append(
+                    bool(horizontal_error <= max(0.5 * np.mean(sequence_spec.grid_spacing_m), 20.0))
+                )
+                covariance_targets.append(
+                    float(max(horizontal_error**2 / max(nominal_cov, 1.0e-9), 0.25))
+                )
+                region_names.append(pack.manifest.region_name)
+                region_index.append(int(region_id))
 
     if len(query_windows) == 0:
         raise ValueError("No corpus examples were produced.")
@@ -671,5 +758,13 @@ def build_real_ocean_corpus(
             "candidate_feature_names": list(CANDIDATE_FEATURE_NAMES),
             "patch_channel_names": list(PATCH_CHANNEL_NAMES),
             "num_regions": len(unique_regions),
+            "manifest_paths": manifest_paths_resolved,
+            "region_example_counts": {
+                region: int(sum(1 for x in region_names if x == region))
+                for region in unique_regions
+            },
+            "num_offset_realizations_per_region": int(
+                spec.num_offset_realizations_per_region
+            ),
         },
     )

@@ -19,8 +19,10 @@ from .runtime import (
     NeuralEarthSignatureLocalizer,
 )
 from .training import (
+    cross_validate_delayed_localizer,
     DelayedLocalizerTrainingSpec,
     TeacherTrainingSpec,
+    fit_delayed_localizer,
     distill_runtime_student,
     evaluate_runtime_student,
     train_delayed_localizer,
@@ -39,8 +41,10 @@ __all__ = [
     "RuntimeStudentModelSpec",
     "TeacherTrainingSpec",
     "build_real_ocean_corpus",
+    "cross_validate_delayed_localizer",
     "distill_runtime_student",
     "evaluate_runtime_student",
+    "fit_delayed_localizer",
     "load_real_ocean_corpus",
     "train_delayed_localizer",
     "train_ocean_teacher",

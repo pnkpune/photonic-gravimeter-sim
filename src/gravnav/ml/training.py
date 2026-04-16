@@ -4,7 +4,7 @@ Training and evaluation helpers for the learned Earth-signature localizer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -54,6 +54,29 @@ def train_ocean_teacher(
     return fit_teacher_from_patches(
         corpus.patch_tensors,
         spec=model_spec,
+    )
+
+
+def fit_delayed_localizer(
+    corpus: RealOceanCorpus,
+    *,
+    teacher_spec: TeacherTrainingSpec | None = None,
+    train_spec: DelayedLocalizerTrainingSpec | None = None,
+) -> RuntimeStudentModel:
+    teacher = train_ocean_teacher(corpus, spec=teacher_spec)
+    student = distill_runtime_student(
+        corpus,
+        teacher,
+        analytic_log_emission_gain=(
+            DelayedLocalizerTrainingSpec().analytic_log_emission_gain
+            if train_spec is None
+            else float(train_spec.analytic_log_emission_gain)
+        ),
+    )
+    return train_delayed_localizer(
+        corpus,
+        student,
+        spec=train_spec,
     )
 
 
@@ -303,8 +326,83 @@ def evaluate_runtime_student(
         "top1_accuracy": top1,
         "median_horizontal_error_m": float(np.median(horizontal_error)),
         "p90_horizontal_error_m": float(np.quantile(horizontal_error, 0.90)),
+        "mean_horizontal_error_m": float(np.mean(horizontal_error)),
         "mean_publishability_probability": float(np.mean(publish_prob)),
         "publishability_positive_fraction": float(
             np.mean(publish_prob >= student.reliability_threshold)
+        ),
+    }
+
+
+def cross_validate_delayed_localizer(
+    corpus: RealOceanCorpus,
+    *,
+    held_out_regions: tuple[str, ...] | None = None,
+    teacher_spec: TeacherTrainingSpec | None = None,
+    train_spec: DelayedLocalizerTrainingSpec | None = None,
+) -> dict[str, Any]:
+    fold_regions = corpus.region_names if held_out_regions is None else tuple(
+        str(region) for region in held_out_regions
+    )
+    unknown = [region for region in fold_regions if region not in corpus.region_names]
+    if len(unknown) > 0:
+        raise ValueError(f"Unknown held-out regions: {unknown}.")
+    if len(fold_regions) == 0:
+        raise ValueError("At least one held-out region is required.")
+
+    folds: list[dict[str, Any]] = []
+    for held_out_region in fold_regions:
+        train_corpus = corpus.select_regions(
+            exclude=(held_out_region,),
+            name=f"train_excluding_{held_out_region}",
+        )
+        eval_corpus = corpus.select_regions(
+            include=(held_out_region,),
+            name=f"held_out_{held_out_region}",
+        )
+        model = fit_delayed_localizer(
+            train_corpus,
+            teacher_spec=teacher_spec,
+            train_spec=train_spec,
+        )
+        metrics = evaluate_runtime_student(eval_corpus, model)
+        folds.append(
+            {
+                "held_out_region": held_out_region,
+                "train_examples": int(train_corpus.num_examples),
+                "eval_examples": int(eval_corpus.num_examples),
+                "train_region_example_counts": train_corpus.region_example_counts(),
+                "eval_region_example_counts": eval_corpus.region_example_counts(),
+                "reference_parameter_count": int(model.reference_parameter_count),
+                **metrics,
+            }
+        )
+
+    medians = {
+        "median_top1_accuracy": float(
+            np.median([float(fold["top1_accuracy"]) for fold in folds])
+        ),
+        "median_horizontal_error_m": float(
+            np.median([float(fold["median_horizontal_error_m"]) for fold in folds])
+        ),
+        "median_p90_horizontal_error_m": float(
+            np.median([float(fold["p90_horizontal_error_m"]) for fold in folds])
+        ),
+        "median_mean_publishability_probability": float(
+            np.median([float(fold["mean_publishability_probability"]) for fold in folds])
+        ),
+        "median_publishability_positive_fraction": float(
+            np.median(
+                [float(fold["publishability_positive_fraction"]) for fold in folds]
+            )
+        ),
+    }
+    return {
+        "num_folds": int(len(folds)),
+        "folds": folds,
+        "aggregate": medians,
+        "teacher_spec": asdict(TeacherTrainingSpec() if teacher_spec is None else teacher_spec),
+        "train_spec": asdict(
+            DelayedLocalizerTrainingSpec() if train_spec is None else train_spec
         ),
     }

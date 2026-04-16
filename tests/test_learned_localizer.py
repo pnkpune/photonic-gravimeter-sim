@@ -12,6 +12,7 @@ from gravnav.ml import (
     LearnedLocalizerSpec,
     NeuralEarthSignatureLocalizer,
     RealOceanCorpusSpec,
+    cross_validate_delayed_localizer,
     distill_runtime_student,
     evaluate_runtime_student,
     train_delayed_localizer,
@@ -25,6 +26,9 @@ from gravnav.utils.config import load_config_mapping
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PACK = (
     ROOT / "data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json"
+)
+SECOND_PACK = (
+    ROOT / "data/bathymetry/processed/helgeland_offshore_priority9_emodnet_demo_pack.json"
 )
 
 
@@ -184,3 +188,44 @@ def test_learned_localizer_emits_runtime_updates(tmp_path: Path) -> None:
     assert updates[-1].publishability_probability is not None
     assert updates[-1].learned_covariance_scale is not None
     assert updates[-1].localizer_name == "learned_sequence_localizer"
+
+
+def test_real_ocean_corpus_region_subset_and_cross_validation() -> None:
+    sequence_spec = _small_sequence_spec()
+    corpus = build_real_ocean_corpus(
+        [DEFAULT_PACK, SECOND_PACK],
+        sequence_spec=sequence_spec,
+        corpus_spec=RealOceanCorpusSpec(
+            window_size=5,
+            patch_size=5,
+            patch_spacing_m=60.0,
+            max_examples_per_region=3,
+            num_offset_realizations_per_region=1,
+            random_seed=13,
+        ),
+    )
+
+    norwegian_only = corpus.select_regions(
+        include=("norwegian_margin_maritime_demo",),
+        name="norwegian_only",
+    )
+    assert norwegian_only.num_examples > 0
+    assert norwegian_only.region_names == ("norwegian_margin_maritime_demo",)
+
+    cv = cross_validate_delayed_localizer(
+        corpus,
+        teacher_spec=None,
+        train_spec=DelayedLocalizerTrainingSpec(
+            epochs=5,
+            learning_rate=0.05,
+            l2=1.0e-4,
+        ),
+    )
+    assert cv["num_folds"] == 2
+    assert len(cv["folds"]) == 2
+    held_out = {fold["held_out_region"] for fold in cv["folds"]}
+    assert held_out == {
+        "norwegian_margin_maritime_demo",
+        "helgeland_offshore",
+    }
+    assert cv["aggregate"]["median_horizontal_error_m"] >= 0.0
