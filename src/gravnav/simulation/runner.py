@@ -106,6 +106,7 @@ from ..estimators.map_match_pf import (
     geodetic_covariance_from_ned_covariance,
     geodetic_offsets_to_local_ned,
 )
+from ..ml.runtime import LearnedLocalizerSpec, NeuralEarthSignatureLocalizer
 from ..physics.earth import meridian_radius, prime_vertical_radius
 from ..physics.gravity_map import GravityGridMap
 from ..physics.tides import TideCorrector, TideCorrectionSample, TideCorrectionSpec
@@ -663,7 +664,7 @@ class MapMatchFeedbackConfig:
     ----------
     enabled : bool, default=True
         Enable the PF map-matching layer.
-    matcher : {"pf", "sequence"}, default="pf"
+    matcher : {"pf", "sequence", "learned_sequence"}, default="pf"
         Which map-matching algorithm to run.
     schedule : PeriodicUpdateSchedule
         Triggering policy for map-matching gravity updates.
@@ -734,6 +735,7 @@ class MapMatchFeedbackConfig:
     sequence_spec: GravitySequenceMatcherSpec = field(
         default_factory=GravitySequenceMatcherSpec
     )
+    learned_localizer_spec: Optional[LearnedLocalizerSpec] = None
     gravity_meas_std_mps2: Optional[float] = None
     use_depth_measurement: bool = True
     use_last_depth_measurement: bool = True
@@ -774,8 +776,10 @@ class MapMatchFeedbackConfig:
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
         self.matcher = str(self.matcher).strip().lower()
-        if self.matcher not in {"pf", "sequence"}:
-            raise ValueError("matcher must be 'pf' or 'sequence'.")
+        if self.matcher not in {"pf", "sequence", "learned_sequence"}:
+            raise ValueError(
+                "matcher must be 'pf', 'sequence', or 'learned_sequence'."
+            )
         if self.gravity_meas_std_mps2 is not None:
             self.gravity_meas_std_mps2 = _positive_scalar(
                 self.gravity_meas_std_mps2,
@@ -879,6 +883,10 @@ class MapMatchFeedbackConfig:
         if self.matcher != "sequence" and self.use_sequence_feedback:
             raise ValueError(
                 "use_sequence_feedback is only supported with matcher='sequence'."
+            )
+        if self.matcher == "learned_sequence" and self.learned_localizer_spec is None:
+            raise ValueError(
+                "learned_localizer_spec is required with matcher='learned_sequence'."
             )
 
 
@@ -1600,7 +1608,7 @@ class ScenarioSimulationRunner:
         ins = self._build_initial_ins(truth, imu_sensor)
 
         pf: Optional[GravityMapParticleFilter] = None
-        sequence_matcher: Optional[GravitySequenceMatcher] = None
+        sequence_matcher: Optional[Any] = None
         sequence_feedback_ctrl: Optional[SequenceFeedbackController] = None
         sequence_lag_smoother_ctrl: Optional[SequenceLagSmootherController] = None
         directional_feedback_ctrl: Optional[DirectionalFeedbackController] = None
@@ -1635,7 +1643,7 @@ class ScenarioSimulationRunner:
                         min_rank_for_feedback=cfg.observability.min_rank_for_feedback,
                         min_gradient_norm=cfg.observability.min_gradient_norm,
                     )
-            else:
+            elif cfg.map_match.matcher == "sequence":
                 sequence_matcher = GravitySequenceMatcher(
                     cfg.map_match.sequence_spec,
                     resolved_map,
@@ -1650,6 +1658,22 @@ class ScenarioSimulationRunner:
                     sequence_feedback_ctrl = SequenceFeedbackController(
                         cfg.map_match.sequence_feedback_spec,
                     )
+                if cfg.map_match.use_sequence_lag_smoother:
+                    cfg.map_match.sequence_lag_smoother_spec.enabled = True
+                    sequence_lag_smoother_ctrl = SequenceLagSmootherController(
+                        cfg.map_match.sequence_lag_smoother_spec,
+                    )
+            else:
+                sequence_matcher = NeuralEarthSignatureLocalizer(
+                    cfg.map_match.learned_localizer_spec,
+                    resolved_map,
+                    bathymetry_map=(
+                        bathymetry_map if cfg.map_match.use_bathymetry else None
+                    ),
+                    magnetic_map=(
+                        magnetic_map if cfg.map_match.use_magnetics else None
+                    ),
+                )
                 if cfg.map_match.use_sequence_lag_smoother:
                     cfg.map_match.sequence_lag_smoother_spec.enabled = True
                     sequence_lag_smoother_ctrl = SequenceLagSmootherController(
@@ -3104,6 +3128,7 @@ __all__ = [
     "CurrentProfileSensorSpec",
     "GravityGradiometerSpec",
     "GravitySequenceMatcherSpec",
+    "LearnedLocalizerSpec",
     "MagnetometerSensorSpec",
     "PhotonicGravimeterSpec",
     "TideCorrectionSpec",

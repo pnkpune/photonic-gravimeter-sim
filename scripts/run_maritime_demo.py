@@ -58,6 +58,7 @@ from gravnav.simulation.metrics import (
     scenario_metrics_from_result,
 )
 from gravnav.estimators.integrity import protection_levels_from_covariance_ned
+from gravnav.ml.runtime import LearnedLocalizerSpec
 from gravnav.simulation.results import SimulationMetadata
 from gravnav.simulation.runner import (
     DepthFusionConfig,
@@ -130,6 +131,8 @@ def _load_demo_pack_assets(path: Path) -> ResolvedRegionalDemoPack:
 def _build_runner_config(
     profile: dict[str, Any],
     *,
+    matcher: str,
+    learned_localizer_model_path: Path | None,
     use_bathymetry: bool,
     use_acoustic_terrain: bool,
     use_magnetics: bool,
@@ -139,7 +142,7 @@ def _build_runner_config(
 ) -> SimulationRunnerConfig:
     map_match = MapMatchFeedbackConfig(
         enabled=True,
-        matcher="sequence",
+        matcher=str(matcher),
         schedule=PeriodicUpdateSchedule(
             every_steps=int(profile.get("map_match_every_steps", 2))
         ),
@@ -240,6 +243,69 @@ def _build_runner_config(
                 profile.get("ambiguity_min_magnetic_information_ratio", 0.50)
             ),
         ),
+        learned_localizer_spec=(
+            None
+            if learned_localizer_model_path is None
+            else LearnedLocalizerSpec(
+                model_export_path=str(learned_localizer_model_path),
+                sequence_spec=GravitySequenceMatcherSpec(
+                    window_size=int(profile["window_size"]),
+                    grid_half_span_m=tuple(profile["grid_half_span_m"]),
+                    grid_spacing_m=tuple(profile["grid_spacing_m"]),
+                    transition_std_m=tuple(profile["transition_std_m"]),
+                    center_prior_std_m=tuple(profile["center_prior_std_m"]),
+                    gravity_meas_std_mps2=float(profile["gravity_meas_std_mps2"]),
+                    gradient_meas_std_per_s2=float(profile["gradient_meas_std_per_s2"]),
+                    bathymetry_meas_std_m=(
+                        None if not use_bathymetry else float(profile["bathymetry_meas_std_m"])
+                    ),
+                    bathymetry_weight=(
+                        1.0 if not use_bathymetry else float(profile.get("bathymetry_weight", 1.0))
+                    ),
+                    bathymetry_gradient_meas_std_m_per_m=(
+                        None
+                        if not (use_bathymetry and use_acoustic_terrain)
+                        else float(profile.get("bathymetry_gradient_meas_std_m_per_m", 0.01))
+                    ),
+                    bathymetry_gradient_weight=(
+                        1.0
+                        if not (use_bathymetry and use_acoustic_terrain)
+                        else float(profile.get("bathymetry_gradient_weight", 1.0))
+                    ),
+                    bathymetry_rugosity_meas_std_m=(
+                        None
+                        if not (use_bathymetry and use_acoustic_terrain)
+                        else float(profile.get("bathymetry_rugosity_meas_std_m", 2.0))
+                    ),
+                    bathymetry_rugosity_weight=(
+                        1.0
+                        if not (use_bathymetry and use_acoustic_terrain)
+                        else float(profile.get("bathymetry_rugosity_weight", 1.0))
+                    ),
+                    magnetic_meas_std_nt=(
+                        None if not use_magnetics else float(profile.get("magnetic_meas_std_nt", 8.0))
+                    ),
+                    magnetic_weight=(
+                        1.0 if not use_magnetics else float(profile.get("magnetic_weight", 1.0))
+                    ),
+                    magnetic_gradient_meas_std_nt_per_m=(
+                        None
+                        if not use_magnetics
+                        else float(profile.get("magnetic_gradient_meas_std_nt_per_m", 0.02))
+                    ),
+                    magnetic_gradient_weight=(
+                        1.0
+                        if not use_magnetics
+                        else float(profile.get("magnetic_gradient_weight", 0.75))
+                    ),
+                    height_std_m=float(profile.get("height_std_m", 2.0)),
+                    adaptive_grid_enabled=bool(profile.get("adaptive_grid_enabled", True)),
+                    expanded_grid_half_span_m=profile.get("expanded_grid_half_span_m", None),
+                    expanded_grid_spacing_m=profile.get("expanded_grid_spacing_m", None),
+                ),
+                reliability_threshold=float(profile.get("learned_reliability_threshold", 0.65)),
+            )
+        ),
         gravity_meas_std_mps2=float(profile["gravity_meas_std_mps2"]),
         use_gradiometer=bool(profile.get("use_gradiometer", True)),
         gradient_meas_std_per_s2=float(profile["gradient_meas_std_per_s2"]),
@@ -338,6 +404,8 @@ def _run_case(
     use_magnetics: bool,
     use_current_correction: bool,
     use_tide_correction: bool,
+    matcher: str,
+    learned_localizer_model_path: Path | None,
     disable_map_match: bool = False,
     use_lag_smoother: bool = False,
     dt_s: float = 2.0,
@@ -345,6 +413,8 @@ def _run_case(
 ) -> tuple[Any, ScenarioMetricsSummary]:
     cfg = _build_runner_config(
         profile,
+        matcher=matcher,
+        learned_localizer_model_path=learned_localizer_model_path,
         use_bathymetry=use_bathymetry,
         use_acoustic_terrain=use_acoustic_terrain,
         use_magnetics=use_magnetics,
@@ -404,6 +474,9 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
     bathy_info: list[float] = []
     magnetic_info: list[float] = []
     support_radius_fraction: list[float] = []
+    publishability: list[float] = []
+    covariance_scale: list[float] = []
+    localizer_names: dict[str, int] = {}
 
     for update in updates:
         diag = update.ambiguity_diagnostics
@@ -418,6 +491,12 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
             bathy_info.append(float(diag.bathymetry_information_ratio))
         if diag.magnetic_information_ratio is not None:
             magnetic_info.append(float(diag.magnetic_information_ratio))
+        if getattr(update, "publishability_probability", None) is not None:
+            publishability.append(float(update.publishability_probability))
+        if getattr(update, "learned_covariance_scale", None) is not None:
+            covariance_scale.append(float(update.learned_covariance_scale))
+        localizer_name = str(getattr(update, "localizer_name", "sequence"))
+        localizer_names[localizer_name] = localizer_names.get(localizer_name, 0) + 1
         support_radius_fraction.append(
             max(
                 float(diag.support_radius_n_m) / max(float(diag.grid_half_span_m[0]), 1.0e-9),
@@ -446,9 +525,21 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
         "median_magnetic_information_ratio": (
             None if len(magnetic_info) == 0 else float(np.median(magnetic_info))
         ),
+        "median_publishability_probability": (
+            None if len(publishability) == 0 else float(np.median(publishability))
+        ),
+        "publishability_positive_fraction": (
+            None
+            if len(publishability) == 0
+            else float(np.mean(np.asarray(publishability, dtype=np.float64) >= 0.65))
+        ),
+        "median_learned_covariance_scale": (
+            None if len(covariance_scale) == 0 else float(np.median(covariance_scale))
+        ),
         "median_support_radius_fraction": float(np.median(support_radius_fraction)),
         "failure_mode_counts": failure_counts,
         "grid_mode_counts": grid_mode_counts,
+        "localizer_name_counts": localizer_names,
     }
 
 
@@ -472,10 +563,13 @@ def _select_reported_output(
     median_gravity_info = float(ambiguity["median_gravity_information_ratio"])
     median_bathy_info = ambiguity["median_bathymetry_information_ratio"]
     median_magnetic_info = ambiguity.get("median_magnetic_information_ratio")
+    median_publishability = ambiguity.get("median_publishability_probability")
     if median_bathy_info is not None:
         median_bathy_info = float(median_bathy_info)
     if median_magnetic_info is not None:
         median_magnetic_info = float(median_magnetic_info)
+    if median_publishability is not None:
+        median_publishability = float(median_publishability)
 
     lag_allowed = (
         lag is not None
@@ -485,6 +579,7 @@ def _select_reported_output(
         and median_edge_mass <= 0.12
         and median_support_radius <= 0.75
         and median_ess >= 0.02
+        and (median_publishability is None or median_publishability >= 0.65)
         and (median_bathy_info is None or median_bathy_info >= 0.10)
         and (median_magnetic_info is None or median_magnetic_info >= 0.10)
     )
@@ -496,6 +591,7 @@ def _select_reported_output(
         and median_edge_mass <= 0.20
         and median_support_radius <= 0.85
         and median_ess >= 0.02
+        and (median_publishability is None or median_publishability >= 0.55)
         and (
             median_gravity_info >= 0.10
             or (median_bathy_info is not None and median_bathy_info >= 0.10)
@@ -1042,6 +1138,12 @@ def _metrics_row(
         "ambiguity_median_magnetic_information_ratio": None
         if ambiguity is None or ambiguity["median_magnetic_information_ratio"] is None
         else float(ambiguity["median_magnetic_information_ratio"]),
+        "ambiguity_median_publishability_probability": None
+        if ambiguity is None or ambiguity["median_publishability_probability"] is None
+        else float(ambiguity["median_publishability_probability"]),
+        "ambiguity_publishability_positive_fraction": None
+        if ambiguity is None or ambiguity["publishability_positive_fraction"] is None
+        else float(ambiguity["publishability_positive_fraction"]),
         "ambiguity_failure_mode_counts": None
         if ambiguity is None
         else dict(ambiguity["failure_mode_counts"]),
@@ -1451,6 +1553,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 777])
     parser.add_argument("--dt-s", type=float, default=2.0)
     parser.add_argument(
+        "--map-matcher",
+        choices=("sequence", "learned_sequence"),
+        default="sequence",
+    )
+    parser.add_argument(
+        "--learned-localizer-model",
+        default=None,
+        help="Optional exported learned-localizer model bundle (.npz).",
+    )
+    parser.add_argument(
         "--initial-position-offset-ned-m",
         type=float,
         nargs=3,
@@ -1531,6 +1643,15 @@ def main() -> int:
     elif tide_config_path is None:
         tide_config_path = DEFAULT_TIDE_CONFIG.resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    learned_localizer_model_path = (
+        None
+        if args.learned_localizer_model is None
+        else Path(args.learned_localizer_model).expanduser().resolve()
+    )
+    if args.map_matcher == "learned_sequence" and learned_localizer_model_path is None:
+        parser.error(
+            "--learned-localizer-model is required with --map-matcher learned_sequence."
+        )
     initial_position_offset_ned_m = tuple(float(x) for x in args.initial_position_offset_ned_m)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1574,6 +1695,8 @@ def main() -> int:
                     use_magnetics=False,
                     use_current_correction=False,
                     use_lag_smoother=False,
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
             (
@@ -1588,6 +1711,8 @@ def main() -> int:
                     use_magnetics=False,
                     use_current_correction=False,
                     use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
             (
@@ -1602,6 +1727,8 @@ def main() -> int:
                     use_magnetics=False,
                     use_current_correction=False,
                     use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
             (
@@ -1616,6 +1743,8 @@ def main() -> int:
                     use_magnetics=False,
                     use_current_correction=False,
                     use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
             (
@@ -1630,6 +1759,8 @@ def main() -> int:
                     use_magnetics=True,
                     use_current_correction=False,
                     use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
             (
@@ -1644,6 +1775,8 @@ def main() -> int:
                     use_magnetics=True,
                     use_current_correction=True,
                     use_lag_smoother=bool(profile.get("use_lag_smoother", True)),
+                    matcher=args.map_matcher,
+                    learned_localizer_model_path=learned_localizer_model_path,
                 ),
             ),
         ]
@@ -1673,6 +1806,8 @@ def main() -> int:
                 use_magnetics=cfg["use_magnetics"],
                 use_current_correction=cfg["use_current_correction"],
                 use_tide_correction=cfg["use_tide_correction"],
+                matcher=cfg["matcher"],
+                learned_localizer_model_path=cfg["learned_localizer_model_path"],
                 disable_map_match=cfg["disable_map_match"],
                 use_lag_smoother=cfg["use_lag_smoother"],
                 dt_s=float(args.dt_s),
@@ -1688,6 +1823,12 @@ def main() -> int:
                 search_center=search_center_summary,
             )
             row["seed"] = seed
+            row["map_matcher"] = str(args.map_matcher)
+            row["learned_localizer_model"] = (
+                None
+                if learned_localizer_model_path is None
+                else str(learned_localizer_model_path)
+            )
             photonic_summary = _photonic_summary_from_result(result)
             if photonic_summary is not None:
                 row.update(

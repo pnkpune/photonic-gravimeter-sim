@@ -477,6 +477,9 @@ class SequenceMatchUpdateResult:
     posterior_mean_offset_ned_m: FloatArray
     ambiguity_diagnostics: SequenceAmbiguityDiagnostics
     anchor_estimates: tuple[SequenceAnchorEstimate, ...] = ()
+    publishability_probability: Optional[float] = None
+    learned_covariance_scale: Optional[float] = None
+    localizer_name: str = "sequence"
 
 
 @dataclass

@@ -85,6 +85,7 @@ What has not helped:
 - direct feedback / replay / recentering heuristics have not produced a robust win
 - the photonic digital twin improved realism and diagnostics, not raw accuracy by itself
 - stricter publication logic removed weak-region HMI leaks, but only by falling back to INS
+- the first tiny real-data learned localizer bundle is mechanically valid, but it is not yet competitive with the classical matcher
 
 ## Core Approach
 
@@ -95,6 +96,7 @@ The current architecture is still deliberately conservative:
 - Gravity history is matched with a sequence estimator rather than pointwise only.
 - Bathymetry / acoustic terrain and magnetic anomaly are optional ambiguity-reduction channels.
 - The strongest product output today is delayed, not aggressively closed-loop.
+- An experimental learned delayed localizer now exists as an alternate matcher path.
 - Any output that cannot maintain integrity must fall back to INS.
 
 The estimator family on the current branch is:
@@ -103,8 +105,9 @@ The estimator family on the current branch is:
 - observe-only gravity sequence matcher
 - bounded-lag delayed output
 - ambiguity-aware publication and fallback logic
+- experimental learned delayed localizer as an alternate delayed matcher
 
-No ML path is active on this branch. No GNSS is used in the demo paths.
+The strongest validated path on this branch is still classical, not learned. No GNSS is used in the demo paths.
 
 ## Core Equations
 
@@ -459,12 +462,40 @@ Meaning:
 - publication hardening alone is now close to exhausted as a source of new gains
 - the next likely gain is a stronger delayed-output estimator, not more heuristic switching
 
+### Phase 10: Experimental real-data learned localizer
+
+What was tried:
+
+- build a real-data-first corpus path from tracked regional demo packs
+- add an offline teacher / student ML subsystem under `src/gravnav/ml`
+- add a learned delayed localizer that plugs into the same delayed-output slot as the classical sequence matcher
+- train and export a small smoke-test runtime bundle from real public Norway data
+
+Result:
+
+- corpus build, training, export, evaluation, and runtime integration all work end to end
+- smoke-test corpus metrics:
+  - top-1 accuracy `0.000`
+  - median horizontal error `391.261 m`
+  - mean publishability probability `0.558`
+- first Norwegian-margin learned runtime smoke test on seed `42`:
+  - sequence RMSE `287.345 m`
+  - lag RMSE `281.364 m`
+  - published output fell back to `live_ins` at `241.526 m`
+
+Meaning:
+
+- ML is now an implemented experimental path, not just a roadmap item
+- the current tiny NumPy reference model and tiny real-data smoke corpus are not good enough to replace the classical matcher
+- the next ML work, if continued, must be large-corpus training and held-out regional evaluation rather than claiming a learned navigation win
+
 ## Current Branch State
 
 This branch now contains two major layers on top of the milestone baseline:
 
 - a phase-domain photonic gravimeter digital twin
 - Priority 9 Norway-first public-data expansion
+- an experimental learned delayed-localizer path
 
 The current codebase includes:
 
@@ -474,6 +505,7 @@ The current codebase includes:
 - demo and output-policy logic in [scripts/run_maritime_demo.py](scripts/run_maritime_demo.py)
 - tide correction in [src/gravnav/physics/tides.py](src/gravnav/physics/tides.py)
 - magnetic and current dataset support in [src/gravnav/datasets/](src/gravnav/datasets/)
+- learned matcher training and runtime code in [src/gravnav/ml/](src/gravnav/ml/)
 
 ## Photonic Digital Twin
 
@@ -563,17 +595,27 @@ Current practical diagnosis:
 - Helgeland and Nordland have useful raw Earth-signature content, but the current safe publication policy can only preserve integrity there by reverting to INS
 - current-aware correction is not ready for promotion
 - output-policy hardening alone is now close to exhausted as a source of new gains
+- the experimental learned matcher path is wired end to end, but the first smoke-trained bundle is not yet good enough to change the product result
 
 ## Recommended Next Work
 
-The next effective step is not another new modality and not ML. The next effective step is a stronger delayed-output estimator:
+Two statements are both true now:
+
+- the strongest validated product path is still the classical gravity-led delayed estimator
+- the branch now has an experimental learned delayed matcher path that is worth scaling, but not yet worth promoting
+
+If continuing on the classical path:
 
 - move beyond publication heuristics toward a better delayed-output formulation
 - keep the current gravity-led multi-modal stack fixed
 - improve the delayed-output path itself rather than only changing which existing path gets published
-- likely direction: smoother / factor-graph-style delayed estimation, or another structured delayed estimator that uses the same passive channels but produces a better-calibrated posterior
 
-Only after that is stable should new channels or ML be considered.
+If continuing on the learned path:
+
+- scale the real-data corpus well beyond the current smoke-test bundle
+- train on held-out-region splits instead of tiny single-region smoke data
+- keep the classical matcher as the acceptance baseline
+- do not claim a learned navigation result until it beats live INS with `HMI = 0`
 
 ## Important Reports
 
@@ -635,6 +677,45 @@ PYTHONPATH=src python3 -m pytest \
   tests/test_bathymetry_loader.py \
   tests/test_prepare_public_emodnet_bathymetry.py \
   tests/test_prepare_public_multimodal_norway.py -q
+```
+
+Build and train the experimental learned delayed localizer on a tracked real-data demo pack:
+
+```bash
+python3 scripts/build_real_ocean_corpus.py \
+  --demo-pack-manifests data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json \
+  --output-dir /tmp/gravnav_ml_demo/corpus
+```
+
+```bash
+python3 scripts/train_ocean_teacher.py \
+  --corpus /tmp/gravnav_ml_demo/corpus/real_ocean_corpus.npz \
+  --output /tmp/gravnav_ml_demo/teacher.npz
+```
+
+```bash
+python3 scripts/distill_runtime_student.py \
+  --corpus /tmp/gravnav_ml_demo/corpus/real_ocean_corpus.npz \
+  --teacher /tmp/gravnav_ml_demo/teacher.npz \
+  --output /tmp/gravnav_ml_demo/student_init.npz
+```
+
+```bash
+python3 scripts/train_delayed_localizer.py \
+  --corpus /tmp/gravnav_ml_demo/corpus/real_ocean_corpus.npz \
+  --student-init /tmp/gravnav_ml_demo/student_init.npz \
+  --output /tmp/gravnav_ml_demo/runtime_bundle.npz
+```
+
+Run the learned delayed localizer through the existing maritime demo path:
+
+```bash
+python3 scripts/run_maritime_demo.py \
+  --demo-pack-manifest data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json \
+  --map-matcher learned_sequence \
+  --learned-localizer-model /tmp/gravnav_ml_demo/runtime_bundle.npz \
+  --seeds 42 \
+  --output-dir /tmp/gravnav_ml_demo/maritime_learned
 ```
 
 ## Validation
