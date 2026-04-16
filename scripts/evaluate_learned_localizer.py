@@ -16,7 +16,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from gravnav.ml import RuntimeStudentModel, evaluate_runtime_student, load_real_ocean_corpus
+from gravnav.ml import evaluate_runtime_student, load_real_ocean_corpus
+from gravnav.ml.torch_models import load_runtime_localizer_model
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,7 +42,7 @@ def main() -> int:
         if len(missing) > 0:
             raise SystemExit(f"Unknown regions: {missing}.")
         corpus = corpus.select_regions(include=requested, name="cli_region_subset")
-    model = RuntimeStudentModel.from_npz(Path(args.model).expanduser().resolve())
+    model = load_runtime_localizer_model(Path(args.model).expanduser().resolve())
     summary = evaluate_runtime_student(corpus, model)
     summary["model_path"] = str(Path(args.model).expanduser().resolve())
     summary["num_examples"] = int(corpus.query_windows.shape[0])

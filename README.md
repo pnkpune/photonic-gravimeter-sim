@@ -488,6 +488,7 @@ Meaning:
 - ML is now an implemented experimental path, not just a roadmap item
 - the current tiny NumPy reference model and tiny real-data smoke corpus are not good enough to replace the classical matcher
 - the next ML work, if continued, must be large-corpus training and held-out regional evaluation rather than claiming a learned navigation win
+- an optional torch backend now exists on `feature/learned-earth-signature-localizer`, and its first held-out regional pass improves the offline corpus benchmark but still does not produce a publishable navigation result
 
 ## Current Branch State
 
@@ -617,6 +618,14 @@ If continuing on the learned path:
 - keep the classical matcher as the acceptance baseline
 - do not claim a learned navigation result until it beats live INS with `HMI = 0`
 
+Current torch branch checkpoint:
+
+- 72-example three-region corpus with two drift realizations per region
+- NumPy held-out median horizontal error: `285.565 m`
+- torch held-out median horizontal error: `241.558 m`
+- torch held-out median top-1 accuracy: `0.208`
+- publishability-positive fraction is still `0.0`, so this is an offline scorer improvement, not a promotable product win
+
 ## Important Reports
 
 If you are new to the repo, read these in order:
@@ -706,6 +715,29 @@ python3 scripts/train_delayed_localizer.py \
   --corpus /tmp/gravnav_ml_demo/corpus/real_ocean_corpus.npz \
   --student-init /tmp/gravnav_ml_demo/student_init.npz \
   --output /tmp/gravnav_ml_demo/runtime_bundle.npz
+```
+
+Create the dedicated torch ML environment on the learned-localizer branch:
+
+```bash
+python3.11 -m venv .venv-ml311
+.venv-ml311/bin/python -m pip install -r requirements-ml.txt
+```
+
+Train the optional torch delayed localizer:
+
+```bash
+.venv-ml311/bin/python scripts/train_torch_delayed_localizer.py \
+  --corpus /tmp/gravnav_ml_cv/corpus/real_ocean_corpus.npz \
+  --output /tmp/gravnav_ml_cv/torch_full.pt
+```
+
+Run held-out validation for the torch delayed localizer:
+
+```bash
+.venv-ml311/bin/python scripts/cross_validate_torch_delayed_localizer.py \
+  --corpus /tmp/gravnav_ml_cv/corpus/real_ocean_corpus.npz \
+  --output /tmp/gravnav_ml_cv/torch_held_out_summary.json
 ```
 
 Run leave-one-region-out validation across the three tracked Norway public packs:

@@ -23,6 +23,7 @@ from ..estimators.map_match_pf import (
     geodetic_covariance_from_ned_covariance,
 )
 from .models import RuntimeStudentModel, summarize_query_windows
+from .torch_models import load_runtime_localizer_model
 
 FloatArray = NDArray[np.float64]
 
@@ -81,7 +82,7 @@ class NeuralEarthSignatureLocalizer:
         magnetic_map: Any | None = None,
     ) -> None:
         self.spec = spec
-        self.model = RuntimeStudentModel.from_npz(spec.model_export_path)
+        self.model = load_runtime_localizer_model(spec.model_export_path)
         self.model.reliability_threshold = float(spec.reliability_threshold)
         self._matcher = GravitySequenceMatcher(
             spec.sequence_spec,

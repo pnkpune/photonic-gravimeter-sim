@@ -6,6 +6,8 @@ __pycache__/
 .pytest_cache/
 .cache/
 .matplotlib-cache/
+.venv-ml/
+.venv-ml311/
 
 # Generated data and output artifacts
 data/outputs/.DS_Store

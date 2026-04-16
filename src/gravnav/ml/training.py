@@ -288,7 +288,7 @@ def train_delayed_localizer(
 
 def evaluate_runtime_student(
     corpus: RealOceanCorpus,
-    student: RuntimeStudentModel,
+    student: Any,
 ) -> dict[str, Any]:
     scores = student.predict_candidate_scores(
         query_windows=corpus.query_windows,

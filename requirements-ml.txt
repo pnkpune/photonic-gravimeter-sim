@@ -1,0 +1,4 @@
+# Branch-local ML environment for feature/learned-earth-signature-localizer
+numpy==2.4.4
+scipy==1.17.1
+torch==2.11.0
