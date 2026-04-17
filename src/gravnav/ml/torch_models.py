@@ -107,6 +107,7 @@ class TorchDelayedLocalizerTrainingSpec:
     reliability_threshold: float = 0.65
     analytic_log_emission_gain: float = 0.35
     device: str = "cpu"
+    random_seed: int = 42
     name: str = "torch_delayed_localizer_training"
 
 
@@ -415,6 +416,10 @@ def train_torch_delayed_localizer(
         if spec is None
         else spec
     )
+    np.random.seed(int(train_spec.random_seed))
+    torch.manual_seed(int(train_spec.random_seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(train_spec.random_seed))
     runtime_spec = (
         TorchRuntimeStudentModelSpec(
             candidate_feature_names=tuple(corpus.metadata["candidate_feature_names"]),
@@ -532,6 +537,7 @@ def train_torch_delayed_localizer(
             "training_name": train_spec.name,
             "device": device,
             "num_examples": num_examples,
+            "random_seed": int(train_spec.random_seed),
         },
         device=device,
     )

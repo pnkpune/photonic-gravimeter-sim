@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 from gravnav.ml import evaluate_runtime_student, load_real_ocean_corpus
 from gravnav.ml.torch_models import (
     TorchDelayedLocalizerTrainingSpec,
+    TorchRuntimeStudentModelSpec,
     train_torch_delayed_localizer,
 )
 
@@ -37,6 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reliability-threshold", type=float, default=0.65)
     parser.add_argument("--analytic-log-emission-gain", type=float, default=0.35)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--embedding-dim", type=int, default=64)
+    parser.add_argument("--query-hidden-dim", type=int, default=128)
+    parser.add_argument("--candidate-hidden-dim", type=int, default=128)
+    parser.add_argument("--fusion-hidden-dim", type=int, default=128)
+    parser.add_argument("--head-hidden-dim", type=int, default=32)
     return parser
 
 
@@ -56,12 +63,28 @@ def main() -> int:
             reliability_threshold=float(args.reliability_threshold),
             analytic_log_emission_gain=float(args.analytic_log_emission_gain),
             device=str(args.device),
+            random_seed=int(args.seed),
+        ),
+        model_spec=TorchRuntimeStudentModelSpec(
+            candidate_feature_names=tuple(corpus.metadata["candidate_feature_names"]),
+            query_feature_names=tuple(corpus.metadata["query_feature_names"]),
+            embedding_dim=int(args.embedding_dim),
+            query_hidden_dim=int(args.query_hidden_dim),
+            candidate_hidden_dim=int(args.candidate_hidden_dim),
+            fusion_hidden_dim=int(args.fusion_hidden_dim),
+            head_hidden_dim=int(args.head_hidden_dim),
         ),
     )
     out_path = model.save_pt(Path(args.output).expanduser().resolve())
     summary = {"model_path": str(out_path)}
     summary.update(evaluate_runtime_student(corpus, model))
     summary["reference_parameter_count"] = int(model.reference_parameter_count)
+    summary["seed"] = int(args.seed)
+    summary["embedding_dim"] = int(args.embedding_dim)
+    summary["query_hidden_dim"] = int(args.query_hidden_dim)
+    summary["candidate_hidden_dim"] = int(args.candidate_hidden_dim)
+    summary["fusion_hidden_dim"] = int(args.fusion_hidden_dim)
+    summary["head_hidden_dim"] = int(args.head_hidden_dim)
     print(json.dumps(summary, indent=2))
     return 0
 

@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 from gravnav.ml import evaluate_runtime_student, load_real_ocean_corpus
 from gravnav.ml.torch_models import (
     TorchDelayedLocalizerTrainingSpec,
+    TorchRuntimeStudentModelSpec,
     train_torch_delayed_localizer,
 )
 
@@ -40,6 +41,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reliability-threshold", type=float, default=0.65)
     parser.add_argument("--analytic-log-emission-gain", type=float, default=0.35)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--embedding-dim", type=int, default=64)
+    parser.add_argument("--query-hidden-dim", type=int, default=128)
+    parser.add_argument("--candidate-hidden-dim", type=int, default=128)
+    parser.add_argument("--fusion-hidden-dim", type=int, default=128)
+    parser.add_argument("--head-hidden-dim", type=int, default=32)
     return parser
 
 
@@ -66,6 +73,16 @@ def main() -> int:
         reliability_threshold=float(args.reliability_threshold),
         analytic_log_emission_gain=float(args.analytic_log_emission_gain),
         device=str(args.device),
+        random_seed=int(args.seed),
+    )
+    model_spec = TorchRuntimeStudentModelSpec(
+        candidate_feature_names=tuple(corpus.metadata["candidate_feature_names"]),
+        query_feature_names=tuple(corpus.metadata["query_feature_names"]),
+        embedding_dim=int(args.embedding_dim),
+        query_hidden_dim=int(args.query_hidden_dim),
+        candidate_hidden_dim=int(args.candidate_hidden_dim),
+        fusion_hidden_dim=int(args.fusion_hidden_dim),
+        head_hidden_dim=int(args.head_hidden_dim),
     )
     folds = []
     for held_out_region in regions:
@@ -77,7 +94,11 @@ def main() -> int:
             include=(held_out_region,),
             name=f"torch_eval_{held_out_region}",
         )
-        model = train_torch_delayed_localizer(train_corpus, spec=train_spec)
+        model = train_torch_delayed_localizer(
+            train_corpus,
+            spec=train_spec,
+            model_spec=model_spec,
+        )
         metrics = evaluate_runtime_student(eval_corpus, model)
         folds.append(
             {
@@ -130,6 +151,14 @@ def main() -> int:
             "reliability_threshold": float(train_spec.reliability_threshold),
             "analytic_log_emission_gain": float(train_spec.analytic_log_emission_gain),
             "device": str(train_spec.device),
+            "random_seed": int(train_spec.random_seed),
+        },
+        "model_spec": {
+            "embedding_dim": int(model_spec.embedding_dim),
+            "query_hidden_dim": int(model_spec.query_hidden_dim),
+            "candidate_hidden_dim": int(model_spec.candidate_hidden_dim),
+            "fusion_hidden_dim": int(model_spec.fusion_hidden_dim),
+            "head_hidden_dim": int(model_spec.head_hidden_dim),
         },
         "corpus_path": str(Path(args.corpus).expanduser().resolve()),
     }
