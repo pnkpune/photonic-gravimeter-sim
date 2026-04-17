@@ -53,6 +53,22 @@ QUERY_FEATURE_NAMES = PATCH_CHANNEL_NAMES
 CANDIDATE_FEATURE_NAMES = PATCH_CHANNEL_NAMES
 
 
+@dataclass(frozen=True)
+class _PrecomputedRegionSample:
+    index: int
+    time_s: float
+    lat_rad: float
+    lon_rad: float
+    height_m: float
+    v_ned_mps: FloatArray
+    track_unit_ned: FloatArray
+    reference_surface_height_m: float
+    query_feature: FloatArray
+    query_window: FloatArray
+    patch_tensor: FloatArray
+    patch_summary: FloatArray
+
+
 def _as_float_array(x: ArrayLike) -> FloatArray:
     return np.asarray(x, dtype=np.float64)
 
@@ -225,22 +241,31 @@ def _candidate_feature_matrix(
     tide_height = np.zeros(candidate_lat_rad.shape, dtype=np.float64)
     tide_gravity = np.zeros(candidate_lat_rad.shape, dtype=np.float64)
     if tide_corrector is not None:
-        tide_samples = [
-            tide_corrector.evaluate(
-                lat_deg=float(la),
-                lon_deg=float(lo),
-                time_s=float(time_s),
+        tide_samples = tide_corrector.evaluate(
+            lat_deg=lat_deg,
+            lon_deg=lon_deg,
+            time_s=float(time_s),
+        )
+        if isinstance(tide_samples, list):
+            tide_height = np.asarray(
+                [sample.sea_surface_height_m for sample in tide_samples],
+                dtype=np.float64,
+            ).reshape(candidate_lat_rad.shape)
+            tide_gravity = np.asarray(
+                [sample.total_gravity_correction_mps2 for sample in tide_samples],
+                dtype=np.float64,
+            ).reshape(candidate_lat_rad.shape)
+        else:
+            tide_height = np.full(
+                candidate_lat_rad.shape,
+                float(tide_samples.sea_surface_height_m),
+                dtype=np.float64,
             )
-            for la, lo in zip(lat_deg.reshape(-1), lon_deg.reshape(-1))
-        ]
-        tide_height = np.asarray(
-            [sample.sea_surface_height_m for sample in tide_samples],
-            dtype=np.float64,
-        ).reshape(candidate_lat_rad.shape)
-        tide_gravity = np.asarray(
-            [sample.total_gravity_correction_mps2 for sample in tide_samples],
-            dtype=np.float64,
-        ).reshape(candidate_lat_rad.shape)
+            tide_gravity = np.full(
+                candidate_lat_rad.shape,
+                float(tide_samples.total_gravity_correction_mps2),
+                dtype=np.float64,
+            )
 
     return np.column_stack(
         [
@@ -527,6 +552,85 @@ def _sample_indices(length: int, count: int, *, window_size: int) -> NDArray[np.
     return np.linspace(start, stop - 1, count, dtype=np.int64)
 
 
+def _precompute_region_samples(
+    *,
+    pack: ResolvedRegionalDemoPack,
+    truth: Any,
+    spec: RealOceanCorpusSpec,
+    sample_indices: NDArray[np.int64],
+    patch_offsets: FloatArray,
+    tide_corrector: Optional[TideCorrector],
+) -> tuple[list[_PrecomputedRegionSample], int]:
+    window_size = int(spec.window_size)
+    query_features: list[FloatArray] = []
+    sample_index_set = {int(idx) for idx in sample_indices.tolist()}
+    samples: list[_PrecomputedRegionSample] = []
+
+    for k in range(len(truth.time_s)):
+        lat_true = float(truth.lat_rad[k])
+        lon_true = float(truth.lon_rad[k])
+        height_true = float(truth.height_m[k])
+        t_now = float(truth.time_s[k])
+        v_now = np.asarray(truth.v_ned_mps[k], dtype=np.float64)
+        track_unit = _horizontal_track_unit_ned(v_now)
+
+        reference_surface_height_m = float(spec.reference_surface_height_m)
+        if tide_corrector is not None:
+            tide_sample = tide_corrector.evaluate(
+                lat_deg=np.rad2deg(lat_true),
+                lon_deg=np.rad2deg(lon_true),
+                time_s=t_now,
+            )
+            if isinstance(tide_sample, list):
+                raise TypeError("Scalar tide sample expected for truth precomputation.")
+            reference_surface_height_m += float(tide_sample.sea_surface_height_m)
+
+        query_feature = _measurement_feature_vector(
+            pack,
+            lat_rad=lat_true,
+            lon_rad=lon_true,
+            height_m=height_true,
+            reference_surface_height_m=reference_surface_height_m,
+            time_s=t_now,
+            tide_corrector=tide_corrector,
+        )
+        query_features.append(query_feature)
+        if k < window_size - 1 or k not in sample_index_set:
+            continue
+
+        patch = _patch_tensor(
+            pack,
+            lat_rad=lat_true,
+            lon_rad=lon_true,
+            height_m=height_true,
+            reference_surface_height_m=reference_surface_height_m,
+            time_s=t_now,
+            patch_offsets_ned_m=patch_offsets,
+            tide_corrector=tide_corrector,
+        )
+        samples.append(
+            _PrecomputedRegionSample(
+                index=int(k),
+                time_s=t_now,
+                lat_rad=lat_true,
+                lon_rad=lon_true,
+                height_m=height_true,
+                v_ned_mps=v_now,
+                track_unit_ned=track_unit,
+                reference_surface_height_m=reference_surface_height_m,
+                query_feature=np.asarray(query_feature, dtype=np.float64),
+                query_window=np.stack(
+                    query_features[-window_size:],
+                    axis=0,
+                ).astype(np.float64),
+                patch_tensor=np.asarray(patch, dtype=np.float64),
+                patch_summary=summarize_patch_tensor(patch),
+            )
+        )
+
+    return samples, int(len(truth.time_s))
+
+
 def build_real_ocean_corpus(
     demo_pack_manifests: Sequence[str | Path],
     *,
@@ -571,110 +675,111 @@ def build_real_ocean_corpus(
             spec.max_examples_per_region,
             window_size=int(spec.window_size),
         )
+        precomputed_samples, num_truth_steps = _precompute_region_samples(
+            pack=pack,
+            truth=truth,
+            spec=spec,
+            sample_indices=sample_indices,
+            patch_offsets=patch_offsets,
+            tide_corrector=tide_corrector,
+        )
         for realization_idx in range(int(spec.num_offset_realizations_per_region)):
-            query_history = []
-            offset_ned = rng.normal(
+            initial_offset_ned = rng.normal(
                 0.0,
                 float(spec.initial_offset_std_m),
                 size=2,
             ).astype(np.float64)
+            offset_walk = rng.normal(
+                0.0,
+                float(spec.offset_random_walk_std_m),
+                size=(num_truth_steps, 2),
+            ).astype(np.float64)
+            offset_series_ned = initial_offset_ned[None, :] + np.cumsum(
+                offset_walk,
+                axis=0,
+            )
 
-            for k in range(len(truth.time_s)):
-                lat_true = float(truth.lat_rad[k])
-                lon_true = float(truth.lon_rad[k])
-                height_true = float(truth.height_m[k])
-                t_now = float(truth.time_s[k])
-                v_now = np.asarray(truth.v_ned_mps[k], dtype=np.float64)
-                offset_ned += rng.normal(
-                    0.0,
-                    float(spec.offset_random_walk_std_m),
-                    size=2,
-                )
+            for sample in precomputed_samples:
+                offset_ned = offset_series_ned[sample.index]
                 prior_lat, prior_lon, prior_h = apply_ned_offsets_to_geodetic(
-                    np.array([lat_true], dtype=np.float64),
-                    np.array([lon_true], dtype=np.float64),
-                    np.array([height_true], dtype=np.float64),
+                    np.array([sample.lat_rad], dtype=np.float64),
+                    np.array([sample.lon_rad], dtype=np.float64),
+                    np.array([sample.height_m], dtype=np.float64),
                     np.array([[offset_ned[0], offset_ned[1], 0.0]], dtype=np.float64),
                 )
-                track_unit = _horizontal_track_unit_ned(v_now)
-                reference_surface_height_m = float(spec.reference_surface_height_m)
-                if tide_corrector is not None:
-                    tide_sample = tide_corrector.evaluate(
-                        lat_deg=np.rad2deg(lat_true),
-                        lon_deg=np.rad2deg(lon_true),
-                        time_s=t_now,
-                    )
-                    reference_surface_height_m += float(tide_sample.sea_surface_height_m)
-
-                query_feature = _measurement_feature_vector(
-                    pack,
-                    lat_rad=lat_true,
-                    lon_rad=lon_true,
-                    height_m=height_true,
-                    reference_surface_height_m=reference_surface_height_m,
-                    time_s=t_now,
-                    tide_corrector=tide_corrector,
-                )
-                query_history.append(query_feature)
-                if len(query_history) < spec.window_size or k not in sample_indices:
-                    continue
 
                 state = _make_state(
-                    time_s=t_now,
+                    time_s=sample.time_s,
                     lat_rad=float(prior_lat[0]),
                     lon_rad=float(prior_lon[0]),
                     height_m=float(prior_h[0]),
-                    v_ned_mps=v_now,
+                    v_ned_mps=sample.v_ned_mps,
                 )
 
                 matcher._active_grid_mode = "nominal"
                 obs = matcher._build_observation(
-                    measured_disturbance_mps2=float(query_feature[0]),
+                    measured_disturbance_mps2=float(sample.query_feature[0]),
                     gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
                     ins_or_state=state,
                     search_center_offset_ned_m=np.zeros(3, dtype=np.float64),
-                    current_track_unit_ned=track_unit,
-                    measured_gradient_per_s2=query_feature[1:3],
+                    current_track_unit_ned=sample.track_unit_ned,
+                    measured_gradient_per_s2=sample.query_feature[1:3],
                     gradient_meas_std_per_s2=sequence_spec.gradient_meas_std_per_s2,
                     measured_bathymetry_m=(
-                        None if not np.isfinite(query_feature[3]) else float(query_feature[3])
+                        None
+                        if not np.isfinite(sample.query_feature[3])
+                        else float(sample.query_feature[3])
                     ),
                     bathymetry_meas_std_m=sequence_spec.bathymetry_meas_std_m,
                     measured_bathymetry_gradient_m_per_m=(
                         None
-                        if not np.isfinite(query_feature[4])
-                        else float(np.dot(track_unit[:2], query_feature[4:6]))
+                        if not np.isfinite(sample.query_feature[4])
+                        else float(
+                            np.dot(
+                                sample.track_unit_ned[:2],
+                                sample.query_feature[4:6],
+                            )
+                        )
                     ),
                     bathymetry_gradient_meas_std_m_per_m=(
                         sequence_spec.bathymetry_gradient_meas_std_m_per_m
                     ),
                     measured_bathymetry_rugosity_m=(
-                        None if not np.isfinite(query_feature[6]) else float(query_feature[6])
+                        None
+                        if not np.isfinite(sample.query_feature[6])
+                        else float(sample.query_feature[6])
                     ),
                     bathymetry_rugosity_meas_std_m=(
                         sequence_spec.bathymetry_rugosity_meas_std_m
                     ),
                     measured_magnetic_total_nt=(
-                        None if not np.isfinite(query_feature[7]) else float(query_feature[7])
+                        None
+                        if not np.isfinite(sample.query_feature[7])
+                        else float(sample.query_feature[7])
                     ),
                     magnetic_meas_std_nt=sequence_spec.magnetic_meas_std_nt,
                     measured_magnetic_gradient_nt_per_m=(
                         None
-                        if not np.isfinite(query_feature[8])
-                        else float(np.dot(track_unit[:2], query_feature[8:10]))
+                        if not np.isfinite(sample.query_feature[8])
+                        else float(
+                            np.dot(
+                                sample.track_unit_ned[:2],
+                                sample.query_feature[8:10],
+                            )
+                        )
                     ),
                     magnetic_gradient_meas_std_nt_per_m=(
                         sequence_spec.magnetic_gradient_meas_std_nt_per_m
                     ),
                     depth_measurement=None,
-                    reference_surface_height_m=reference_surface_height_m,
-                    time_s=t_now,
+                    reference_surface_height_m=sample.reference_surface_height_m,
+                    time_s=sample.time_s,
                 )
 
                 truth_offset = geodetic_offsets_to_local_ned(
-                    np.array([lat_true], dtype=np.float64),
-                    np.array([lon_true], dtype=np.float64),
-                    np.array([height_true], dtype=np.float64),
+                    np.array([sample.lat_rad], dtype=np.float64),
+                    np.array([sample.lon_rad], dtype=np.float64),
+                    np.array([sample.height_m], dtype=np.float64),
                     lat_ref_rad=float(prior_lat[0]),
                     lon_ref_rad=float(prior_lon[0]),
                     height_ref_m=float(prior_h[0]),
@@ -684,30 +789,18 @@ def build_real_ocean_corpus(
                 horizontal_error = float(np.linalg.norm(deltas[label]))
                 nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
 
-                patch = _patch_tensor(
-                    pack,
-                    lat_rad=lat_true,
-                    lon_rad=lon_true,
-                    height_m=height_true,
-                    reference_surface_height_m=reference_surface_height_m,
-                    time_s=t_now,
-                    patch_offsets_ned_m=patch_offsets,
-                    tide_corrector=tide_corrector,
-                )
-                patch_tensors.append(patch)
-                patch_summary_features.append(summarize_patch_tensor(patch))
-                query_windows.append(
-                    np.stack(query_history[-spec.window_size :], axis=0).astype(np.float64)
-                )
+                patch_tensors.append(sample.patch_tensor)
+                patch_summary_features.append(sample.patch_summary)
+                query_windows.append(sample.query_window)
                 candidate_features.append(
                     _candidate_feature_matrix(
                         pack,
                         candidate_lat_rad=obs.candidate_lat_rad,
                         candidate_lon_rad=obs.candidate_lon_rad,
                         candidate_height_m=obs.candidate_height_m,
-                        reference_surface_height_m=reference_surface_height_m,
-                        current_track_unit_ned=track_unit,
-                        time_s=t_now,
+                        reference_surface_height_m=sample.reference_surface_height_m,
+                        current_track_unit_ned=sample.track_unit_ned,
+                        time_s=sample.time_s,
                         tide_corrector=tide_corrector,
                     )
                 )
