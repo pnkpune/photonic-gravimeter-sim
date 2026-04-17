@@ -362,12 +362,16 @@ class RealOceanCorpusSpec:
     patch_spacing_m: float = 40.0
     max_examples_per_region: int = 96
     num_offset_realizations_per_region: int = 1
+    num_edge_biased_realizations_per_region: int = 0
     num_route_variants_per_region: int = 1
     route_variant_max_attempts: int = 24
     route_variant_margin_m: float = 250.0
     route_variant_min_separation_m: float = 1_000.0
     initial_offset_std_m: float = 90.0
     offset_random_walk_std_m: float = 6.0
+    edge_bias_min_fraction_of_nominal_half_span: float = 0.8
+    edge_bias_max_fraction_of_nominal_half_span: float = 1.25
+    use_expanded_grid_for_edge_biased_realizations: bool = True
     random_seed: int = 42
     reference_surface_height_m: float = 0.0
     name: str = "real_ocean_corpus"
@@ -857,6 +861,62 @@ def _precompute_region_samples(
     return samples, int(len(truth.time_s))
 
 
+def _sample_offset_series_ned(
+    *,
+    num_truth_steps: int,
+    spec: RealOceanCorpusSpec,
+    sequence_spec: GravitySequenceMatcherSpec,
+    rng: np.random.Generator,
+    edge_biased: bool,
+) -> FloatArray:
+    walk = rng.normal(
+        0.0,
+        float(spec.offset_random_walk_std_m),
+        size=(num_truth_steps, 2),
+    ).astype(np.float64)
+    if not edge_biased:
+        initial_offset_ned = rng.normal(
+            0.0,
+            float(spec.initial_offset_std_m),
+            size=2,
+        ).astype(np.float64)
+        return initial_offset_ned[None, :] + np.cumsum(walk, axis=0)
+
+    nominal_half_span_m = np.asarray(
+        sequence_spec.grid_half_span_m,
+        dtype=np.float64,
+    ).reshape(2)
+    min_frac = float(spec.edge_bias_min_fraction_of_nominal_half_span)
+    max_frac = float(spec.edge_bias_max_fraction_of_nominal_half_span)
+    if min_frac <= 0.0 or max_frac < min_frac:
+        raise ValueError(
+            "Edge-bias half-span fractions must satisfy 0 < min <= max."
+        )
+
+    initial_offset_ned = np.zeros(2, dtype=np.float64)
+    primary_axis = int(rng.integers(0, 2))
+    initial_offset_ned[primary_axis] = float(
+        rng.choice((-1.0, 1.0))
+        * rng.uniform(min_frac, max_frac)
+        * nominal_half_span_m[primary_axis]
+    )
+    secondary_axis = 1 - primary_axis
+    if rng.random() < 0.35:
+        initial_offset_ned[secondary_axis] = float(
+            rng.choice((-1.0, 1.0))
+            * rng.uniform(min_frac, max_frac)
+            * nominal_half_span_m[secondary_axis]
+        )
+    else:
+        initial_offset_ned[secondary_axis] = float(
+            rng.normal(
+                0.0,
+                0.35 * nominal_half_span_m[secondary_axis],
+            )
+        )
+    return initial_offset_ned[None, :] + np.cumsum(walk, axis=0)
+
+
 def build_real_ocean_corpus(
     demo_pack_manifests: Sequence[str | Path],
     *,
@@ -885,10 +945,16 @@ def build_real_ocean_corpus(
     manifest_paths_resolved: list[str] = []
     route_variant_counts: dict[str, int] = {}
     skipped_nonfinite_examples_by_region: dict[str, int] = {}
+    training_grid_mode_counts = {"nominal": 0, "expanded": 0}
+    realization_mode_counts_by_region: dict[str, dict[str, int]] = {}
 
     for region_id, manifest_path in enumerate(demo_pack_manifests):
         pack = resolve_regional_demo_pack(manifest_path)
         skipped_nonfinite_examples_by_region.setdefault(pack.manifest.region_name, 0)
+        realization_mode_counts_by_region.setdefault(
+            pack.manifest.region_name,
+            {"centered": 0, "edge_biased": 0},
+        )
         manifest_paths_resolved.append(str(Path(manifest_path).expanduser().resolve()))
         tide_corrector = _tide_corrector_from_demo_pack(pack)
         scenario = ScenarioSpec.from_mapping(load_config_mapping(pack.scenario_path))
@@ -921,20 +987,30 @@ def build_real_ocean_corpus(
                 patch_offsets=patch_offsets,
                 tide_corrector=tide_corrector,
             )
-            for realization_idx in range(int(spec.num_offset_realizations_per_region)):
-                initial_offset_ned = rng.normal(
-                    0.0,
-                    float(spec.initial_offset_std_m),
-                    size=2,
-                ).astype(np.float64)
-                offset_walk = rng.normal(
-                    0.0,
-                    float(spec.offset_random_walk_std_m),
-                    size=(num_truth_steps, 2),
-                ).astype(np.float64)
-                offset_series_ned = initial_offset_ned[None, :] + np.cumsum(
-                    offset_walk,
-                    axis=0,
+            realization_modes = (
+                ["centered"] * int(spec.num_offset_realizations_per_region)
+                + ["edge_biased"] * int(spec.num_edge_biased_realizations_per_region)
+            )
+            for realization_idx, realization_mode in enumerate(realization_modes):
+                edge_biased = realization_mode == "edge_biased"
+                offset_series_ned = _sample_offset_series_ned(
+                    num_truth_steps=num_truth_steps,
+                    spec=spec,
+                    sequence_spec=sequence_spec,
+                    rng=rng,
+                    edge_biased=edge_biased,
+                )
+                realization_mode_counts_by_region[pack.manifest.region_name][
+                    realization_mode
+                ] += 1
+                grid_mode = (
+                    "expanded"
+                    if edge_biased
+                    and bool(spec.use_expanded_grid_for_edge_biased_realizations)
+                    else "nominal"
+                )
+                training_grid_mode_counts[grid_mode] = (
+                    int(training_grid_mode_counts.get(grid_mode, 0)) + 1
                 )
 
                 for sample in precomputed_samples:
@@ -954,7 +1030,7 @@ def build_real_ocean_corpus(
                         v_ned_mps=sample.v_ned_mps,
                     )
 
-                    matcher._active_grid_mode = "nominal"
+                    matcher._active_grid_mode = str(grid_mode)
                     obs = matcher._build_observation(
                         measured_disturbance_mps2=float(sample.query_feature[0]),
                         gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
@@ -1105,7 +1181,12 @@ def build_real_ocean_corpus(
             "num_offset_realizations_per_region": int(
                 spec.num_offset_realizations_per_region
             ),
+            "num_edge_biased_realizations_per_region": int(
+                spec.num_edge_biased_realizations_per_region
+            ),
             "route_variant_counts": route_variant_counts,
+            "training_grid_mode_counts": training_grid_mode_counts,
+            "realization_mode_counts_by_region": realization_mode_counts_by_region,
             "skipped_nonfinite_examples_by_region": skipped_nonfinite_examples_by_region,
         },
     )

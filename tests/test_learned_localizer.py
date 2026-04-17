@@ -253,3 +253,32 @@ def test_real_ocean_corpus_route_variants_expand_real_geography() -> None:
     assert (
         int(corpus.metadata["route_variant_counts"]["norwegian_margin_maritime_demo"]) >= 2
     )
+
+
+def test_real_ocean_corpus_edge_biased_realizations_use_expanded_grid() -> None:
+    sequence_spec = _small_sequence_spec()
+    corpus = build_real_ocean_corpus(
+        [DEFAULT_PACK],
+        sequence_spec=sequence_spec,
+        corpus_spec=RealOceanCorpusSpec(
+            window_size=5,
+            patch_size=5,
+            patch_spacing_m=60.0,
+            max_examples_per_region=2,
+            num_offset_realizations_per_region=1,
+            num_edge_biased_realizations_per_region=1,
+            random_seed=23,
+        ),
+    )
+
+    mode_counts = corpus.metadata["training_grid_mode_counts"]
+    assert int(mode_counts["nominal"]) > 0
+    assert int(mode_counts["expanded"]) > 0
+    realization_counts = corpus.metadata["realization_mode_counts_by_region"][
+        "norwegian_margin_maritime_demo"
+    ]
+    assert int(realization_counts["centered"]) == 1
+    assert int(realization_counts["edge_biased"]) == 1
+    assert float(np.max(np.abs(corpus.candidate_offsets_ned_m))) > float(
+        max(sequence_spec.grid_half_span_m)
+    )

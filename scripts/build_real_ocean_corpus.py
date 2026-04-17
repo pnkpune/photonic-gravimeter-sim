@@ -92,6 +92,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--num-edge-biased-realizations-per-region",
+        type=int,
+        default=0,
+        help=(
+            "Additional drift realizations biased toward the nominal candidate-grid "
+            "boundary or slightly beyond it."
+        ),
+    )
+    parser.add_argument(
         "--num-route-variants-per-region",
         type=int,
         default=1,
@@ -118,6 +127,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1000.0,
         help="Minimum separation between accepted translated route starts.",
     )
+    parser.add_argument(
+        "--edge-bias-min-fraction-of-nominal-half-span",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of the nominal grid half-span used for edge-biased priors.",
+    )
+    parser.add_argument(
+        "--edge-bias-max-fraction-of-nominal-half-span",
+        type=float,
+        default=1.25,
+        help="Maximum fraction of the nominal grid half-span used for edge-biased priors.",
+    )
+    parser.add_argument(
+        "--disable-expanded-grid-for-edge-biased-realizations",
+        action="store_true",
+        help="Keep edge-biased examples on the nominal grid instead of using expanded support.",
+    )
     parser.add_argument("--patch-size", type=int, default=9)
     parser.add_argument("--patch-spacing-m", type=float, default=40.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -143,10 +169,22 @@ def main() -> int:
             num_offset_realizations_per_region=int(
                 args.num_offset_realizations_per_region
             ),
+            num_edge_biased_realizations_per_region=int(
+                args.num_edge_biased_realizations_per_region
+            ),
             num_route_variants_per_region=int(args.num_route_variants_per_region),
             route_variant_max_attempts=int(args.route_variant_max_attempts),
             route_variant_margin_m=float(args.route_variant_margin_m),
             route_variant_min_separation_m=float(args.route_variant_min_separation_m),
+            edge_bias_min_fraction_of_nominal_half_span=float(
+                args.edge_bias_min_fraction_of_nominal_half_span
+            ),
+            edge_bias_max_fraction_of_nominal_half_span=float(
+                args.edge_bias_max_fraction_of_nominal_half_span
+            ),
+            use_expanded_grid_for_edge_biased_realizations=(
+                not bool(args.disable_expanded_grid_for_edge_biased_realizations)
+            ),
             random_seed=int(args.seed),
         ),
     )
@@ -158,6 +196,12 @@ def main() -> int:
         "region_names": list(corpus.region_names),
         "region_example_counts": corpus.region_example_counts(),
         "route_variant_counts": dict(corpus.metadata.get("route_variant_counts", {})),
+        "training_grid_mode_counts": dict(
+            corpus.metadata.get("training_grid_mode_counts", {})
+        ),
+        "realization_mode_counts_by_region": dict(
+            corpus.metadata.get("realization_mode_counts_by_region", {})
+        ),
         "query_window_shape": list(corpus.query_windows.shape),
         "candidate_shape": list(corpus.candidate_features.shape),
         "patch_tensor_shape": list(corpus.patch_tensors.shape),
