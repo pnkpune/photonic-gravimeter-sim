@@ -85,6 +85,10 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
         analytic_log_emission=corpus.analytic_log_emission[:2],
     )
     assert scores.shape == (2, corpus.candidate_features.shape[1])
+    support_prob = loaded.support_expansion_probability_from_features(
+        np.zeros((2, 8), dtype=np.float64)
+    )
+    assert support_prob.shape == (2,)
 
     localizer = NeuralEarthSignatureLocalizer(
         LearnedLocalizerSpec(
@@ -165,4 +169,5 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
 
     assert len(updates) >= sequence_spec.window_size
     assert updates[-1].publishability_probability is not None
+    assert updates[-1].support_expansion_probability is not None
     assert updates[-1].learned_covariance_scale is not None

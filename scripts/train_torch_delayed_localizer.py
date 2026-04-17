@@ -43,6 +43,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-scheduler-factor", type=float, default=0.5)
     parser.add_argument("--min-learning-rate", type=float, default=1.0e-5)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
+    parser.add_argument("--entropy-regularization-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--publishable-entropy-target-fraction",
+        type=float,
+        default=0.20,
+    )
+    parser.add_argument(
+        "--ambiguous-entropy-target-fraction",
+        type=float,
+        default=0.45,
+    )
+    parser.add_argument(
+        "--support-expansion-entropy-target-fraction",
+        type=float,
+        default=0.70,
+    )
     parser.add_argument("--head-epochs", type=int, default=40)
     parser.add_argument("--head-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--reliability-threshold", type=float, default=0.65)
@@ -81,6 +97,16 @@ def main() -> int:
             lr_scheduler_factor=float(args.lr_scheduler_factor),
             min_learning_rate=float(args.min_learning_rate),
             gradient_clip_norm=float(args.gradient_clip_norm),
+            entropy_regularization_weight=float(args.entropy_regularization_weight),
+            publishable_entropy_target_fraction=float(
+                args.publishable_entropy_target_fraction
+            ),
+            ambiguous_entropy_target_fraction=float(
+                args.ambiguous_entropy_target_fraction
+            ),
+            support_expansion_entropy_target_fraction=float(
+                args.support_expansion_entropy_target_fraction
+            ),
             head_epochs=int(args.head_epochs),
             head_learning_rate=float(args.head_learning_rate),
             reliability_threshold=float(args.reliability_threshold),

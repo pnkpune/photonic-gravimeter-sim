@@ -369,8 +369,10 @@ class RealOceanCorpusSpec:
     route_variant_min_separation_m: float = 1_000.0
     initial_offset_std_m: float = 90.0
     offset_random_walk_std_m: float = 6.0
+    centered_clamp_fraction_of_nominal_half_span: float = 0.6
     edge_bias_min_fraction_of_nominal_half_span: float = 0.8
     edge_bias_max_fraction_of_nominal_half_span: float = 1.25
+    support_expansion_truth_fraction_threshold: float = 0.8
     use_expanded_grid_for_edge_biased_realizations: bool = True
     random_seed: int = 42
     reference_surface_height_m: float = 0.0
@@ -389,6 +391,7 @@ class RealOceanCorpus:
     labels: NDArray[np.int64]
     truth_offsets_ned_m: FloatArray
     publishability_labels: NDArray[np.bool_]
+    support_expansion_labels: NDArray[np.bool_]
     covariance_targets: FloatArray
     region_names: tuple[str, ...]
     region_index: NDArray[np.int64]
@@ -422,6 +425,10 @@ class RealOceanCorpus:
             labels=np.asarray(self.labels, dtype=np.int64),
             truth_offsets_ned_m=np.asarray(self.truth_offsets_ned_m, dtype=np.float64),
             publishability_labels=np.asarray(self.publishability_labels, dtype=bool),
+            support_expansion_labels=np.asarray(
+                self.support_expansion_labels,
+                dtype=bool,
+            ),
             covariance_targets=np.asarray(self.covariance_targets, dtype=np.float64),
             region_names=np.asarray(self.region_names, dtype=object),
             region_index=np.asarray(self.region_index, dtype=np.int64),
@@ -433,6 +440,11 @@ class RealOceanCorpus:
     def from_npz(cls, path: str | Path) -> "RealOceanCorpus":
         p = Path(path).expanduser().resolve()
         with np.load(p, allow_pickle=True) as data:
+            support_labels = (
+                np.asarray(data["support_expansion_labels"], dtype=bool)
+                if "support_expansion_labels" in data
+                else np.zeros(np.asarray(data["labels"]).shape, dtype=bool)
+            )
             return cls(
                 spec=RealOceanCorpusSpec(**json.loads(str(data["spec_json"].item()))),
                 patch_tensors=np.asarray(data["patch_tensors"], dtype=np.float64),
@@ -462,6 +474,7 @@ class RealOceanCorpus:
                     data["publishability_labels"],
                     dtype=bool,
                 ),
+                support_expansion_labels=support_labels,
                 covariance_targets=np.asarray(
                     data["covariance_targets"],
                     dtype=np.float64,
@@ -515,6 +528,7 @@ class RealOceanCorpus:
             labels=self.labels[keep],
             truth_offsets_ned_m=self.truth_offsets_ned_m[keep],
             publishability_labels=self.publishability_labels[keep],
+            support_expansion_labels=self.support_expansion_labels[keep],
             covariance_targets=self.covariance_targets[keep],
             region_names=unique_regions,
             region_index=normalized_region_index,
@@ -869,6 +883,10 @@ def _sample_offset_series_ned(
     rng: np.random.Generator,
     edge_biased: bool,
 ) -> FloatArray:
+    nominal_half_span_m = np.asarray(
+        sequence_spec.grid_half_span_m,
+        dtype=np.float64,
+    ).reshape(2)
     walk = rng.normal(
         0.0,
         float(spec.offset_random_walk_std_m),
@@ -880,12 +898,13 @@ def _sample_offset_series_ned(
             float(spec.initial_offset_std_m),
             size=2,
         ).astype(np.float64)
-        return initial_offset_ned[None, :] + np.cumsum(walk, axis=0)
+        series = initial_offset_ned[None, :] + np.cumsum(walk, axis=0)
+        clamp_fraction = float(spec.centered_clamp_fraction_of_nominal_half_span)
+        if clamp_fraction > 0.0:
+            clamp = clamp_fraction * nominal_half_span_m
+            series = np.clip(series, -clamp[None, :], clamp[None, :])
+        return series
 
-    nominal_half_span_m = np.asarray(
-        sequence_spec.grid_half_span_m,
-        dtype=np.float64,
-    ).reshape(2)
     min_frac = float(spec.edge_bias_min_fraction_of_nominal_half_span)
     max_frac = float(spec.edge_bias_max_fraction_of_nominal_half_span)
     if min_frac <= 0.0 or max_frac < min_frac:
@@ -939,6 +958,7 @@ def build_real_ocean_corpus(
     labels: list[int] = []
     truth_offsets: list[FloatArray] = []
     publishability_labels: list[bool] = []
+    support_expansion_labels: list[bool] = []
     covariance_targets: list[float] = []
     region_names: list[str] = []
     region_index: list[int] = []
@@ -1102,6 +1122,14 @@ def build_real_ocean_corpus(
                     label = int(np.argmin(np.sum(deltas**2, axis=1)))
                     horizontal_error = float(np.linalg.norm(deltas[label]))
                     nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
+                    truth_support_fraction = float(
+                        max(
+                            abs(float(truth_offset[0]))
+                            / max(float(sequence_spec.grid_half_span_m[0]), 1.0e-9),
+                            abs(float(truth_offset[1]))
+                            / max(float(sequence_spec.grid_half_span_m[1]), 1.0e-9),
+                        )
+                    )
                     candidate_matrix = _candidate_feature_matrix(
                         pack,
                         candidate_lat_rad=obs.candidate_lat_rad,
@@ -1135,6 +1163,12 @@ def build_real_ocean_corpus(
                             <= max(0.5 * np.mean(sequence_spec.grid_spacing_m), 20.0)
                         )
                     )
+                    support_expansion_labels.append(
+                        bool(
+                            truth_support_fraction
+                            >= float(spec.support_expansion_truth_fraction_threshold)
+                        )
+                    )
                     covariance_targets.append(
                         float(max(horizontal_error**2 / max(nominal_cov, 1.0e-9), 0.25))
                     )
@@ -1165,6 +1199,10 @@ def build_real_ocean_corpus(
         labels=np.asarray(labels, dtype=np.int64),
         truth_offsets_ned_m=np.asarray(truth_offsets, dtype=np.float64),
         publishability_labels=np.asarray(publishability_labels, dtype=bool),
+        support_expansion_labels=np.asarray(
+            support_expansion_labels,
+            dtype=bool,
+        ),
         covariance_targets=np.asarray(covariance_targets, dtype=np.float64),
         region_names=unique_regions,
         region_index=normalized_region_index,
@@ -1183,6 +1221,22 @@ def build_real_ocean_corpus(
             ),
             "num_edge_biased_realizations_per_region": int(
                 spec.num_edge_biased_realizations_per_region
+            ),
+            "centered_clamp_fraction_of_nominal_half_span": float(
+                spec.centered_clamp_fraction_of_nominal_half_span
+            ),
+            "support_expansion_truth_fraction_threshold": float(
+                spec.support_expansion_truth_fraction_threshold
+            ),
+            "gravity_meas_std_mps2": float(sequence_spec.gravity_meas_std_mps2),
+            "ambiguity_support_threshold_peak_fraction": float(
+                sequence_spec.ambiguity_support_threshold_peak_fraction
+            ),
+            "ambiguity_edge_mass_fraction": float(
+                sequence_spec.ambiguity_edge_mass_fraction
+            ),
+            "ambiguity_support_radius_fraction": float(
+                sequence_spec.ambiguity_support_radius_fraction
             ),
             "route_variant_counts": route_variant_counts,
             "training_grid_mode_counts": training_grid_mode_counts,

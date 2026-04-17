@@ -475,6 +475,7 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
     magnetic_info: list[float] = []
     support_radius_fraction: list[float] = []
     publishability: list[float] = []
+    support_probability: list[float] = []
     covariance_scale: list[float] = []
     localizer_names: dict[str, int] = {}
 
@@ -493,6 +494,8 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
             magnetic_info.append(float(diag.magnetic_information_ratio))
         if getattr(update, "publishability_probability", None) is not None:
             publishability.append(float(update.publishability_probability))
+        if getattr(update, "support_expansion_probability", None) is not None:
+            support_probability.append(float(update.support_expansion_probability))
         if getattr(update, "learned_covariance_scale", None) is not None:
             covariance_scale.append(float(update.learned_covariance_scale))
         localizer_name = str(getattr(update, "localizer_name", "sequence"))
@@ -528,10 +531,22 @@ def _sequence_ambiguity_summary_from_result(result: Any) -> dict[str, Any] | Non
         "median_publishability_probability": (
             None if len(publishability) == 0 else float(np.median(publishability))
         ),
+        "median_support_expansion_probability": (
+            None
+            if len(support_probability) == 0
+            else float(np.median(support_probability))
+        ),
         "publishability_positive_fraction": (
             None
             if len(publishability) == 0
             else float(np.mean(np.asarray(publishability, dtype=np.float64) >= 0.65))
+        ),
+        "support_expansion_positive_fraction": (
+            None
+            if len(support_probability) == 0
+            else float(
+                np.mean(np.asarray(support_probability, dtype=np.float64) >= 0.5)
+            )
         ),
         "median_learned_covariance_scale": (
             None if len(covariance_scale) == 0 else float(np.median(covariance_scale))
@@ -1144,6 +1159,12 @@ def _metrics_row(
         "ambiguity_publishability_positive_fraction": None
         if ambiguity is None or ambiguity["publishability_positive_fraction"] is None
         else float(ambiguity["publishability_positive_fraction"]),
+        "ambiguity_median_support_expansion_probability": None
+        if ambiguity is None or ambiguity["median_support_expansion_probability"] is None
+        else float(ambiguity["median_support_expansion_probability"]),
+        "ambiguity_support_expansion_positive_fraction": None
+        if ambiguity is None or ambiguity["support_expansion_positive_fraction"] is None
+        else float(ambiguity["support_expansion_positive_fraction"]),
         "ambiguity_failure_mode_counts": None
         if ambiguity is None
         else dict(ambiguity["failure_mode_counts"]),

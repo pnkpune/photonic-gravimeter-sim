@@ -943,6 +943,7 @@ class SimulationEstimatorLog:
             "sequence_viterbi_offset_ned_m": np.empty((n, 3), dtype=np.float64),
             "sequence_posterior_mean_offset_ned_m": np.empty((n, 3), dtype=np.float64),
             "sequence_publishability_probability": np.empty(n, dtype=np.float64),
+            "sequence_support_expansion_probability": np.empty(n, dtype=np.float64),
             "sequence_learned_covariance_scale": np.empty(n, dtype=np.float64),
             "sequence_localizer_name": np.empty(n, dtype=object),
             "sequence_posterior_candidate_ess": np.empty(n, dtype=np.float64),
@@ -1029,9 +1030,13 @@ class SimulationEstimatorLog:
                 name="posterior_mean_offset_ned_m",
             )
             publish_prob = getattr(upd, "publishability_probability", np.nan)
+            support_prob = getattr(upd, "support_expansion_probability", np.nan)
             learned_cov_scale = getattr(upd, "learned_covariance_scale", np.nan)
             out["sequence_publishability_probability"][k] = (
                 np.nan if publish_prob is None else float(publish_prob)
+            )
+            out["sequence_support_expansion_probability"][k] = (
+                np.nan if support_prob is None else float(support_prob)
             )
             out["sequence_learned_covariance_scale"][k] = (
                 np.nan if learned_cov_scale is None else float(learned_cov_scale)

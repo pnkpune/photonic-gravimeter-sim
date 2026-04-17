@@ -113,6 +113,10 @@ class TorchDelayedLocalizerTrainingSpec:
     lr_scheduler_factor: float = 0.5
     min_learning_rate: float = 1.0e-5
     gradient_clip_norm: float = 1.0
+    entropy_regularization_weight: float = 0.05
+    publishable_entropy_target_fraction: float = 0.20
+    ambiguous_entropy_target_fraction: float = 0.45
+    support_expansion_entropy_target_fraction: float = 0.70
     head_epochs: int = 40
     head_learning_rate: float = 5.0e-4
     reliability_threshold: float = 0.65
@@ -165,6 +169,12 @@ class _TorchDelayedLocalizerNet(_TorchModuleBase):  # type: ignore[misc]
             nn.Dropout(float(spec.dropout_prob)),
             nn.Linear(int(spec.head_hidden_dim), 1),
         )
+        self.support_head = nn.Sequential(
+            nn.Linear(8, int(spec.head_hidden_dim)),
+            nn.GELU(),
+            nn.Dropout(float(spec.dropout_prob)),
+            nn.Linear(int(spec.head_hidden_dim), 1),
+        )
         self.covariance_head = nn.Sequential(
             nn.Linear(6, int(spec.head_hidden_dim)),
             nn.GELU(),
@@ -180,6 +190,8 @@ class _TorchDelayedLocalizerNet(_TorchModuleBase):  # type: ignore[misc]
         self.register_buffer("candidate_std", _to_torch(candidate_std, device="cpu"))
         self.register_buffer("reliability_mean", torch.zeros(8, dtype=torch.float32))
         self.register_buffer("reliability_std", torch.ones(8, dtype=torch.float32))
+        self.register_buffer("support_mean", torch.zeros(8, dtype=torch.float32))
+        self.register_buffer("support_std", torch.ones(8, dtype=torch.float32))
         self.register_buffer("covariance_mean", torch.zeros(6, dtype=torch.float32))
         self.register_buffer("covariance_std", torch.ones(6, dtype=torch.float32))
 
@@ -234,21 +246,30 @@ class _TorchDelayedLocalizerNet(_TorchModuleBase):  # type: ignore[misc]
         self,
         *,
         reliability_features: FloatArray,
+        support_features: FloatArray,
         covariance_features: FloatArray,
     ) -> None:
         rel_mean = np.mean(reliability_features, axis=0)
         rel_std = _stable_std(reliability_features)
+        support_mean = np.mean(support_features, axis=0)
+        support_std = _stable_std(support_features)
         cov_mean = np.mean(covariance_features, axis=0)
         cov_std = _stable_std(covariance_features)
         with torch.no_grad():
             self.reliability_mean.copy_(_to_torch(rel_mean, device="cpu"))
             self.reliability_std.copy_(_to_torch(rel_std, device="cpu"))
+            self.support_mean.copy_(_to_torch(support_mean, device="cpu"))
+            self.support_std.copy_(_to_torch(support_std, device="cpu"))
             self.covariance_mean.copy_(_to_torch(cov_mean, device="cpu"))
             self.covariance_std.copy_(_to_torch(cov_std, device="cpu"))
 
     def reliability_logits(self, features: Tensor) -> Tensor:
         norm = (features - self.reliability_mean) / self.reliability_std
         return self.reliability_head(norm).squeeze(-1)
+
+    def support_logits(self, features: Tensor) -> Tensor:
+        norm = (features - self.support_mean) / self.support_std
+        return self.support_head(norm).squeeze(-1)
 
     def covariance_log_scale(self, features: Tensor) -> Tensor:
         norm = (features - self.covariance_mean) / self.covariance_std
@@ -321,6 +342,18 @@ class TorchRuntimeStudentModel:
             probs = torch.sigmoid(logits)
         return np.asarray(probs.detach().cpu().numpy(), dtype=np.float64)
 
+    def support_expansion_probability_from_features(
+        self,
+        support_features: FloatArray,
+    ) -> FloatArray:
+        _require_torch()
+        with torch.no_grad():
+            logits = self.net.support_logits(
+                _to_torch(support_features, device=self.device)
+            )
+            probs = torch.sigmoid(logits)
+        return np.asarray(probs.detach().cpu().numpy(), dtype=np.float64)
+
     def save_pt(self, path: str | Path) -> Path:
         _require_torch()
         p = Path(path).expanduser().resolve()
@@ -368,56 +401,137 @@ class TorchRuntimeStudentModel:
                 state_dict["analytic_gain"].detach().cpu().numpy().item()
             ),
         )
-        net.load_state_dict(state_dict)
+        missing, unexpected = net.load_state_dict(state_dict, strict=False)
+        if len(unexpected) > 0:
+            raise RuntimeError(
+                f"Unexpected keys while loading torch localizer: {unexpected}"
+            )
         net.to(device)
         net.eval()
+        metadata = dict(payload.get("metadata", {}))
+        if len(missing) > 0:
+            metadata["missing_state_keys"] = [str(x) for x in missing]
         return cls(
             spec=spec,
             net=net,
             reliability_threshold=float(payload["reliability_threshold"]),
-            metadata=dict(payload.get("metadata", {})),
+            metadata=metadata,
             device=str(device),
         )
 
 
-def _posterior_feature_arrays(
+def _edge_mask_from_offsets(
+    offsets_ned_m: FloatArray,
+) -> NDArray[np.bool_]:
+    offsets = np.asarray(offsets_ned_m, dtype=np.float64)
+    north = offsets[:, 0]
+    east = offsets[:, 1]
+    north_min = float(np.min(north))
+    north_max = float(np.max(north))
+    east_min = float(np.min(east))
+    east_max = float(np.max(east))
+    return np.asarray(
+        np.isclose(north, north_min)
+        | np.isclose(north, north_max)
+        | np.isclose(east, east_min)
+        | np.isclose(east, east_max),
+        dtype=bool,
+    )
+
+
+def _runtime_like_head_feature_arrays(
     corpus: RealOceanCorpus,
     posterior: FloatArray,
-    scores: FloatArray,
-) -> tuple[FloatArray, FloatArray]:
-    peak = np.max(posterior, axis=1)
-    entropy = -np.sum(posterior * np.log(np.maximum(posterior, 1.0e-300)), axis=1)
-    expected_offsets = np.sum(
-        posterior[:, :, None] * corpus.candidate_offsets_ned_m[..., :2],
-        axis=1,
+    query_summaries: FloatArray,
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    post = np.asarray(posterior, dtype=np.float64)
+    query_summary = np.asarray(query_summaries, dtype=np.float64)
+    peak = np.max(post, axis=1)
+    entropy = -np.sum(post * np.log(np.maximum(post, 1.0e-300)), axis=1)
+    ess_fraction = 1.0 / np.maximum(np.sum(post**2, axis=1), 1.0e-300)
+    ess_fraction = ess_fraction / np.maximum(float(post.shape[1]), 1.0)
+    gravity_meas_std = float(corpus.metadata.get("gravity_meas_std_mps2", 1.0e-5))
+    support_threshold_peak_fraction = float(
+        corpus.metadata.get("ambiguity_support_threshold_peak_fraction", 0.25)
     )
-    horizontal_error = np.linalg.norm(
-        expected_offsets - corpus.truth_offsets_ned_m[:, :2],
-        axis=1,
-    )
+
+    predicted_std = np.empty(corpus.num_examples, dtype=np.float64)
+    edge_mass = np.empty(corpus.num_examples, dtype=np.float64)
+    support_radius_fraction = np.empty(corpus.num_examples, dtype=np.float64)
+    gravity_info_ratio = np.empty(corpus.num_examples, dtype=np.float64)
+
+    for idx in range(corpus.num_examples):
+        w = np.asarray(post[idx], dtype=np.float64)
+        offsets = np.asarray(corpus.candidate_offsets_ned_m[idx, :, :2], dtype=np.float64)
+        gravity_values = np.asarray(
+            corpus.candidate_features[idx, :, 0],
+            dtype=np.float64,
+        )
+        edge_mask = _edge_mask_from_offsets(offsets)
+        edge_mass[idx] = float(np.sum(w[edge_mask]))
+
+        support_threshold = float(np.max(w)) * support_threshold_peak_fraction
+        support_mask = np.asarray(w >= support_threshold, dtype=bool)
+        if not np.any(support_mask):
+            support_mask[int(np.argmax(w))] = True
+        support_offsets = offsets[support_mask]
+        half_span_n = max(float(np.max(np.abs(offsets[:, 0]))), 1.0e-9)
+        half_span_e = max(float(np.max(np.abs(offsets[:, 1]))), 1.0e-9)
+        support_radius_fraction[idx] = float(
+            max(
+                float(np.max(np.abs(support_offsets[:, 0]))) / half_span_n,
+                float(np.max(np.abs(support_offsets[:, 1]))) / half_span_e,
+            )
+        )
+
+        valid_g = np.isfinite(gravity_values)
+        if np.any(valid_g):
+            valid_w = w[valid_g]
+            valid_w = valid_w / max(float(np.sum(valid_w)), 1.0e-12)
+            valid_g_values = gravity_values[valid_g]
+            g_mean = float(np.sum(valid_w * valid_g_values))
+            predicted_std[idx] = float(
+                np.sqrt(
+                    max(
+                        float(np.sum(valid_w * (valid_g_values - g_mean) ** 2)),
+                        0.0,
+                    )
+                )
+            )
+            gravity_spread = (
+                float(np.std(valid_g_values))
+                if valid_g_values.size > 1
+                else 0.0
+            )
+            gravity_info_ratio[idx] = gravity_spread / max(gravity_meas_std, 1.0e-12)
+        else:
+            predicted_std[idx] = 0.0
+            gravity_info_ratio[idx] = 0.0
+
     reliability_features = np.column_stack(
         [
             peak,
             entropy,
-            horizontal_error,
-            np.mean(np.abs(corpus.query_windows[:, -1, :]), axis=1),
-            np.std(corpus.query_windows[:, -1, :], axis=1),
-            np.max(np.abs(corpus.truth_offsets_ned_m[:, :2]), axis=1),
-            corpus.covariance_targets,
-            np.mean(np.abs(corpus.candidate_offsets_ned_m[..., :2]), axis=(1, 2)),
+            predicted_std,
+            edge_mass,
+            support_radius_fraction,
+            ess_fraction,
+            gravity_info_ratio,
+            np.nanmean(np.abs(query_summary), axis=1),
         ]
     ).astype(np.float64)
     covariance_features = np.column_stack(
         [
             peak,
             entropy,
-            horizontal_error,
-            corpus.covariance_targets,
-            np.mean(np.abs(corpus.truth_offsets_ned_m[:, :2]), axis=1),
-            np.std(scores, axis=1),
+            edge_mass,
+            ess_fraction,
+            gravity_info_ratio,
+            predicted_std,
         ]
     ).astype(np.float64)
-    return reliability_features, covariance_features
+    support_features = reliability_features.copy()
+    return reliability_features, covariance_features, support_features
 
 
 def _stratified_validation_indices(
@@ -478,6 +592,12 @@ def _candidate_loss_and_offsets(
     truth_offsets: Tensor,
     offset_loss_weight: float,
     label_smoothing: float,
+    publishability_labels: Tensor,
+    support_expansion_labels: Tensor,
+    entropy_regularization_weight: float,
+    publishable_entropy_target_fraction: float,
+    ambiguous_entropy_target_fraction: float,
+    support_expansion_entropy_target_fraction: float,
 ) -> tuple[Tensor, Tensor, Tensor]:
     logits = net.score_candidates(
         query_windows=query_windows,
@@ -496,7 +616,34 @@ def _candidate_loss_and_offsets(
         label_smoothing=float(label_smoothing),
     )
     offset_loss = F.smooth_l1_loss(expected_offsets, truth_offsets[:, :2])
-    loss = ce_loss + float(offset_loss_weight) * offset_loss
+    entropy = -torch.sum(
+        posterior * torch.log(torch.clamp(posterior, min=1.0e-12)),
+        dim=1,
+    )
+    normalized_entropy = entropy / max(np.log(max(int(posterior.shape[1]), 2)), 1.0e-12)
+    entropy_target = torch.full_like(
+        normalized_entropy,
+        float(ambiguous_entropy_target_fraction),
+    )
+    entropy_target = torch.where(
+        publishability_labels > 0.5,
+        torch.full_like(entropy_target, float(publishable_entropy_target_fraction)),
+        entropy_target,
+    )
+    entropy_target = torch.where(
+        support_expansion_labels > 0.5,
+        torch.full_like(
+            entropy_target,
+            float(support_expansion_entropy_target_fraction),
+        ),
+        entropy_target,
+    )
+    entropy_loss = F.smooth_l1_loss(normalized_entropy, entropy_target)
+    loss = (
+        ce_loss
+        + float(offset_loss_weight) * offset_loss
+        + float(entropy_regularization_weight) * entropy_loss
+    )
     return loss, logits, expected_offsets
 
 
@@ -546,6 +693,14 @@ def train_torch_delayed_localizer(
     analytic = _to_torch(corpus.analytic_log_emission, device=device)
     labels = torch.as_tensor(corpus.labels, dtype=torch.long, device=device)
     truth_offsets = _to_torch(corpus.truth_offsets_ned_m, device=device)
+    publishability_labels = _to_torch(
+        corpus.publishability_labels.astype(np.float64),
+        device=device,
+    )
+    support_expansion_labels = _to_torch(
+        corpus.support_expansion_labels.astype(np.float64),
+        device=device,
+    )
     train_indices_np, val_indices_np = _stratified_validation_indices(
         corpus,
         validation_fraction=float(train_spec.validation_fraction),
@@ -595,6 +750,20 @@ def train_torch_delayed_localizer(
                 truth_offsets=truth_offsets[batch],
                 offset_loss_weight=float(train_spec.offset_loss_weight),
                 label_smoothing=float(train_spec.label_smoothing),
+                publishability_labels=publishability_labels[batch],
+                support_expansion_labels=support_expansion_labels[batch],
+                entropy_regularization_weight=float(
+                    train_spec.entropy_regularization_weight
+                ),
+                publishable_entropy_target_fraction=float(
+                    train_spec.publishable_entropy_target_fraction
+                ),
+                ambiguous_entropy_target_fraction=float(
+                    train_spec.ambiguous_entropy_target_fraction
+                ),
+                support_expansion_entropy_target_fraction=float(
+                    train_spec.support_expansion_entropy_target_fraction
+                ),
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -616,6 +785,20 @@ def train_torch_delayed_localizer(
                 truth_offsets=truth_offsets[train_indices],
                 offset_loss_weight=float(train_spec.offset_loss_weight),
                 label_smoothing=float(train_spec.label_smoothing),
+                publishability_labels=publishability_labels[train_indices],
+                support_expansion_labels=support_expansion_labels[train_indices],
+                entropy_regularization_weight=float(
+                    train_spec.entropy_regularization_weight
+                ),
+                publishable_entropy_target_fraction=float(
+                    train_spec.publishable_entropy_target_fraction
+                ),
+                ambiguous_entropy_target_fraction=float(
+                    train_spec.ambiguous_entropy_target_fraction
+                ),
+                support_expansion_entropy_target_fraction=float(
+                    train_spec.support_expansion_entropy_target_fraction
+                ),
             )
             if val_indices.numel() > 0:
                 val_loss, _, _ = _candidate_loss_and_offsets(
@@ -628,6 +811,20 @@ def train_torch_delayed_localizer(
                     truth_offsets=truth_offsets[val_indices],
                     offset_loss_weight=float(train_spec.offset_loss_weight),
                     label_smoothing=float(train_spec.label_smoothing),
+                    publishability_labels=publishability_labels[val_indices],
+                    support_expansion_labels=support_expansion_labels[val_indices],
+                    entropy_regularization_weight=float(
+                        train_spec.entropy_regularization_weight
+                    ),
+                    publishable_entropy_target_fraction=float(
+                        train_spec.publishable_entropy_target_fraction
+                    ),
+                    ambiguous_entropy_target_fraction=float(
+                        train_spec.ambiguous_entropy_target_fraction
+                    ),
+                    support_expansion_entropy_target_fraction=float(
+                        train_spec.support_expansion_entropy_target_fraction
+                    ),
                 )
                 monitor_metric = float(val_loss.detach().cpu().item())
             else:
@@ -662,23 +859,35 @@ def train_torch_delayed_localizer(
         )
     scores_np = np.asarray(train_scores.detach().cpu().numpy(), dtype=np.float64)
     posterior_np = _softmax_rows(scores_np)
-    reliability_features, covariance_features = _posterior_feature_arrays(
+    query_summary_np = summarize_query_windows(corpus.query_windows)
+    reliability_features, covariance_features, support_features = _runtime_like_head_feature_arrays(
         corpus,
         posterior_np,
-        scores_np,
+        query_summary_np,
     )
     net.set_head_feature_stats(
         reliability_features=reliability_features,
+        support_features=support_features,
         covariance_features=covariance_features,
     )
 
     rel_x = _to_torch(reliability_features, device=device)
     rel_y = _to_torch(corpus.publishability_labels.astype(np.float64), device=device)
+    support_x = _to_torch(support_features, device=device)
+    support_y = _to_torch(
+        corpus.support_expansion_labels.astype(np.float64),
+        device=device,
+    )
     cov_x = _to_torch(covariance_features, device=device)
     cov_y = _to_torch(np.log(np.maximum(corpus.covariance_targets, 1.0e-6)), device=device)
 
     rel_optimizer = torch.optim.AdamW(
         net.reliability_head.parameters(),
+        lr=float(train_spec.head_learning_rate),
+        weight_decay=float(train_spec.weight_decay),
+    )
+    support_optimizer = torch.optim.AdamW(
+        net.support_head.parameters(),
         lr=float(train_spec.head_learning_rate),
         weight_decay=float(train_spec.weight_decay),
     )
@@ -693,6 +902,12 @@ def train_torch_delayed_localizer(
         rel_optimizer.zero_grad(set_to_none=True)
         rel_loss.backward()
         rel_optimizer.step()
+
+        support_logits = net.support_logits(support_x)
+        support_loss = F.binary_cross_entropy_with_logits(support_logits, support_y)
+        support_optimizer.zero_grad(set_to_none=True)
+        support_loss.backward()
+        support_optimizer.step()
 
         cov_pred = net.covariance_log_scale(cov_x)
         cov_loss = F.mse_loss(cov_pred, cov_y)
@@ -714,6 +929,9 @@ def train_torch_delayed_localizer(
             "validation_examples": int(val_indices.numel()),
             "best_epoch": int(best_epoch),
             "best_monitor_metric": float(best_metric),
+            "support_expansion_positive_fraction": float(
+                np.mean(corpus.support_expansion_labels.astype(np.float64))
+            ),
         },
         device=device,
     )

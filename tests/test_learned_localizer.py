@@ -279,6 +279,13 @@ def test_real_ocean_corpus_edge_biased_realizations_use_expanded_grid() -> None:
     ]
     assert int(realization_counts["centered"]) == 1
     assert int(realization_counts["edge_biased"]) == 1
+    assert corpus.support_expansion_labels.shape[0] == corpus.num_examples
+    assert bool(np.any(corpus.support_expansion_labels))
+    assert not bool(np.all(corpus.support_expansion_labels))
+    assert float(np.mean(corpus.support_expansion_labels.astype(np.float64))) < 1.0
+    assert (
+        float(corpus.metadata["centered_clamp_fraction_of_nominal_half_span"]) > 0.0
+    )
     assert float(np.max(np.abs(corpus.candidate_offsets_ned_m))) > float(
         max(sequence_spec.grid_half_span_m)
     )

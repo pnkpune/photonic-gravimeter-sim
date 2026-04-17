@@ -314,6 +314,15 @@ class RuntimeStudentModel:
         raw = norm @ self.reliability_weights + float(self.reliability_bias)
         return self._sigmoid(raw).astype(np.float64)
 
+    def support_expansion_probability_from_features(
+        self,
+        support_features: FloatArray,
+    ) -> FloatArray:
+        feats = np.asarray(support_features, dtype=np.float64)
+        if feats.ndim == 1:
+            return np.asarray(0.0, dtype=np.float64)
+        return np.zeros(feats.shape[0], dtype=np.float64)
+
     def save_npz(self, path: str | Path) -> Path:
         p = Path(path).expanduser().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)

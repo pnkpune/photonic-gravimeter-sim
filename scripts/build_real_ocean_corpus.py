@@ -140,6 +140,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum fraction of the nominal grid half-span used for edge-biased priors.",
     )
     parser.add_argument(
+        "--centered-clamp-fraction-of-nominal-half-span",
+        type=float,
+        default=0.6,
+        help=(
+            "Clamp centered drift realizations to this fraction of the nominal "
+            "grid half-span so the corpus contains genuine in-support cases."
+        ),
+    )
+    parser.add_argument(
         "--disable-expanded-grid-for-edge-biased-realizations",
         action="store_true",
         help="Keep edge-biased examples on the nominal grid instead of using expanded support.",
@@ -176,6 +185,9 @@ def main() -> int:
             route_variant_max_attempts=int(args.route_variant_max_attempts),
             route_variant_margin_m=float(args.route_variant_margin_m),
             route_variant_min_separation_m=float(args.route_variant_min_separation_m),
+            centered_clamp_fraction_of_nominal_half_span=float(
+                args.centered_clamp_fraction_of_nominal_half_span
+            ),
             edge_bias_min_fraction_of_nominal_half_span=float(
                 args.edge_bias_min_fraction_of_nominal_half_span
             ),
@@ -201,6 +213,9 @@ def main() -> int:
         ),
         "realization_mode_counts_by_region": dict(
             corpus.metadata.get("realization_mode_counts_by_region", {})
+        ),
+        "support_expansion_positive_fraction": float(
+            corpus.support_expansion_labels.mean()
         ),
         "query_window_shape": list(corpus.query_windows.shape),
         "candidate_shape": list(corpus.candidate_features.shape),

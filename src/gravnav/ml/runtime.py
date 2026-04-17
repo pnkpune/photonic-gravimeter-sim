@@ -294,11 +294,22 @@ class NeuralEarthSignatureLocalizer:
         update: SequenceMatchUpdateResult,
     ) -> SequenceMatchUpdateResult:
         reliability_features = self._reliability_features_from_update(update)
-        publish_prob = float(
+        trust_prob = float(
             self.model.publishability_probability_from_features(reliability_features)
+        )
+        support_prob = 0.0
+        if hasattr(self.model, "support_expansion_probability_from_features"):
+            support_prob = float(
+                self.model.support_expansion_probability_from_features(
+                    reliability_features
+                )
+            )
+        publish_prob = float(
+            np.clip(trust_prob * (1.0 - support_prob), 0.0, 1.0)
         )
         covariance_features = self._covariance_features_from_update(update)
         cov_scale = float(self.model.covariance_scale_from_features(covariance_features))
+        cov_scale *= 1.0 + float(support_prob)
         cov_scale = float(
             np.clip(
                 cov_scale,
@@ -307,6 +318,7 @@ class NeuralEarthSignatureLocalizer:
             )
         )
         update.publishability_probability = publish_prob
+        update.support_expansion_probability = float(support_prob)
         update.localizer_name = str(self.spec.name)
         update.learned_covariance_scale = cov_scale
         update.estimate.covariance_ned_m2 = (

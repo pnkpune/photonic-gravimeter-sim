@@ -286,6 +286,112 @@ def train_delayed_localizer(
     return student
 
 
+def _edge_mask_from_offsets(
+    offsets_ned_m: FloatArray,
+) -> NDArray[np.bool_]:
+    offsets = np.asarray(offsets_ned_m, dtype=np.float64)
+    north = offsets[:, 0]
+    east = offsets[:, 1]
+    return np.asarray(
+        np.isclose(north, np.min(north))
+        | np.isclose(north, np.max(north))
+        | np.isclose(east, np.min(east))
+        | np.isclose(east, np.max(east)),
+        dtype=bool,
+    )
+
+
+def _runtime_like_head_features(
+    corpus: RealOceanCorpus,
+    posterior: FloatArray,
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    post = np.asarray(posterior, dtype=np.float64)
+    query_summary = summarize_query_windows(corpus.query_windows)
+    peak = np.max(post, axis=1)
+    entropy = -np.sum(post * np.log(np.maximum(post, 1.0e-300)), axis=1)
+    ess_fraction = 1.0 / np.maximum(np.sum(post**2, axis=1), 1.0e-300)
+    ess_fraction = ess_fraction / np.maximum(float(post.shape[1]), 1.0)
+    gravity_meas_std = float(corpus.metadata.get("gravity_meas_std_mps2", 1.0e-5))
+    support_threshold_peak_fraction = float(
+        corpus.metadata.get("ambiguity_support_threshold_peak_fraction", 0.25)
+    )
+
+    predicted_std = np.empty(corpus.num_examples, dtype=np.float64)
+    edge_mass = np.empty(corpus.num_examples, dtype=np.float64)
+    support_radius_fraction = np.empty(corpus.num_examples, dtype=np.float64)
+    gravity_info_ratio = np.empty(corpus.num_examples, dtype=np.float64)
+
+    for idx in range(corpus.num_examples):
+        w = np.asarray(post[idx], dtype=np.float64)
+        offsets = np.asarray(corpus.candidate_offsets_ned_m[idx, :, :2], dtype=np.float64)
+        gravity_values = np.asarray(corpus.candidate_features[idx, :, 0], dtype=np.float64)
+        edge_mask = _edge_mask_from_offsets(offsets)
+        edge_mass[idx] = float(np.sum(w[edge_mask]))
+
+        support_threshold = float(np.max(w)) * support_threshold_peak_fraction
+        support_mask = np.asarray(w >= support_threshold, dtype=bool)
+        if not np.any(support_mask):
+            support_mask[int(np.argmax(w))] = True
+        support_offsets = offsets[support_mask]
+        half_span_n = max(float(np.max(np.abs(offsets[:, 0]))), 1.0e-9)
+        half_span_e = max(float(np.max(np.abs(offsets[:, 1]))), 1.0e-9)
+        support_radius_fraction[idx] = float(
+            max(
+                float(np.max(np.abs(support_offsets[:, 0]))) / half_span_n,
+                float(np.max(np.abs(support_offsets[:, 1]))) / half_span_e,
+            )
+        )
+
+        valid_g = np.isfinite(gravity_values)
+        if np.any(valid_g):
+            valid_w = w[valid_g]
+            valid_w = valid_w / max(float(np.sum(valid_w)), 1.0e-12)
+            valid_g_values = gravity_values[valid_g]
+            g_mean = float(np.sum(valid_w * valid_g_values))
+            predicted_std[idx] = float(
+                np.sqrt(
+                    max(
+                        float(np.sum(valid_w * (valid_g_values - g_mean) ** 2)),
+                        0.0,
+                    )
+                )
+            )
+            gravity_spread = (
+                float(np.std(valid_g_values))
+                if valid_g_values.size > 1
+                else 0.0
+            )
+            gravity_info_ratio[idx] = gravity_spread / max(gravity_meas_std, 1.0e-12)
+        else:
+            predicted_std[idx] = 0.0
+            gravity_info_ratio[idx] = 0.0
+
+    reliability_features = np.column_stack(
+        [
+            peak,
+            entropy,
+            predicted_std,
+            edge_mass,
+            support_radius_fraction,
+            ess_fraction,
+            gravity_info_ratio,
+            np.nanmean(np.abs(query_summary), axis=1),
+        ]
+    ).astype(np.float64)
+    covariance_features = np.column_stack(
+        [
+            peak,
+            entropy,
+            edge_mass,
+            ess_fraction,
+            gravity_info_ratio,
+            predicted_std,
+        ]
+    ).astype(np.float64)
+    support_features = reliability_features.copy()
+    return reliability_features, covariance_features, support_features
+
+
 def evaluate_runtime_student(
     corpus: RealOceanCorpus,
     student: Any,
@@ -307,20 +413,17 @@ def evaluate_runtime_student(
         expected_offsets - corpus.truth_offsets_ned_m[:, :2],
         axis=1,
     )
-    reliability_features = np.column_stack(
-        [
-            np.max(posterior, axis=1),
-            -np.sum(posterior * np.log(np.maximum(posterior, 1.0e-300)), axis=1),
-            horizontal_error,
-            np.mean(np.abs(corpus.query_windows[:, -1, :]), axis=1),
-            np.std(corpus.query_windows[:, -1, :], axis=1),
-            np.max(np.abs(corpus.truth_offsets_ned_m[:, :2]), axis=1),
-            corpus.covariance_targets,
-            np.mean(np.abs(corpus.candidate_offsets_ned_m[..., :2]), axis=(1, 2)),
-        ]
-    ).astype(np.float64)
+    reliability_features, _, support_features = _runtime_like_head_features(
+        corpus,
+        posterior,
+    )
     publish_prob = student.publishability_probability_from_features(
         reliability_features
+    )
+    support_prob = (
+        student.support_expansion_probability_from_features(support_features)
+        if hasattr(student, "support_expansion_probability_from_features")
+        else np.zeros(corpus.num_examples, dtype=np.float64)
     )
     return {
         "top1_accuracy": top1,
@@ -330,6 +433,10 @@ def evaluate_runtime_student(
         "mean_publishability_probability": float(np.mean(publish_prob)),
         "publishability_positive_fraction": float(
             np.mean(publish_prob >= student.reliability_threshold)
+        ),
+        "mean_support_expansion_probability": float(np.mean(support_prob)),
+        "support_expansion_positive_fraction": float(
+            np.mean(np.asarray(support_prob, dtype=np.float64) >= 0.5)
         ),
     }
 
