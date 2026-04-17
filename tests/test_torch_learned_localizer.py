@@ -64,10 +64,17 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
         spec=TorchDelayedLocalizerTrainingSpec(
             epochs=4,
             batch_size=4,
+            validation_fraction=0.34,
+            min_epochs=2,
+            early_stopping_patience=2,
+            label_smoothing=0.05,
             head_epochs=2,
             device="cpu",
         ),
     )
+    assert int(model.metadata["train_examples"]) > 0
+    assert int(model.metadata["validation_examples"]) > 0
+    assert int(model.metadata["best_epoch"]) >= 0
     model_path = model.save_pt(tmp_path / "runtime_torch_bundle.pt")
     loaded = load_runtime_localizer_model(model_path)
 
