@@ -91,6 +91,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "How many dead-reckoning drift realizations to generate per tracked region."
         ),
     )
+    parser.add_argument(
+        "--num-route-variants-per-region",
+        type=int,
+        default=1,
+        help=(
+            "How many accepted translated route variants to generate per tracked region, "
+            "including the original tracked route."
+        ),
+    )
+    parser.add_argument(
+        "--route-variant-max-attempts",
+        type=int,
+        default=24,
+        help="Maximum number of translated-route proposals to test per region.",
+    )
+    parser.add_argument(
+        "--route-variant-margin-m",
+        type=float,
+        default=250.0,
+        help="Safety margin from region support bounds when translating routes.",
+    )
+    parser.add_argument(
+        "--route-variant-min-separation-m",
+        type=float,
+        default=1000.0,
+        help="Minimum separation between accepted translated route starts.",
+    )
     parser.add_argument("--patch-size", type=int, default=9)
     parser.add_argument("--patch-spacing-m", type=float, default=40.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -116,6 +143,10 @@ def main() -> int:
             num_offset_realizations_per_region=int(
                 args.num_offset_realizations_per_region
             ),
+            num_route_variants_per_region=int(args.num_route_variants_per_region),
+            route_variant_max_attempts=int(args.route_variant_max_attempts),
+            route_variant_margin_m=float(args.route_variant_margin_m),
+            route_variant_min_separation_m=float(args.route_variant_min_separation_m),
             random_seed=int(args.seed),
         ),
     )
@@ -126,6 +157,7 @@ def main() -> int:
         "num_regions": int(len(corpus.region_names)),
         "region_names": list(corpus.region_names),
         "region_example_counts": corpus.region_example_counts(),
+        "route_variant_counts": dict(corpus.metadata.get("route_variant_counts", {})),
         "query_window_shape": list(corpus.query_windows.shape),
         "candidate_shape": list(corpus.candidate_features.shape),
         "patch_tensor_shape": list(corpus.patch_tensors.shape),

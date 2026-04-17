@@ -229,3 +229,27 @@ def test_real_ocean_corpus_region_subset_and_cross_validation() -> None:
         "helgeland_offshore",
     }
     assert cv["aggregate"]["median_horizontal_error_m"] >= 0.0
+
+
+def test_real_ocean_corpus_route_variants_expand_real_geography() -> None:
+    corpus = build_real_ocean_corpus(
+        [DEFAULT_PACK],
+        sequence_spec=_small_sequence_spec(),
+        corpus_spec=RealOceanCorpusSpec(
+            window_size=5,
+            patch_size=5,
+            patch_spacing_m=60.0,
+            max_examples_per_region=2,
+            num_offset_realizations_per_region=1,
+            num_route_variants_per_region=2,
+            route_variant_max_attempts=32,
+            route_variant_margin_m=150.0,
+            route_variant_min_separation_m=500.0,
+            random_seed=19,
+        ),
+    )
+    assert corpus.num_examples >= 4
+    assert corpus.region_names == ("norwegian_margin_maritime_demo",)
+    assert (
+        int(corpus.metadata["route_variant_counts"]["norwegian_margin_maritime_demo"]) >= 2
+    )

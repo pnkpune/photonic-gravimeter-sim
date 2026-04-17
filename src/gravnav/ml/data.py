@@ -69,6 +69,13 @@ class _PrecomputedRegionSample:
     patch_summary: FloatArray
 
 
+@dataclass(frozen=True)
+class _AcceptedRouteVariant:
+    scenario: ScenarioSpec
+    truth: Any
+    translation_ned_m: FloatArray
+
+
 def _as_float_array(x: ArrayLike) -> FloatArray:
     return np.asarray(x, dtype=np.float64)
 
@@ -213,9 +220,9 @@ def _candidate_feature_matrix(
             dtype=np.float64,
         )
     else:
-        clearance = np.full(candidate_lat_rad.shape, np.nan, dtype=np.float64)
-        bathy_grad = np.full((candidate_lat_rad.size, 2), np.nan, dtype=np.float64)
-        rugosity = np.full(candidate_lat_rad.shape, np.nan, dtype=np.float64)
+        clearance = np.zeros(candidate_lat_rad.shape, dtype=np.float64)
+        bathy_grad = np.zeros((candidate_lat_rad.size, 2), dtype=np.float64)
+        rugosity = np.zeros(candidate_lat_rad.shape, dtype=np.float64)
 
     if pack.magnetic_grid is not None:
         magnetic_total = np.asarray(
@@ -227,8 +234,8 @@ def _candidate_feature_matrix(
             dtype=np.float64,
         )
     else:
-        magnetic_total = np.full(candidate_lat_rad.shape, np.nan, dtype=np.float64)
-        magnetic_grad = np.full((candidate_lat_rad.size, 2), np.nan, dtype=np.float64)
+        magnetic_total = np.zeros(candidate_lat_rad.shape, dtype=np.float64)
+        magnetic_grad = np.zeros((candidate_lat_rad.size, 2), dtype=np.float64)
 
     depth_m = np.maximum(0.0, reference_surface_height_m - candidate_height_m)
     current = _current_vector_from_pack(
@@ -355,6 +362,10 @@ class RealOceanCorpusSpec:
     patch_spacing_m: float = 40.0
     max_examples_per_region: int = 96
     num_offset_realizations_per_region: int = 1
+    num_route_variants_per_region: int = 1
+    route_variant_max_attempts: int = 24
+    route_variant_margin_m: float = 250.0
+    route_variant_min_separation_m: float = 1_000.0
     initial_offset_std_m: float = 90.0
     offset_random_walk_std_m: float = 6.0
     random_seed: int = 42
@@ -552,6 +563,216 @@ def _sample_indices(length: int, count: int, *, window_size: int) -> NDArray[np.
     return np.linspace(start, stop - 1, count, dtype=np.int64)
 
 
+def _pack_supported_bounds_deg(
+    pack: ResolvedRegionalDemoPack,
+) -> tuple[float, float, float, float]:
+    lat_min = float(pack.gravity_map.lat_axis_deg[0])
+    lat_max = float(pack.gravity_map.lat_axis_deg[-1])
+    lon_min = float(pack.gravity_map.lon_axis_deg[0])
+    lon_max = float(pack.gravity_map.lon_axis_deg[-1])
+
+    bounds_deg = [
+        (
+            float(pack.bathymetry_grid.lat_axis_deg[0]),
+            float(pack.bathymetry_grid.lat_axis_deg[-1]),
+            float(pack.bathymetry_grid.lon_axis_deg[0]),
+            float(pack.bathymetry_grid.lon_axis_deg[-1]),
+        )
+    ]
+    if pack.magnetic_grid is not None:
+        bounds_deg.append(
+            (
+                float(pack.magnetic_grid.lat_axis_deg[0]),
+                float(pack.magnetic_grid.lat_axis_deg[-1]),
+                float(pack.magnetic_grid.lon_axis_deg[0]),
+                float(pack.magnetic_grid.lon_axis_deg[-1]),
+            )
+        )
+    if pack.current_manifest is not None:
+        bounds_deg.append(
+            (
+                float(pack.current_manifest.lat_bounds_deg[0]),
+                float(pack.current_manifest.lat_bounds_deg[1]),
+                float(pack.current_manifest.lon_bounds_deg[0]),
+                float(pack.current_manifest.lon_bounds_deg[1]),
+            )
+        )
+
+    for b_lat_min, b_lat_max, b_lon_min, b_lon_max in bounds_deg:
+        lat_min = max(lat_min, float(b_lat_min))
+        lat_max = min(lat_max, float(b_lat_max))
+        lon_min = max(lon_min, float(b_lon_min))
+        lon_max = min(lon_max, float(b_lon_max))
+
+    if lat_min >= lat_max or lon_min >= lon_max:
+        raise ValueError(
+            f"No common support overlap found for demo pack {pack.manifest.region_name!r}."
+        )
+    return lat_min, lat_max, lon_min, lon_max
+
+
+def _trajectory_supported_by_pack(
+    pack: ResolvedRegionalDemoPack,
+    truth: Any,
+) -> bool:
+    lat_rad = np.asarray(truth.lat_rad, dtype=np.float64)
+    lon_rad = np.asarray(truth.lon_rad, dtype=np.float64)
+    lat_deg = np.rad2deg(lat_rad)
+    lon_deg = np.rad2deg(lon_rad)
+
+    if not np.all(pack.gravity_map.contains(lat_rad, lon_rad)):
+        return False
+    if not np.all(pack.bathymetry_grid.contains(lat_deg, lon_deg)):
+        return False
+    if pack.magnetic_grid is not None and not np.all(pack.magnetic_grid.contains(lat_deg, lon_deg)):
+        return False
+    if pack.current_manifest is not None:
+        if np.any(lat_deg < float(pack.current_manifest.lat_bounds_deg[0])):
+            return False
+        if np.any(lat_deg > float(pack.current_manifest.lat_bounds_deg[1])):
+            return False
+        if np.any(lon_deg < float(pack.current_manifest.lon_bounds_deg[0])):
+            return False
+        if np.any(lon_deg > float(pack.current_manifest.lon_bounds_deg[1])):
+            return False
+    return True
+
+
+def _route_translation_limits_ned_m(
+    pack: ResolvedRegionalDemoPack,
+    truth: Any,
+    *,
+    margin_m: float,
+) -> tuple[float, float, float, float]:
+    lat_min_deg, lat_max_deg, lon_min_deg, lon_max_deg = _pack_supported_bounds_deg(pack)
+    lat0 = float(truth.lat_rad[0])
+    lon0 = float(truth.lon_rad[0])
+    h0 = float(truth.height_m[0])
+
+    corners_lat_rad = np.deg2rad(
+        np.asarray([lat_min_deg, lat_min_deg, lat_max_deg, lat_max_deg], dtype=np.float64)
+    )
+    corners_lon_rad = np.deg2rad(
+        np.asarray([lon_min_deg, lon_max_deg, lon_min_deg, lon_max_deg], dtype=np.float64)
+    )
+    corners_height_m = np.full(4, h0, dtype=np.float64)
+    support_offsets = geodetic_offsets_to_local_ned(
+        corners_lat_rad,
+        corners_lon_rad,
+        corners_height_m,
+        lat_ref_rad=lat0,
+        lon_ref_rad=lon0,
+        height_ref_m=h0,
+    )
+    route_offsets = geodetic_offsets_to_local_ned(
+        np.asarray(truth.lat_rad, dtype=np.float64),
+        np.asarray(truth.lon_rad, dtype=np.float64),
+        np.asarray(truth.height_m, dtype=np.float64),
+        lat_ref_rad=lat0,
+        lon_ref_rad=lon0,
+        height_ref_m=h0,
+    )
+
+    north_low = float(np.min(support_offsets[:, 0]) - np.min(route_offsets[:, 0]) + margin_m)
+    north_high = float(np.max(support_offsets[:, 0]) - np.max(route_offsets[:, 0]) - margin_m)
+    east_low = float(np.min(support_offsets[:, 1]) - np.min(route_offsets[:, 1]) + margin_m)
+    east_high = float(np.max(support_offsets[:, 1]) - np.max(route_offsets[:, 1]) - margin_m)
+    return north_low, north_high, east_low, east_high
+
+
+def _translate_scenario_origin(
+    scenario: ScenarioSpec,
+    *,
+    north_m: float,
+    east_m: float,
+    variant_id: int,
+) -> ScenarioSpec:
+    lat_new, lon_new, h_new = apply_ned_offsets_to_geodetic(
+        np.array([scenario.initial_lat_rad], dtype=np.float64),
+        np.array([scenario.initial_lon_rad], dtype=np.float64),
+        np.array([scenario.initial_height_m], dtype=np.float64),
+        np.array([[north_m, east_m, 0.0]], dtype=np.float64),
+    )
+    metadata = dict(scenario.metadata)
+    metadata.update(
+        {
+            "source_scenario_name": scenario.name,
+            "route_variant_id": int(variant_id),
+            "route_translation_ned_m": [float(north_m), float(east_m), 0.0],
+        }
+    )
+    return ScenarioSpec(
+        name=f"{scenario.name}__route_variant_{variant_id}",
+        initial_lat_rad=float(lat_new[0]),
+        initial_lon_rad=float(lon_new[0]),
+        initial_height_m=float(h_new[0]),
+        initial_heading_rad=float(scenario.initial_heading_rad),
+        segments=scenario.segments,
+        default_dt_s=float(scenario.default_dt_s),
+        description=str(scenario.description),
+        metadata=metadata,
+    )
+
+
+def _build_route_variants_for_pack(
+    pack: ResolvedRegionalDemoPack,
+    *,
+    base_scenario: ScenarioSpec,
+    base_truth: Any,
+    spec: RealOceanCorpusSpec,
+    rng: np.random.Generator,
+) -> list[_AcceptedRouteVariant]:
+    variants = [
+        _AcceptedRouteVariant(
+            scenario=base_scenario,
+            truth=base_truth,
+            translation_ned_m=np.zeros(3, dtype=np.float64),
+        )
+    ]
+    target = max(1, int(spec.num_route_variants_per_region))
+    if target <= 1:
+        return variants
+
+    north_low, north_high, east_low, east_high = _route_translation_limits_ned_m(
+        pack,
+        base_truth,
+        margin_m=float(spec.route_variant_margin_m),
+    )
+    if north_low > north_high or east_low > east_high:
+        return variants
+
+    accepted_offsets = [np.zeros(2, dtype=np.float64)]
+    attempts = 0
+    while len(variants) < target and attempts < int(spec.route_variant_max_attempts):
+        attempts += 1
+        north_m = float(rng.uniform(north_low, north_high))
+        east_m = float(rng.uniform(east_low, east_high))
+        candidate_offset = np.array([north_m, east_m], dtype=np.float64)
+        if any(
+            np.linalg.norm(candidate_offset - prev) < float(spec.route_variant_min_separation_m)
+            for prev in accepted_offsets
+        ):
+            continue
+        scenario_variant = _translate_scenario_origin(
+            base_scenario,
+            north_m=north_m,
+            east_m=east_m,
+            variant_id=len(variants),
+        )
+        truth_variant = build_truth_trajectory_from_scenario(scenario_variant)
+        if not _trajectory_supported_by_pack(pack, truth_variant):
+            continue
+        accepted_offsets.append(candidate_offset)
+        variants.append(
+            _AcceptedRouteVariant(
+                scenario=scenario_variant,
+                truth=truth_variant,
+                translation_ned_m=np.array([north_m, east_m, 0.0], dtype=np.float64),
+            )
+        )
+    return variants
+
+
 def _precompute_region_samples(
     *,
     pack: ResolvedRegionalDemoPack,
@@ -598,6 +819,10 @@ def _precompute_region_samples(
         if k < window_size - 1 or k not in sample_index_set:
             continue
 
+        query_window = np.stack(
+            query_features[-window_size:],
+            axis=0,
+        ).astype(np.float64)
         patch = _patch_tensor(
             pack,
             lat_rad=lat_true,
@@ -608,6 +833,10 @@ def _precompute_region_samples(
             patch_offsets_ned_m=patch_offsets,
             tide_corrector=tide_corrector,
         )
+        if not np.all(np.isfinite(query_window)):
+            continue
+        if not np.all(np.isfinite(patch)):
+            continue
         samples.append(
             _PrecomputedRegionSample(
                 index=int(k),
@@ -619,10 +848,7 @@ def _precompute_region_samples(
                 track_unit_ned=track_unit,
                 reference_surface_height_m=reference_surface_height_m,
                 query_feature=np.asarray(query_feature, dtype=np.float64),
-                query_window=np.stack(
-                    query_features[-window_size:],
-                    axis=0,
-                ).astype(np.float64),
+                query_window=query_window,
                 patch_tensor=np.asarray(patch, dtype=np.float64),
                 patch_summary=summarize_patch_tensor(patch),
             )
@@ -657,143 +883,150 @@ def build_real_ocean_corpus(
     region_names: list[str] = []
     region_index: list[int] = []
     manifest_paths_resolved: list[str] = []
+    route_variant_counts: dict[str, int] = {}
+    skipped_nonfinite_examples_by_region: dict[str, int] = {}
 
     for region_id, manifest_path in enumerate(demo_pack_manifests):
         pack = resolve_regional_demo_pack(manifest_path)
+        skipped_nonfinite_examples_by_region.setdefault(pack.manifest.region_name, 0)
         manifest_paths_resolved.append(str(Path(manifest_path).expanduser().resolve()))
         tide_corrector = _tide_corrector_from_demo_pack(pack)
         scenario = ScenarioSpec.from_mapping(load_config_mapping(pack.scenario_path))
         truth = build_truth_trajectory_from_scenario(scenario)
+        route_variants = _build_route_variants_for_pack(
+            pack,
+            base_scenario=scenario,
+            base_truth=truth,
+            spec=spec,
+            rng=rng,
+        )
+        route_variant_counts[pack.manifest.region_name] = int(len(route_variants))
         matcher = GravitySequenceMatcher(
             sequence_spec,
             pack.gravity_map,
             bathymetry_map=pack.bathymetry_grid,
             magnetic_map=pack.magnetic_grid,
         )
-        sample_indices = _sample_indices(
-            len(truth.time_s),
-            spec.max_examples_per_region,
-            window_size=int(spec.window_size),
-        )
-        precomputed_samples, num_truth_steps = _precompute_region_samples(
-            pack=pack,
-            truth=truth,
-            spec=spec,
-            sample_indices=sample_indices,
-            patch_offsets=patch_offsets,
-            tide_corrector=tide_corrector,
-        )
-        for realization_idx in range(int(spec.num_offset_realizations_per_region)):
-            initial_offset_ned = rng.normal(
-                0.0,
-                float(spec.initial_offset_std_m),
-                size=2,
-            ).astype(np.float64)
-            offset_walk = rng.normal(
-                0.0,
-                float(spec.offset_random_walk_std_m),
-                size=(num_truth_steps, 2),
-            ).astype(np.float64)
-            offset_series_ned = initial_offset_ned[None, :] + np.cumsum(
-                offset_walk,
-                axis=0,
+        for route_variant in route_variants:
+            sample_indices = _sample_indices(
+                len(route_variant.truth.time_s),
+                spec.max_examples_per_region,
+                window_size=int(spec.window_size),
             )
-
-            for sample in precomputed_samples:
-                offset_ned = offset_series_ned[sample.index]
-                prior_lat, prior_lon, prior_h = apply_ned_offsets_to_geodetic(
-                    np.array([sample.lat_rad], dtype=np.float64),
-                    np.array([sample.lon_rad], dtype=np.float64),
-                    np.array([sample.height_m], dtype=np.float64),
-                    np.array([[offset_ned[0], offset_ned[1], 0.0]], dtype=np.float64),
+            precomputed_samples, num_truth_steps = _precompute_region_samples(
+                pack=pack,
+                truth=route_variant.truth,
+                spec=spec,
+                sample_indices=sample_indices,
+                patch_offsets=patch_offsets,
+                tide_corrector=tide_corrector,
+            )
+            for realization_idx in range(int(spec.num_offset_realizations_per_region)):
+                initial_offset_ned = rng.normal(
+                    0.0,
+                    float(spec.initial_offset_std_m),
+                    size=2,
+                ).astype(np.float64)
+                offset_walk = rng.normal(
+                    0.0,
+                    float(spec.offset_random_walk_std_m),
+                    size=(num_truth_steps, 2),
+                ).astype(np.float64)
+                offset_series_ned = initial_offset_ned[None, :] + np.cumsum(
+                    offset_walk,
+                    axis=0,
                 )
 
-                state = _make_state(
-                    time_s=sample.time_s,
-                    lat_rad=float(prior_lat[0]),
-                    lon_rad=float(prior_lon[0]),
-                    height_m=float(prior_h[0]),
-                    v_ned_mps=sample.v_ned_mps,
-                )
+                for sample in precomputed_samples:
+                    offset_ned = offset_series_ned[sample.index]
+                    prior_lat, prior_lon, prior_h = apply_ned_offsets_to_geodetic(
+                        np.array([sample.lat_rad], dtype=np.float64),
+                        np.array([sample.lon_rad], dtype=np.float64),
+                        np.array([sample.height_m], dtype=np.float64),
+                        np.array([[offset_ned[0], offset_ned[1], 0.0]], dtype=np.float64),
+                    )
 
-                matcher._active_grid_mode = "nominal"
-                obs = matcher._build_observation(
-                    measured_disturbance_mps2=float(sample.query_feature[0]),
-                    gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
-                    ins_or_state=state,
-                    search_center_offset_ned_m=np.zeros(3, dtype=np.float64),
-                    current_track_unit_ned=sample.track_unit_ned,
-                    measured_gradient_per_s2=sample.query_feature[1:3],
-                    gradient_meas_std_per_s2=sequence_spec.gradient_meas_std_per_s2,
-                    measured_bathymetry_m=(
-                        None
-                        if not np.isfinite(sample.query_feature[3])
-                        else float(sample.query_feature[3])
-                    ),
-                    bathymetry_meas_std_m=sequence_spec.bathymetry_meas_std_m,
-                    measured_bathymetry_gradient_m_per_m=(
-                        None
-                        if not np.isfinite(sample.query_feature[4])
-                        else float(
-                            np.dot(
-                                sample.track_unit_ned[:2],
-                                sample.query_feature[4:6],
+                    state = _make_state(
+                        time_s=sample.time_s,
+                        lat_rad=float(prior_lat[0]),
+                        lon_rad=float(prior_lon[0]),
+                        height_m=float(prior_h[0]),
+                        v_ned_mps=sample.v_ned_mps,
+                    )
+
+                    matcher._active_grid_mode = "nominal"
+                    obs = matcher._build_observation(
+                        measured_disturbance_mps2=float(sample.query_feature[0]),
+                        gravity_meas_std_mps2=float(sequence_spec.gravity_meas_std_mps2),
+                        ins_or_state=state,
+                        search_center_offset_ned_m=np.zeros(3, dtype=np.float64),
+                        current_track_unit_ned=sample.track_unit_ned,
+                        measured_gradient_per_s2=sample.query_feature[1:3],
+                        gradient_meas_std_per_s2=sequence_spec.gradient_meas_std_per_s2,
+                        measured_bathymetry_m=(
+                            None
+                            if pack.bathymetry_grid is None
+                            else float(sample.query_feature[3])
+                        ),
+                        bathymetry_meas_std_m=sequence_spec.bathymetry_meas_std_m,
+                        measured_bathymetry_gradient_m_per_m=(
+                            None
+                            if pack.bathymetry_grid is None
+                            else float(
+                                np.dot(
+                                    sample.track_unit_ned[:2],
+                                    sample.query_feature[4:6],
+                                )
                             )
-                        )
-                    ),
-                    bathymetry_gradient_meas_std_m_per_m=(
-                        sequence_spec.bathymetry_gradient_meas_std_m_per_m
-                    ),
-                    measured_bathymetry_rugosity_m=(
-                        None
-                        if not np.isfinite(sample.query_feature[6])
-                        else float(sample.query_feature[6])
-                    ),
-                    bathymetry_rugosity_meas_std_m=(
-                        sequence_spec.bathymetry_rugosity_meas_std_m
-                    ),
-                    measured_magnetic_total_nt=(
-                        None
-                        if not np.isfinite(sample.query_feature[7])
-                        else float(sample.query_feature[7])
-                    ),
-                    magnetic_meas_std_nt=sequence_spec.magnetic_meas_std_nt,
-                    measured_magnetic_gradient_nt_per_m=(
-                        None
-                        if not np.isfinite(sample.query_feature[8])
-                        else float(
-                            np.dot(
-                                sample.track_unit_ned[:2],
-                                sample.query_feature[8:10],
+                        ),
+                        bathymetry_gradient_meas_std_m_per_m=(
+                            sequence_spec.bathymetry_gradient_meas_std_m_per_m
+                        ),
+                        measured_bathymetry_rugosity_m=(
+                            None
+                            if pack.bathymetry_grid is None
+                            else float(sample.query_feature[6])
+                        ),
+                        bathymetry_rugosity_meas_std_m=(
+                            sequence_spec.bathymetry_rugosity_meas_std_m
+                        ),
+                        measured_magnetic_total_nt=(
+                            None
+                            if pack.magnetic_grid is None
+                            else float(sample.query_feature[7])
+                        ),
+                        magnetic_meas_std_nt=sequence_spec.magnetic_meas_std_nt,
+                        measured_magnetic_gradient_nt_per_m=(
+                            None
+                            if pack.magnetic_grid is None
+                            else float(
+                                np.dot(
+                                    sample.track_unit_ned[:2],
+                                    sample.query_feature[8:10],
+                                )
                             )
-                        )
-                    ),
-                    magnetic_gradient_meas_std_nt_per_m=(
-                        sequence_spec.magnetic_gradient_meas_std_nt_per_m
-                    ),
-                    depth_measurement=None,
-                    reference_surface_height_m=sample.reference_surface_height_m,
-                    time_s=sample.time_s,
-                )
+                        ),
+                        magnetic_gradient_meas_std_nt_per_m=(
+                            sequence_spec.magnetic_gradient_meas_std_nt_per_m
+                        ),
+                        depth_measurement=None,
+                        reference_surface_height_m=sample.reference_surface_height_m,
+                        time_s=sample.time_s,
+                    )
 
-                truth_offset = geodetic_offsets_to_local_ned(
-                    np.array([sample.lat_rad], dtype=np.float64),
-                    np.array([sample.lon_rad], dtype=np.float64),
-                    np.array([sample.height_m], dtype=np.float64),
-                    lat_ref_rad=float(prior_lat[0]),
-                    lon_ref_rad=float(prior_lon[0]),
-                    height_ref_m=float(prior_h[0]),
-                )[0]
-                deltas = obs.candidate_offsets_ned_m[:, :2] - truth_offset[None, :2]
-                label = int(np.argmin(np.sum(deltas**2, axis=1)))
-                horizontal_error = float(np.linalg.norm(deltas[label]))
-                nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
-
-                patch_tensors.append(sample.patch_tensor)
-                patch_summary_features.append(sample.patch_summary)
-                query_windows.append(sample.query_window)
-                candidate_features.append(
-                    _candidate_feature_matrix(
+                    truth_offset = geodetic_offsets_to_local_ned(
+                        np.array([sample.lat_rad], dtype=np.float64),
+                        np.array([sample.lon_rad], dtype=np.float64),
+                        np.array([sample.height_m], dtype=np.float64),
+                        lat_ref_rad=float(prior_lat[0]),
+                        lon_ref_rad=float(prior_lon[0]),
+                        height_ref_m=float(prior_h[0]),
+                    )[0]
+                    deltas = obs.candidate_offsets_ned_m[:, :2] - truth_offset[None, :2]
+                    label = int(np.argmin(np.sum(deltas**2, axis=1)))
+                    horizontal_error = float(np.linalg.norm(deltas[label]))
+                    nominal_cov = float(np.mean(sequence_spec.grid_spacing_m) ** 2)
+                    candidate_matrix = _candidate_feature_matrix(
                         pack,
                         candidate_lat_rad=obs.candidate_lat_rad,
                         candidate_lon_rad=obs.candidate_lon_rad,
@@ -803,21 +1036,34 @@ def build_real_ocean_corpus(
                         time_s=sample.time_s,
                         tide_corrector=tide_corrector,
                     )
-                )
-                candidate_offsets.append(
-                    np.asarray(obs.candidate_offsets_ned_m, dtype=np.float64)
-                )
-                analytic_log_emission.append(np.asarray(obs.log_emission, dtype=np.float64))
-                labels.append(label)
-                truth_offsets.append(np.asarray(truth_offset, dtype=np.float64))
-                publishability_labels.append(
-                    bool(horizontal_error <= max(0.5 * np.mean(sequence_spec.grid_spacing_m), 20.0))
-                )
-                covariance_targets.append(
-                    float(max(horizontal_error**2 / max(nominal_cov, 1.0e-9), 0.25))
-                )
-                region_names.append(pack.manifest.region_name)
-                region_index.append(int(region_id))
+                    if not np.all(np.isfinite(candidate_matrix)):
+                        skipped_nonfinite_examples_by_region[pack.manifest.region_name] += 1
+                        continue
+                    if not np.all(np.isfinite(obs.log_emission)):
+                        skipped_nonfinite_examples_by_region[pack.manifest.region_name] += 1
+                        continue
+
+                    patch_tensors.append(sample.patch_tensor)
+                    patch_summary_features.append(sample.patch_summary)
+                    query_windows.append(sample.query_window)
+                    candidate_features.append(candidate_matrix)
+                    candidate_offsets.append(
+                        np.asarray(obs.candidate_offsets_ned_m, dtype=np.float64)
+                    )
+                    analytic_log_emission.append(np.asarray(obs.log_emission, dtype=np.float64))
+                    labels.append(label)
+                    truth_offsets.append(np.asarray(truth_offset, dtype=np.float64))
+                    publishability_labels.append(
+                        bool(
+                            horizontal_error
+                            <= max(0.5 * np.mean(sequence_spec.grid_spacing_m), 20.0)
+                        )
+                    )
+                    covariance_targets.append(
+                        float(max(horizontal_error**2 / max(nominal_cov, 1.0e-9), 0.25))
+                    )
+                    region_names.append(pack.manifest.region_name)
+                    region_index.append(int(region_id))
 
     if len(query_windows) == 0:
         raise ValueError("No corpus examples were produced.")
@@ -859,5 +1105,7 @@ def build_real_ocean_corpus(
             "num_offset_realizations_per_region": int(
                 spec.num_offset_realizations_per_region
             ),
+            "route_variant_counts": route_variant_counts,
+            "skipped_nonfinite_examples_by_region": skipped_nonfinite_examples_by_region,
         },
     )
