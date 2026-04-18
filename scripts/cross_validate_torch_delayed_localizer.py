@@ -66,6 +66,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--reliability-threshold", type=float, default=0.65)
     parser.add_argument("--analytic-log-emission-gain", type=float, default=0.35)
+    parser.add_argument("--region-balance-power", type=float, default=1.0)
+    parser.add_argument("--label-balance-power", type=float, default=1.0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--embedding-dim", type=int, default=64)
@@ -121,6 +123,8 @@ def main() -> int:
         head_learning_rate=float(args.head_learning_rate),
         reliability_threshold=float(args.reliability_threshold),
         analytic_log_emission_gain=float(args.analytic_log_emission_gain),
+        region_balance_power=float(args.region_balance_power),
+        label_balance_power=float(args.label_balance_power),
         device=str(args.device),
         random_seed=int(args.seed),
     )
@@ -194,8 +198,38 @@ def main() -> int:
                     len(folds) // 2
                 ]
             ),
+            "median_publishability_brier_score": float(
+                sorted(float(f["publishability_brier_score"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
+            "median_publishability_precision": float(
+                sorted(float(f["publishability_precision"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
+            "median_publishability_recall": float(
+                sorted(float(f["publishability_recall"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
             "median_support_expansion_positive_fraction": float(
                 sorted(float(f["support_expansion_positive_fraction"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
+            "median_support_expansion_brier_score": float(
+                sorted(float(f["support_expansion_brier_score"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
+            "median_support_expansion_precision": float(
+                sorted(float(f["support_expansion_precision"]) for f in folds)[
+                    len(folds) // 2
+                ]
+            ),
+            "median_support_expansion_recall": float(
+                sorted(float(f["support_expansion_recall"]) for f in folds)[
                     len(folds) // 2
                 ]
             ),
@@ -236,6 +270,8 @@ def main() -> int:
             "head_learning_rate": float(train_spec.head_learning_rate),
             "reliability_threshold": float(train_spec.reliability_threshold),
             "analytic_log_emission_gain": float(train_spec.analytic_log_emission_gain),
+            "region_balance_power": float(train_spec.region_balance_power),
+            "label_balance_power": float(train_spec.label_balance_power),
             "device": str(train_spec.device),
             "random_seed": int(train_spec.random_seed),
         },

@@ -13,6 +13,7 @@ from gravnav.estimators.map_match_pf import apply_ned_offsets_to_geodetic
 from gravnav.ml import LearnedLocalizerSpec, NeuralEarthSignatureLocalizer, RealOceanCorpusSpec
 from gravnav.ml.data import _make_state, _measurement_feature_vector, _tide_corrector_from_demo_pack, build_real_ocean_corpus
 from gravnav.ml.torch_models import (
+    _compute_example_weights,
     TorchDelayedLocalizerTrainingSpec,
     load_runtime_localizer_model,
     train_torch_delayed_localizer,
@@ -75,6 +76,8 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
     assert int(model.metadata["train_examples"]) > 0
     assert int(model.metadata["validation_examples"]) > 0
     assert int(model.metadata["best_epoch"]) >= 0
+    assert float(model.metadata["region_balance_power"]) == 1.0
+    assert float(model.metadata["label_balance_power"]) == 1.0
     model_path = model.save_pt(tmp_path / "runtime_torch_bundle.pt")
     loaded = load_runtime_localizer_model(model_path)
 
@@ -171,3 +174,35 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
     assert updates[-1].publishability_probability is not None
     assert updates[-1].support_expansion_probability is not None
     assert updates[-1].learned_covariance_scale is not None
+
+
+def test_torch_example_weights_upweight_minority_regions_and_labels() -> None:
+    from gravnav.ml.data import RealOceanCorpus
+
+    imbalanced = RealOceanCorpus(
+        spec=RealOceanCorpusSpec(),
+        patch_tensors=np.zeros((3, 1, 1, 1), dtype=np.float64),
+        patch_summary_features=np.zeros((3, 1), dtype=np.float64),
+        query_windows=np.zeros((3, 1, 1), dtype=np.float64),
+        candidate_features=np.zeros((3, 1, 1), dtype=np.float64),
+        candidate_offsets_ned_m=np.zeros((3, 1, 3), dtype=np.float64),
+        analytic_log_emission=np.zeros((3, 1), dtype=np.float64),
+        labels=np.zeros(3, dtype=np.int64),
+        truth_offsets_ned_m=np.zeros((3, 3), dtype=np.float64),
+        publishability_labels=np.zeros(3, dtype=bool),
+        support_expansion_labels=np.zeros(3, dtype=bool),
+        covariance_targets=np.ones(3, dtype=np.float64),
+        region_names=("region_a", "region_b"),
+        region_index=np.asarray([0, 0, 1], dtype=np.int64),
+        metadata={},
+    )
+
+    weights = _compute_example_weights(
+        imbalanced,
+        region_balance_power=1.0,
+        label_balance_power=0.0,
+    )
+
+    assert weights.shape == (imbalanced.num_examples,)
+    assert float(np.mean(weights)) == pytest.approx(1.0)
+    assert float(np.max(weights)) > float(np.min(weights))

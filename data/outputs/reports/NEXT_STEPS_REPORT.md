@@ -721,7 +721,7 @@ Multiple vehicles share gravity-signature-correlated relative constraints (not a
 ## Key references
 
 ### Gravity-aided navigation algorithms
-- Li, Greentree, Moran — "Gravity-aided navigation using Viterbi map matching algorithm," Journal of Navigation (2024). Sequence-based HMM/Viterbi formulation; explicitly highlights sensor noise, spatial uncertainty, and map ambiguity.
+- Li, Greentree, Moran — "Gravity-aided navigation using Viterbi map matching algorithm," Journal of Navigation (2024). Sequence-based HMM/Viterbi formulation; explicitly highlights sensor noise, spatial uncertainty, and map ambiguity. 
 
 ### Quantum / moving-platform gravimetry
 - Jensen et al. — "Airborne gravimetry with quantum technology: observations from Iceland and Greenland," ESSD (2025). Moving-platform quantum gravimetry data products and hybrid processing.
@@ -752,4 +752,4 @@ Multiple vehicles share gravity-signature-correlated relative constraints (not a
 
 ## One-sentence summary
 
-**The immediate next move is to swap the Norwegian fixture for a real public regional gravity product and rerun the same benchmark stack before adding more estimator complexity; physics realism is now the bottleneck, not missing filter variants.**
+**The immediate next move is to swap the Norwegian fixture for a real public regional gravity product and rerun the same benchmark stack before adding more estimator complexity; physics realism is now the bottleneck, not missing filter variants.** 

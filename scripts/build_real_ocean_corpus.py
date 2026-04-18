@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import sys
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
@@ -18,15 +20,19 @@ if str(SRC_DIR) not in sys.path:
 
 from gravnav.estimators.gravity_sequence_match import GravitySequenceMatcherSpec
 from gravnav.ml.data import RealOceanCorpusSpec, build_real_ocean_corpus
+from gravnav.ml.experiment_registry import (
+    DEFAULT_EXPERIMENT_CONFIG,
+    list_corpus_presets,
+    list_region_sets,
+    resolve_corpus_preset,
+    resolve_region_set,
+)
 from gravnav.utils.config import load_config_mapping
 
-DEFAULT_PACKS = [
-    PROJECT_ROOT / "data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json",
-    PROJECT_ROOT / "data/bathymetry/processed/helgeland_offshore_priority9_emodnet_demo_pack.json",
-    PROJECT_ROOT / "data/bathymetry/processed/nordland_offshore_priority9_emodnet_demo_pack.json",
-]
 DEFAULT_SEQUENCE_PROFILE = PROJECT_ROOT / "configs/sequence_profiles/public_offshore_locked.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/outputs/ml/real_ocean_corpus"
+DEFAULT_REGION_SET = "norway4"
+DEFAULT_CORPUS_PRESET = "dev"
 
 
 def _load_sequence_spec(path: Path) -> GravitySequenceMatcherSpec:
@@ -75,7 +81,38 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--demo-pack-manifests",
         nargs="+",
-        default=[str(p) for p in DEFAULT_PACKS],
+        default=None,
+        help="Optional explicit demo-pack manifests. Overrides --region-set when provided.",
+    )
+    parser.add_argument(
+        "--experiment-config",
+        default=str(PROJECT_ROOT / DEFAULT_EXPERIMENT_CONFIG),
+        help="Path to the region-set and corpus-preset config JSON.",
+    )
+    parser.add_argument(
+        "--region-set",
+        default=DEFAULT_REGION_SET,
+        help=f"Named region set to resolve from the experiment config. Default: {DEFAULT_REGION_SET}.",
+    )
+    parser.add_argument(
+        "--corpus-preset",
+        default=DEFAULT_CORPUS_PRESET,
+        help=f"Named corpus preset to load from the experiment config. Default: {DEFAULT_CORPUS_PRESET}.",
+    )
+    parser.add_argument(
+        "--strict-region-set",
+        action="store_true",
+        help="Fail if the selected region set references manifests that are not present locally.",
+    )
+    parser.add_argument(
+        "--list-region-sets",
+        action="store_true",
+        help="Print the available named region sets from the experiment config and exit.",
+    )
+    parser.add_argument(
+        "--list-corpus-presets",
+        action="store_true",
+        help="Print the available named corpus presets from the experiment config and exit.",
     )
     parser.add_argument(
         "--sequence-profile",
@@ -161,27 +198,96 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    experiment_config_path = Path(args.experiment_config).expanduser().resolve()
+
+    if bool(args.list_region_sets):
+        print(
+            json.dumps(
+                {
+                    "experiment_config": str(experiment_config_path),
+                    "region_sets": list(
+                        list_region_sets(experiment_config_path, project_root=PROJECT_ROOT)
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if bool(args.list_corpus_presets):
+        print(
+            json.dumps(
+                {
+                    "experiment_config": str(experiment_config_path),
+                    "corpus_presets": list(
+                        list_corpus_presets(
+                            experiment_config_path,
+                            project_root=PROJECT_ROOT,
+                        )
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     sequence_spec = _load_sequence_spec(
         Path(args.sequence_profile).expanduser().resolve()
     )
+    preset = resolve_corpus_preset(
+        str(args.corpus_preset),
+        path=experiment_config_path,
+        project_root=PROJECT_ROOT,
+    )
+    if args.demo_pack_manifests is not None:
+        manifest_paths = [Path(p).expanduser().resolve() for p in args.demo_pack_manifests]
+        missing_manifest_paths: list[Path] = []
+    else:
+        region_set = resolve_region_set(
+            str(args.region_set),
+            path=experiment_config_path,
+            project_root=PROJECT_ROOT,
+        )
+        missing_manifest_paths = list(region_set.missing_manifest_paths)
+        if bool(args.strict_region_set) and len(missing_manifest_paths) > 0:
+            raise FileNotFoundError(
+                "Selected region set has missing manifests: "
+                + ", ".join(str(path) for path in missing_manifest_paths)
+            )
+        manifest_paths = list(region_set.manifest_paths)
+    if len(manifest_paths) == 0:
+        raise ValueError("No demo-pack manifests were resolved for corpus building.")
+
     corpus = build_real_ocean_corpus(
-        [Path(p).expanduser().resolve() for p in args.demo_pack_manifests],
+        manifest_paths,
         sequence_spec=sequence_spec,
         corpus_spec=RealOceanCorpusSpec(
             window_size=int(sequence_spec.window_size),
             patch_size=int(args.patch_size),
             patch_spacing_m=float(args.patch_spacing_m),
-            max_examples_per_region=int(args.max_examples_per_region),
+            max_examples_per_region=int(
+                preset.get("max_examples_per_region", args.max_examples_per_region)
+            ),
             num_offset_realizations_per_region=int(
-                args.num_offset_realizations_per_region
+                preset.get(
+                    "num_offset_realizations_per_region",
+                    args.num_offset_realizations_per_region,
+                )
             ),
             num_edge_biased_realizations_per_region=int(
-                args.num_edge_biased_realizations_per_region
+                preset.get(
+                    "num_edge_biased_realizations_per_region",
+                    args.num_edge_biased_realizations_per_region,
+                )
             ),
-            num_route_variants_per_region=int(args.num_route_variants_per_region),
+            num_route_variants_per_region=int(
+                preset.get(
+                    "num_route_variants_per_region",
+                    args.num_route_variants_per_region,
+                )
+            ),
             route_variant_max_attempts=int(args.route_variant_max_attempts),
             route_variant_margin_m=float(args.route_variant_margin_m),
             route_variant_min_separation_m=float(args.route_variant_min_separation_m),
@@ -195,24 +301,55 @@ def main() -> int:
                 args.edge_bias_max_fraction_of_nominal_half_span
             ),
             use_expanded_grid_for_edge_biased_realizations=(
-                not bool(args.disable_expanded_grid_for_edge_biased_realizations)
+                bool(
+                    preset.get(
+                        "use_expanded_grid_for_edge_biased_realizations",
+                        not bool(args.disable_expanded_grid_for_edge_biased_realizations),
+                    )
+                )
             ),
             random_seed=int(args.seed),
         ),
     )
     corpus_path = corpus.save_npz(output_dir / "real_ocean_corpus.npz")
+    region_example_counts = corpus.region_example_counts()
+    region_counts = list(region_example_counts.values())
+    region_count_median = (
+        float(np.median(np.asarray(region_counts, dtype=np.float64)))
+        if len(region_counts) > 0
+        else 0.0
+    )
     summary = {
         "corpus_path": str(corpus_path),
         "num_examples": int(corpus.query_windows.shape[0]),
         "num_regions": int(len(corpus.region_names)),
         "region_names": list(corpus.region_names),
+        "input_manifests": [str(path) for path in manifest_paths],
+        "missing_manifest_paths": [str(path) for path in missing_manifest_paths],
+        "experiment_config": str(experiment_config_path),
+        "region_set": None if args.demo_pack_manifests is not None else str(args.region_set),
+        "corpus_preset": str(args.corpus_preset),
         "region_example_counts": corpus.region_example_counts(),
+        "region_example_count_median": region_count_median,
+        "region_example_count_min_ratio_to_median": (
+            None
+            if region_count_median <= 0.0
+            else float(min(region_counts) / region_count_median)
+        ),
+        "region_example_count_max_ratio_to_median": (
+            None
+            if region_count_median <= 0.0
+            else float(max(region_counts) / region_count_median)
+        ),
         "route_variant_counts": dict(corpus.metadata.get("route_variant_counts", {})),
         "training_grid_mode_counts": dict(
             corpus.metadata.get("training_grid_mode_counts", {})
         ),
         "realization_mode_counts_by_region": dict(
             corpus.metadata.get("realization_mode_counts_by_region", {})
+        ),
+        "skipped_nonfinite_examples_by_region": dict(
+            corpus.metadata.get("skipped_nonfinite_examples_by_region", {})
         ),
         "support_expansion_positive_fraction": float(
             corpus.support_expansion_labels.mean()

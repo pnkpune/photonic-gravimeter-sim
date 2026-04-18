@@ -8,10 +8,10 @@
     "mission_style": "regional_gravity_benchmark",
     "region_name": "norwegian_margin_public_bouguer",
     "route_selection": {
-      "information_score": 9.215239392533517,
-      "value_std_mgal": 0.712763026547874,
-      "mean_horizontal_gradient_mgal_per_km": 3.3048566926293432,
-      "cross_gradient_alignment": 0.9182220654456716
+      "information_score": 12.285308929873636,
+      "value_std_mgal": 4.141086876972326,
+      "mean_horizontal_gradient_mgal_per_km": 7.940657567373125,
+      "cross_gradient_alignment": 0.6706239880400894
     }
   },
   "segments": [
@@ -64,7 +64,7 @@
       "label": "regional_leg_3"
     }
   ],
-  "initial_lat_deg": 66.0,
-  "initial_lon_deg": 14.0,
-  "initial_heading_deg": 45.0
+  "initial_lat_deg": 62.2,
+  "initial_lon_deg": 8.75,
+  "initial_heading_deg": 60.0
 }

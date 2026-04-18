@@ -85,6 +85,8 @@ def test_real_ocean_corpus_and_models_round_trip(tmp_path: Path) -> None:
     metrics = evaluate_runtime_student(corpus, trained)
     assert 0.0 <= float(metrics["top1_accuracy"]) <= 1.0
     assert float(metrics["median_horizontal_error_m"]) >= 0.0
+    assert 0.0 <= float(metrics["publishability_brier_score"]) <= 1.0
+    assert 0.0 <= float(metrics["support_expansion_brier_score"]) <= 1.0
 
 
 def test_learned_localizer_emits_runtime_updates(tmp_path: Path) -> None:
@@ -229,6 +231,8 @@ def test_real_ocean_corpus_region_subset_and_cross_validation() -> None:
         "helgeland_offshore",
     }
     assert cv["aggregate"]["median_horizontal_error_m"] >= 0.0
+    assert cv["aggregate"]["median_publishability_brier_score"] >= 0.0
+    assert cv["aggregate"]["median_support_expansion_brier_score"] >= 0.0
 
 
 def test_real_ocean_corpus_route_variants_expand_real_geography() -> None:

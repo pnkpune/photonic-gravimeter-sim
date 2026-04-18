@@ -121,6 +121,8 @@ class TorchDelayedLocalizerTrainingSpec:
     head_learning_rate: float = 5.0e-4
     reliability_threshold: float = 0.65
     analytic_log_emission_gain: float = 0.35
+    region_balance_power: float = 1.0
+    label_balance_power: float = 1.0
     device: str = "cpu"
     random_seed: int = 42
     name: str = "torch_delayed_localizer_training"
@@ -534,6 +536,57 @@ def _runtime_like_head_feature_arrays(
     return reliability_features, covariance_features, support_features
 
 
+def _compute_example_weights(
+    corpus: RealOceanCorpus,
+    *,
+    region_balance_power: float,
+    label_balance_power: float,
+) -> FloatArray:
+    weights = np.ones(corpus.num_examples, dtype=np.float64)
+    if float(region_balance_power) > 0.0 and corpus.num_examples > 0:
+        region_counts = np.bincount(
+            corpus.region_index,
+            minlength=max(len(corpus.region_names), 1),
+        ).astype(np.float64)
+        valid = region_counts > 0.0
+        if np.any(valid):
+            target = float(np.mean(region_counts[valid]))
+            region_weights = np.ones_like(region_counts, dtype=np.float64)
+            region_weights[valid] = np.power(
+                target / np.maximum(region_counts[valid], 1.0e-12),
+                float(region_balance_power),
+            )
+            weights *= region_weights[corpus.region_index]
+    if float(label_balance_power) > 0.0 and corpus.num_examples > 0:
+        for labels in (
+            corpus.publishability_labels.astype(np.int64),
+            corpus.support_expansion_labels.astype(np.int64),
+        ):
+            label_counts = np.bincount(labels, minlength=2).astype(np.float64)
+            valid = label_counts > 0.0
+            if not np.any(valid):
+                continue
+            target = float(np.mean(label_counts[valid]))
+            label_weights = np.ones(2, dtype=np.float64)
+            label_weights[valid] = np.power(
+                target / np.maximum(label_counts[valid], 1.0e-12),
+                float(label_balance_power),
+            )
+            weights *= label_weights[labels]
+    return (weights / max(float(np.mean(weights)), 1.0e-12)).astype(np.float64)
+
+
+def _weighted_batch_mean(values: Tensor, weights: Tensor | None) -> Tensor:
+    _require_torch()
+    arr = values
+    if arr.ndim > 1:
+        arr = arr.reshape(arr.shape[0], -1).mean(dim=1)
+    if weights is None:
+        return torch.mean(arr)
+    denom = torch.clamp(torch.sum(weights), min=1.0e-12)
+    return torch.sum(arr * weights) / denom
+
+
 def _stratified_validation_indices(
     corpus: RealOceanCorpus,
     *,
@@ -598,6 +651,7 @@ def _candidate_loss_and_offsets(
     publishable_entropy_target_fraction: float,
     ambiguous_entropy_target_fraction: float,
     support_expansion_entropy_target_fraction: float,
+    example_weights: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     logits = net.score_candidates(
         query_windows=query_windows,
@@ -614,8 +668,13 @@ def _candidate_loss_and_offsets(
         logits,
         labels,
         label_smoothing=float(label_smoothing),
+        reduction="none",
     )
-    offset_loss = F.smooth_l1_loss(expected_offsets, truth_offsets[:, :2])
+    offset_loss = F.smooth_l1_loss(
+        expected_offsets,
+        truth_offsets[:, :2],
+        reduction="none",
+    )
     entropy = -torch.sum(
         posterior * torch.log(torch.clamp(posterior, min=1.0e-12)),
         dim=1,
@@ -638,11 +697,16 @@ def _candidate_loss_and_offsets(
         ),
         entropy_target,
     )
-    entropy_loss = F.smooth_l1_loss(normalized_entropy, entropy_target)
+    entropy_loss = F.smooth_l1_loss(
+        normalized_entropy,
+        entropy_target,
+        reduction="none",
+    )
     loss = (
-        ce_loss
-        + float(offset_loss_weight) * offset_loss
-        + float(entropy_regularization_weight) * entropy_loss
+        _weighted_batch_mean(ce_loss, example_weights)
+        + float(offset_loss_weight) * _weighted_batch_mean(offset_loss, example_weights)
+        + float(entropy_regularization_weight)
+        * _weighted_batch_mean(entropy_loss, example_weights)
     )
     return loss, logits, expected_offsets
 
@@ -701,6 +765,12 @@ def train_torch_delayed_localizer(
         corpus.support_expansion_labels.astype(np.float64),
         device=device,
     )
+    example_weights_np = _compute_example_weights(
+        corpus,
+        region_balance_power=float(train_spec.region_balance_power),
+        label_balance_power=float(train_spec.label_balance_power),
+    )
+    example_weights = _to_torch(example_weights_np, device=device)
     train_indices_np, val_indices_np = _stratified_validation_indices(
         corpus,
         validation_fraction=float(train_spec.validation_fraction),
@@ -764,6 +834,7 @@ def train_torch_delayed_localizer(
                 support_expansion_entropy_target_fraction=float(
                     train_spec.support_expansion_entropy_target_fraction
                 ),
+                example_weights=example_weights[batch],
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -799,6 +870,7 @@ def train_torch_delayed_localizer(
                 support_expansion_entropy_target_fraction=float(
                     train_spec.support_expansion_entropy_target_fraction
                 ),
+                example_weights=example_weights[train_indices],
             )
             if val_indices.numel() > 0:
                 val_loss, _, _ = _candidate_loss_and_offsets(
@@ -825,6 +897,7 @@ def train_torch_delayed_localizer(
                     support_expansion_entropy_target_fraction=float(
                         train_spec.support_expansion_entropy_target_fraction
                     ),
+                    example_weights=example_weights[val_indices],
                 )
                 monitor_metric = float(val_loss.detach().cpu().item())
             else:
@@ -898,19 +971,27 @@ def train_torch_delayed_localizer(
     )
     for _ in range(int(train_spec.head_epochs)):
         rel_logits = net.reliability_logits(rel_x)
-        rel_loss = F.binary_cross_entropy_with_logits(rel_logits, rel_y)
+        rel_loss = F.binary_cross_entropy_with_logits(
+            rel_logits,
+            rel_y,
+            weight=example_weights,
+        )
         rel_optimizer.zero_grad(set_to_none=True)
         rel_loss.backward()
         rel_optimizer.step()
 
         support_logits = net.support_logits(support_x)
-        support_loss = F.binary_cross_entropy_with_logits(support_logits, support_y)
+        support_loss = F.binary_cross_entropy_with_logits(
+            support_logits,
+            support_y,
+            weight=example_weights,
+        )
         support_optimizer.zero_grad(set_to_none=True)
         support_loss.backward()
         support_optimizer.step()
 
         cov_pred = net.covariance_log_scale(cov_x)
-        cov_loss = F.mse_loss(cov_pred, cov_y)
+        cov_loss = _weighted_batch_mean((cov_pred - cov_y) ** 2, example_weights)
         cov_optimizer.zero_grad(set_to_none=True)
         cov_loss.backward()
         cov_optimizer.step()
@@ -929,6 +1010,8 @@ def train_torch_delayed_localizer(
             "validation_examples": int(val_indices.numel()),
             "best_epoch": int(best_epoch),
             "best_monitor_metric": float(best_metric),
+            "region_balance_power": float(train_spec.region_balance_power),
+            "label_balance_power": float(train_spec.label_balance_power),
             "support_expansion_positive_fraction": float(
                 np.mean(corpus.support_expansion_labels.astype(np.float64))
             ),

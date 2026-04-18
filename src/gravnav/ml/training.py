@@ -392,6 +392,28 @@ def _runtime_like_head_features(
     return reliability_features, covariance_features, support_features
 
 
+def _binary_calibration_metrics(
+    probabilities: FloatArray,
+    labels: NDArray[np.bool_] | FloatArray,
+    *,
+    threshold: float,
+    prefix: str,
+) -> dict[str, float]:
+    probs = np.clip(np.asarray(probabilities, dtype=np.float64).reshape(-1), 0.0, 1.0)
+    truth = np.asarray(labels, dtype=np.float64).reshape(-1) >= 0.5
+    preds = probs >= float(threshold)
+    tp = int(np.sum(preds & truth))
+    fp = int(np.sum(preds & ~truth))
+    fn = int(np.sum(~preds & truth))
+    precision = 0.0 if tp + fp == 0 else float(tp / max(tp + fp, 1))
+    recall = 0.0 if tp + fn == 0 else float(tp / max(tp + fn, 1))
+    return {
+        f"{prefix}_brier_score": float(np.mean((probs - truth.astype(np.float64)) ** 2)),
+        f"{prefix}_precision": precision,
+        f"{prefix}_recall": recall,
+    }
+
+
 def evaluate_runtime_student(
     corpus: RealOceanCorpus,
     student: Any,
@@ -425,7 +447,7 @@ def evaluate_runtime_student(
         if hasattr(student, "support_expansion_probability_from_features")
         else np.zeros(corpus.num_examples, dtype=np.float64)
     )
-    return {
+    metrics = {
         "top1_accuracy": top1,
         "median_horizontal_error_m": float(np.median(horizontal_error)),
         "p90_horizontal_error_m": float(np.quantile(horizontal_error, 0.90)),
@@ -439,6 +461,23 @@ def evaluate_runtime_student(
             np.mean(np.asarray(support_prob, dtype=np.float64) >= 0.5)
         ),
     }
+    metrics.update(
+        _binary_calibration_metrics(
+            publish_prob,
+            corpus.publishability_labels,
+            threshold=float(student.reliability_threshold),
+            prefix="publishability",
+        )
+    )
+    metrics.update(
+        _binary_calibration_metrics(
+            support_prob,
+            corpus.support_expansion_labels,
+            threshold=0.5,
+            prefix="support_expansion",
+        )
+    )
+    return metrics
 
 
 def cross_validate_delayed_localizer(
@@ -502,6 +541,24 @@ def cross_validate_delayed_localizer(
             np.median(
                 [float(fold["publishability_positive_fraction"]) for fold in folds]
             )
+        ),
+        "median_publishability_brier_score": float(
+            np.median([float(fold["publishability_brier_score"]) for fold in folds])
+        ),
+        "median_publishability_precision": float(
+            np.median([float(fold["publishability_precision"]) for fold in folds])
+        ),
+        "median_publishability_recall": float(
+            np.median([float(fold["publishability_recall"]) for fold in folds])
+        ),
+        "median_support_expansion_brier_score": float(
+            np.median([float(fold["support_expansion_brier_score"]) for fold in folds])
+        ),
+        "median_support_expansion_precision": float(
+            np.median([float(fold["support_expansion_precision"]) for fold in folds])
+        ),
+        "median_support_expansion_recall": float(
+            np.median([float(fold["support_expansion_recall"]) for fold in folds])
         ),
     }
     return {

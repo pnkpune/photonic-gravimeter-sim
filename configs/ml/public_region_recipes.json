@@ -1,0 +1,182 @@
+{
+  "mid_atlantic_ridge": {
+    "description": "First external offshore region for wave-1 onboarding. Assumed mid-North-Atlantic ridge window; tune bounds after raw product inspection if needed.",
+    "region_name": "mid_atlantic_ridge",
+    "supported_raw_formats": [
+      "regular_csv",
+      "regular_xyz",
+      "scattered_xyz"
+    ],
+    "suggested_raw_path": "data/gravity_maps/raw/mid_atlantic_ridge/region_input.xyz",
+    "gravity": {
+      "source_name": "external_public_gravity_product",
+      "template_scenario": "configs/scenarios/public_ocean_template_maritime.json",
+      "processed_map_path": "data/gravity_maps/processed/mid_atlantic_ridge_public_gravity_map.npz",
+      "manifest_path": "data/gravity_maps/processed/mid_atlantic_ridge_public_gravity_manifest.json",
+      "scenario_out": "configs/scenarios/mid_atlantic_ridge_public_demo_maritime.json",
+      "report_out": "data/outputs/reports/mid_atlantic_ridge_public_route_search.json",
+      "search_lat_min": 34.0,
+      "search_lat_max": 40.0,
+      "search_lon_min": -36.0,
+      "search_lon_max": -24.0,
+      "lat_step_deg": 0.25,
+      "lon_step_deg": 0.35,
+      "headings_deg": [
+        0.0,
+        30.0,
+        60.0,
+        90.0,
+        120.0,
+        150.0
+      ],
+      "crop_lat_min": 33.0,
+      "crop_lat_max": 41.0,
+      "crop_lon_min": -38.0,
+      "crop_lon_max": -22.0,
+      "coarse_density_scale": 0.25,
+      "final_density_scale": 0.55,
+      "final_margin_deg": 0.45,
+      "dt_s": 2.0
+    },
+    "demo_pack": {
+      "sequence_profile": "configs/sequence_profiles/public_offshore_locked.json",
+      "raw_bathymetry_csv": "data/bathymetry/raw/mid_atlantic_ridge/mid_atlantic_ridge_public_gebco.csv",
+      "processed_bathymetry": "data/bathymetry/processed/mid_atlantic_ridge_public_bathymetry_grid.npz",
+      "bathymetry_manifest": "data/bathymetry/processed/mid_atlantic_ridge_public_bathymetry_manifest.json",
+      "base_demo_pack_manifest": "data/bathymetry/processed/mid_atlantic_ridge_public_base_demo_pack.json",
+      "dt_s": 2.0,
+      "margin_deg": 0.18,
+      "lat_step_deg": 0.02,
+      "lon_step_deg": 0.03,
+      "max_workers": 6
+    },
+    "multimodal": {
+      "final_demo_pack_manifest": "data/bathymetry/processed/mid_atlantic_ridge_public_demo_pack.json",
+      "tide_config": null,
+      "current_lat_step_deg": 0.04,
+      "current_lon_step_deg": 0.06,
+      "current_depth_m": 0.0,
+      "max_workers": 6
+    }
+  },
+  "iceland_greenland_margin": {
+    "description": "Wave-1 high-latitude margin scaffold. Bounds are intentionally broad and should be refined against the chosen raw gravity product.",
+    "region_name": "iceland_greenland_margin",
+    "supported_raw_formats": [
+      "regular_csv",
+      "regular_xyz",
+      "scattered_xyz"
+    ],
+    "suggested_raw_path": "data/gravity_maps/raw/iceland_greenland_margin/region_input.xyz",
+    "gravity": {
+      "source_name": "external_public_gravity_product",
+      "template_scenario": "configs/scenarios/public_ocean_template_maritime.json",
+      "processed_map_path": "data/gravity_maps/processed/iceland_greenland_margin_public_gravity_map.npz",
+      "manifest_path": "data/gravity_maps/processed/iceland_greenland_margin_public_gravity_manifest.json",
+      "scenario_out": "configs/scenarios/iceland_greenland_margin_public_demo_maritime.json",
+      "report_out": "data/outputs/reports/iceland_greenland_margin_public_route_search.json",
+      "search_lat_min": 60.0,
+      "search_lat_max": 67.0,
+      "search_lon_min": -38.0,
+      "search_lon_max": -20.0,
+      "lat_step_deg": 0.25,
+      "lon_step_deg": 0.35,
+      "headings_deg": [
+        0.0,
+        30.0,
+        60.0,
+        90.0,
+        120.0,
+        150.0
+      ],
+      "crop_lat_min": 58.0,
+      "crop_lat_max": 69.0,
+      "crop_lon_min": -42.0,
+      "crop_lon_max": -16.0,
+      "coarse_density_scale": 0.25,
+      "final_density_scale": 0.55,
+      "final_margin_deg": 0.45,
+      "dt_s": 2.0
+    },
+    "demo_pack": {
+      "sequence_profile": "configs/sequence_profiles/public_offshore_locked.json",
+      "raw_bathymetry_csv": "data/bathymetry/raw/iceland_greenland_margin/iceland_greenland_margin_public_gebco.csv",
+      "processed_bathymetry": "data/bathymetry/processed/iceland_greenland_margin_public_bathymetry_grid.npz",
+      "bathymetry_manifest": "data/bathymetry/processed/iceland_greenland_margin_public_bathymetry_manifest.json",
+      "base_demo_pack_manifest": "data/bathymetry/processed/iceland_greenland_margin_public_base_demo_pack.json",
+      "dt_s": 2.0,
+      "margin_deg": 0.18,
+      "lat_step_deg": 0.02,
+      "lon_step_deg": 0.03,
+      "max_workers": 6
+    },
+    "multimodal": {
+      "final_demo_pack_manifest": "data/bathymetry/processed/iceland_greenland_margin_public_demo_pack.json",
+      "tide_config": null,
+      "current_lat_step_deg": 0.04,
+      "current_lon_step_deg": 0.06,
+      "current_depth_m": 0.0,
+      "max_workers": 6
+    }
+  },
+  "mariana_approach": {
+    "description": "Wave-1 trench-approach scaffold. Bounds are broad initial assumptions for route search over the western Pacific candidate area.",
+    "region_name": "mariana_approach",
+    "supported_raw_formats": [
+      "regular_csv",
+      "regular_xyz",
+      "scattered_xyz"
+    ],
+    "suggested_raw_path": "data/gravity_maps/raw/mariana_approach/region_input.xyz",
+    "gravity": {
+      "source_name": "external_public_gravity_product",
+      "template_scenario": "configs/scenarios/public_ocean_template_maritime.json",
+      "processed_map_path": "data/gravity_maps/processed/mariana_approach_public_gravity_map.npz",
+      "manifest_path": "data/gravity_maps/processed/mariana_approach_public_gravity_manifest.json",
+      "scenario_out": "configs/scenarios/mariana_approach_public_demo_maritime.json",
+      "report_out": "data/outputs/reports/mariana_approach_public_route_search.json",
+      "search_lat_min": 10.0,
+      "search_lat_max": 20.0,
+      "search_lon_min": 138.0,
+      "search_lon_max": 150.0,
+      "lat_step_deg": 0.25,
+      "lon_step_deg": 0.35,
+      "headings_deg": [
+        0.0,
+        30.0,
+        60.0,
+        90.0,
+        120.0,
+        150.0
+      ],
+      "crop_lat_min": 8.0,
+      "crop_lat_max": 22.0,
+      "crop_lon_min": 136.0,
+      "crop_lon_max": 152.0,
+      "coarse_density_scale": 0.25,
+      "final_density_scale": 0.55,
+      "final_margin_deg": 0.45,
+      "dt_s": 2.0
+    },
+    "demo_pack": {
+      "sequence_profile": "configs/sequence_profiles/public_offshore_locked.json",
+      "raw_bathymetry_csv": "data/bathymetry/raw/mariana_approach/mariana_approach_public_gebco.csv",
+      "processed_bathymetry": "data/bathymetry/processed/mariana_approach_public_bathymetry_grid.npz",
+      "bathymetry_manifest": "data/bathymetry/processed/mariana_approach_public_bathymetry_manifest.json",
+      "base_demo_pack_manifest": "data/bathymetry/processed/mariana_approach_public_base_demo_pack.json",
+      "dt_s": 2.0,
+      "margin_deg": 0.18,
+      "lat_step_deg": 0.02,
+      "lon_step_deg": 0.03,
+      "max_workers": 6
+    },
+    "multimodal": {
+      "final_demo_pack_manifest": "data/bathymetry/processed/mariana_approach_public_demo_pack.json",
+      "tide_config": null,
+      "current_lat_step_deg": 0.04,
+      "current_lon_step_deg": 0.06,
+      "current_depth_m": 0.0,
+      "max_workers": 6
+    }
+  }
+}

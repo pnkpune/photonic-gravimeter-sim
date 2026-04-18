@@ -1,0 +1,61 @@
+{
+  "name": "public_ocean_template_maritime",
+  "initial_lat_deg": 0.0,
+  "initial_lon_deg": 0.0,
+  "initial_height_m": 0.0,
+  "initial_heading_deg": 0.0,
+  "default_dt_s": 1.0,
+  "description": "Generic offshore maritime route template for public Earth-signature region search.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "public_ocean_route_template"
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_3"
+    }
+  ]
+}

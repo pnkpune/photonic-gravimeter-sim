@@ -28,6 +28,15 @@ from .training import (
     train_delayed_localizer,
     train_ocean_teacher,
 )
+from .experiment_registry import (
+    DEFAULT_EXPERIMENT_CONFIG,
+    ResolvedRegionSet,
+    list_corpus_presets,
+    list_region_sets,
+    load_real_ocean_experiment_config,
+    resolve_corpus_preset,
+    resolve_region_set,
+)
 
 try:  # Optional torch backend
     from .torch_models import (
@@ -43,12 +52,14 @@ except Exception:  # pragma: no cover - optional dependency path
 
 __all__ = [
     "DelayedLocalizerTrainingSpec",
+    "DEFAULT_EXPERIMENT_CONFIG",
     "LearnedLocalizerSpec",
     "NeuralEarthSignatureLocalizer",
     "OceanTeacherModel",
     "OceanTeacherModelSpec",
     "RealOceanCorpus",
     "RealOceanCorpusSpec",
+    "ResolvedRegionSet",
     "RuntimeStudentModel",
     "RuntimeStudentModelSpec",
     "TeacherTrainingSpec",
@@ -60,8 +71,13 @@ __all__ = [
     "distill_runtime_student",
     "evaluate_runtime_student",
     "fit_delayed_localizer",
+    "list_corpus_presets",
+    "list_region_sets",
     "load_runtime_localizer_model",
+    "load_real_ocean_experiment_config",
     "load_real_ocean_corpus",
+    "resolve_corpus_preset",
+    "resolve_region_set",
     "torch_is_available",
     "train_delayed_localizer",
     "train_torch_delayed_localizer",

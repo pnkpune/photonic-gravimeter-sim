@@ -1,0 +1,28 @@
+{
+  "name": "public_maritime_demo",
+  "window_size": 11,
+  "grid_half_span_m": [
+    100.0,
+    100.0
+  ],
+  "grid_spacing_m": [
+    20.0,
+    20.0
+  ],
+  "transition_std_m": [
+    15.0,
+    15.0
+  ],
+  "center_prior_std_m": [
+    50.0,
+    50.0
+  ],
+  "gravity_meas_std_mps2": 1.0e-05,
+  "gradient_meas_std_per_s2": 1.0e-08,
+  "bathymetry_meas_std_m": 12.0,
+  "bathymetry_weight": 1.0,
+  "height_std_m": 2.0,
+  "map_match_every_steps": 2,
+  "use_gradiometer": true,
+  "use_lag_smoother": true
+}

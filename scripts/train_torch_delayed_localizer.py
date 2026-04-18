@@ -63,6 +63,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--reliability-threshold", type=float, default=0.65)
     parser.add_argument("--analytic-log-emission-gain", type=float, default=0.35)
+    parser.add_argument("--region-balance-power", type=float, default=1.0)
+    parser.add_argument("--label-balance-power", type=float, default=1.0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--embedding-dim", type=int, default=64)
@@ -111,6 +113,8 @@ def main() -> int:
             head_learning_rate=float(args.head_learning_rate),
             reliability_threshold=float(args.reliability_threshold),
             analytic_log_emission_gain=float(args.analytic_log_emission_gain),
+            region_balance_power=float(args.region_balance_power),
+            label_balance_power=float(args.label_balance_power),
             device=str(args.device),
             random_seed=int(args.seed),
         ),
@@ -136,6 +140,8 @@ def main() -> int:
     summary["fusion_hidden_dim"] = int(args.fusion_hidden_dim)
     summary["head_hidden_dim"] = int(args.head_hidden_dim)
     summary["dropout_prob"] = float(args.dropout_prob)
+    summary["region_balance_power"] = float(args.region_balance_power)
+    summary["label_balance_power"] = float(args.label_balance_power)
     print(json.dumps(summary, indent=2))
     return 0
 

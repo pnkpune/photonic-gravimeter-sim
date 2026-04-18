@@ -1,0 +1,64 @@
+{
+  "name": "norwegian_margin_public_demo_maritime",
+  "initial_lat_deg": 63.69,
+  "initial_lon_deg": 4.16,
+  "initial_height_m": 0.0,
+  "initial_heading_deg": 72.0,
+  "default_dt_s": 1.0,
+  "description": "Offshore Norwegian-margin maritime demo route for the public gravity-plus-bathymetry Earth-signature benchmark.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "public_earth_signature_demo",
+    "region_name": "norwegian_margin_public_demo",
+    "gravity_source_region": "norwegian_margin_public_bouguer",
+    "bathymetry_source_region": "norwegian_margin_public"
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_deg": 8.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "label": "regional_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "label": "regional_leg_3"
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "region_sets": {
+    "norway4": {
+      "description": "Current in-repo Norway real-ocean ML baseline using four tracked public/demo slices.",
+      "allow_missing_manifests": false,
+      "manifests": [
+        "data/bathymetry/processed/norwegian_margin_maritime_priority9_emodnet_demo_pack.json",
+        "data/bathymetry/processed/norwegian_margin_public_benchmark_demo_pack.json",
+        "data/bathymetry/processed/helgeland_offshore_priority9_emodnet_demo_pack.json",
+        "data/bathymetry/processed/nordland_offshore_priority9_emodnet_demo_pack.json"
+      ]
+    },
+    "world_wave1_candidates": {
+      "description": "First global candidate wave for post-Norway expansion. These manifests are optional until raw public products are prepared locally.",
+      "allow_missing_manifests": true,
+      "manifests": [
+        "data/bathymetry/processed/mid_atlantic_ridge_public_demo_pack.json",
+        "data/bathymetry/processed/iceland_greenland_margin_public_demo_pack.json",
+        "data/bathymetry/processed/mariana_approach_public_demo_pack.json",
+        "data/bathymetry/processed/bay_of_biscay_public_demo_pack.json",
+        "data/bathymetry/processed/labrador_sea_margin_public_demo_pack.json"
+      ],
+      "candidate_metadata": {
+        "mid_atlantic_ridge": {
+          "selection_rank": 1,
+          "selection_reason": "High expected bathymetric and gravity distinctiveness with strong offshore routeability."
+        },
+        "iceland_greenland_margin": {
+          "selection_rank": 2,
+          "selection_reason": "High-latitude offshore margin with distinct gravity structure and mission-relevant sea states."
+        },
+        "mariana_approach": {
+          "selection_rank": 3,
+          "selection_reason": "Deep-ocean trench approach with extreme terrain signature diversity."
+        },
+        "bay_of_biscay": {
+          "selection_rank": 4,
+          "selection_reason": "Retained as a backup candidate with broad public-data availability."
+        },
+        "labrador_sea_margin": {
+          "selection_rank": 5,
+          "selection_reason": "Retained as a backup candidate for North Atlantic margin diversity."
+        }
+      }
+    },
+    "world_wave1": {
+      "description": "Initial curated non-Norway wave selected from the candidate list.",
+      "allow_missing_manifests": true,
+      "manifests": [
+        "data/bathymetry/processed/mid_atlantic_ridge_public_demo_pack.json",
+        "data/bathymetry/processed/iceland_greenland_margin_public_demo_pack.json",
+        "data/bathymetry/processed/mariana_approach_public_demo_pack.json"
+      ],
+      "selected_regions": [
+        "mid_atlantic_ridge",
+        "iceland_greenland_margin",
+        "mariana_approach"
+      ]
+    },
+    "all_wave1": {
+      "description": "Norway baseline plus the first curated global wave.",
+      "include_sets": [
+        "norway4",
+        "world_wave1"
+      ],
+      "allow_missing_manifests": true
+    }
+  },
+  "corpus_presets": {
+    "dev": {
+      "description": "Fast local validation preset for region-set comparisons and coarse sweeps.",
+      "max_examples_per_region": 32,
+      "num_offset_realizations_per_region": 4,
+      "num_edge_biased_realizations_per_region": 2,
+      "num_route_variants_per_region": 2,
+      "use_expanded_grid_for_edge_biased_realizations": true
+    },
+    "full": {
+      "description": "Heavier local sweep preset for shortlisted configurations.",
+      "max_examples_per_region": 48,
+      "num_offset_realizations_per_region": 4,
+      "num_edge_biased_realizations_per_region": 4,
+      "num_route_variants_per_region": 3,
+      "use_expanded_grid_for_edge_biased_realizations": true
+    }
+  }
+}
