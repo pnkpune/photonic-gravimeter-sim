@@ -537,10 +537,36 @@ def load_demo_pack_manifest(path: str | Path) -> RegionalDemoPackManifest:
     )
 
 
+_PROJECT_ROOT_SUFFIX_PARTS = ("configs", "data", "scripts", "src", "tests")
+
+
+def _remap_absolute_ref_under_project_root(ref: Path) -> Path | None:
+    """Best-effort remap of an absolute reference saved under a different
+    checkout root (e.g. a Mac-absolute path baked into a demo-pack manifest)
+    into the current project root. Returns ``None`` if no suffix matching a
+    known top-level directory is found.
+    """
+    parts = ref.parts
+    for i, part in enumerate(parts):
+        if part in _PROJECT_ROOT_SUFFIX_PARTS:
+            project_root = _project_root()
+            candidate = (project_root / Path(*parts[i:])).resolve()
+            if candidate.exists():
+                return candidate
+            break
+    return None
+
+
 def _resolve_manifest_ref(path_ref: str | Path, *, manifest_path: Path) -> Path:
     ref = Path(path_ref).expanduser()
     if ref.is_absolute():
-        return ref.resolve()
+        resolved = ref.resolve()
+        if resolved.exists():
+            return resolved
+        remapped = _remap_absolute_ref_under_project_root(ref)
+        if remapped is not None:
+            return remapped
+        return resolved
     candidate = (manifest_path.parent / ref).resolve()
     if candidate.exists():
         return candidate
@@ -548,7 +574,7 @@ def _resolve_manifest_ref(path_ref: str | Path, *, manifest_path: Path) -> Path:
     root_candidate = (project_root / ref).resolve()
     if root_candidate.exists():
         return root_candidate
-    if ref.parts and ref.parts[0] in {"configs", "data", "scripts", "src", "tests"}:
+    if ref.parts and ref.parts[0] in _PROJECT_ROOT_SUFFIX_PARTS:
         return root_candidate
     return candidate
 

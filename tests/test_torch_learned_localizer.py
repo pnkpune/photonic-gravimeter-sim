@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import importlib.util
 
 import numpy as np
 import pytest
@@ -10,10 +12,17 @@ torch = pytest.importorskip("torch")
 from gravnav.datasets.bathymetry_loader import resolve_regional_demo_pack
 from gravnav.estimators.gravity_sequence_match import GravitySequenceMatcherSpec
 from gravnav.estimators.map_match_pf import apply_ned_offsets_to_geodetic
-from gravnav.ml import LearnedLocalizerSpec, NeuralEarthSignatureLocalizer, RealOceanCorpusSpec
+from gravnav.ml import (
+    aggregate_runtime_student_folds,
+    evaluate_runtime_student,
+    LearnedLocalizerSpec,
+    NeuralEarthSignatureLocalizer,
+    RealOceanCorpusSpec,
+)
 from gravnav.ml.data import _make_state, _measurement_feature_vector, _tide_corrector_from_demo_pack, build_real_ocean_corpus
 from gravnav.ml.torch_models import (
     _compute_example_weights,
+    _select_binary_threshold,
     TorchDelayedLocalizerTrainingSpec,
     load_runtime_localizer_model,
     train_torch_delayed_localizer,
@@ -43,6 +52,22 @@ def _small_sequence_spec() -> GravitySequenceMatcherSpec:
         magnetic_gradient_meas_std_nt_per_m=0.05,
         adaptive_grid_enabled=True,
     )
+
+
+def _load_run_experiments_module():
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_torch_localizer_experiments.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "run_torch_localizer_experiments_test_module",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
@@ -78,6 +103,16 @@ def test_torch_model_save_load_and_runtime_updates(tmp_path: Path) -> None:
     assert int(model.metadata["best_epoch"]) >= 0
     assert float(model.metadata["region_balance_power"]) == 1.0
     assert float(model.metadata["label_balance_power"]) == 1.0
+    assert bool(model.metadata["calibrate_reliability_threshold"]) is True
+    assert float(model.metadata["reliability_threshold_calibrated"]) <= 0.65
+    dual_metrics = evaluate_runtime_student(
+        corpus,
+        model,
+        publishability_reporting_mode="dual",
+        fixed_publishability_threshold=0.40,
+    )
+    assert set(dual_metrics["publishability_views"]) == {"calibrated", "fixed_040"}
+    assert float(dual_metrics["publishability_views"]["fixed_040"]["threshold"]) == pytest.approx(0.40)
     model_path = model.save_pt(tmp_path / "runtime_torch_bundle.pt")
     loaded = load_runtime_localizer_model(model_path)
 
@@ -206,3 +241,167 @@ def test_torch_example_weights_upweight_minority_regions_and_labels() -> None:
     assert weights.shape == (imbalanced.num_examples,)
     assert float(np.mean(weights)) == pytest.approx(1.0)
     assert float(np.max(weights)) > float(np.min(weights))
+
+
+def test_select_binary_threshold_improves_over_high_default_cutoff() -> None:
+    probabilities = np.asarray([0.39, 0.41, 0.42, 0.44, 0.46], dtype=np.float64)
+    labels = np.asarray([False, True, True, True, False], dtype=bool)
+
+    threshold, metadata = _select_binary_threshold(
+        probabilities,
+        labels,
+        default_threshold=0.65,
+    )
+
+    assert float(threshold) < 0.65
+    assert metadata["source"] == "validation_balanced_accuracy"
+    assert float(metadata["balanced_accuracy"]) >= 0.5
+    assert float(metadata["positive_fraction"]) > 0.0
+
+
+def test_aggregate_runtime_student_folds_reports_dual_publishability_views() -> None:
+    folds = [
+        {
+            "top1_accuracy": 0.20,
+            "median_horizontal_error_m": 100.0,
+            "p90_horizontal_error_m": 180.0,
+            "mean_publishability_probability": 0.45,
+            "mean_support_expansion_probability": 0.30,
+            "publishability_positive_fraction": 0.50,
+            "publishability_brier_score": 0.25,
+            "publishability_precision": 0.80,
+            "publishability_recall": 0.60,
+            "publishability_f1": 0.6857142857,
+            "support_expansion_positive_fraction": 0.20,
+            "support_expansion_brier_score": 0.22,
+            "support_expansion_precision": 0.40,
+            "support_expansion_recall": 0.50,
+            "support_expansion_f1": 0.4444444444,
+            "publishability_views": {
+                "calibrated": {
+                    "threshold": 0.44,
+                    "positive_fraction": 0.50,
+                    "precision": 0.80,
+                    "recall": 0.60,
+                    "f1": 0.6857142857,
+                },
+                "fixed_040": {
+                    "threshold": 0.40,
+                    "positive_fraction": 0.70,
+                    "precision": 0.72,
+                    "recall": 0.82,
+                    "f1": 0.7667532468,
+                },
+            },
+        },
+        {
+            "top1_accuracy": 0.30,
+            "median_horizontal_error_m": 120.0,
+            "p90_horizontal_error_m": 220.0,
+            "mean_publishability_probability": 0.40,
+            "mean_support_expansion_probability": 0.35,
+            "publishability_positive_fraction": 0.40,
+            "publishability_brier_score": 0.27,
+            "publishability_precision": 0.90,
+            "publishability_recall": 0.50,
+            "publishability_f1": 0.6428571429,
+            "support_expansion_positive_fraction": 0.30,
+            "support_expansion_brier_score": 0.24,
+            "support_expansion_precision": 0.45,
+            "support_expansion_recall": 0.55,
+            "support_expansion_f1": 0.495,
+            "publishability_views": {
+                "calibrated": {
+                    "threshold": 0.46,
+                    "positive_fraction": 0.40,
+                    "precision": 0.90,
+                    "recall": 0.50,
+                    "f1": 0.6428571429,
+                },
+                "fixed_040": {
+                    "threshold": 0.40,
+                    "positive_fraction": 0.80,
+                    "precision": 0.68,
+                    "recall": 0.90,
+                    "f1": 0.7746835443,
+                },
+            },
+        },
+    ]
+
+    aggregate = aggregate_runtime_student_folds(folds)
+
+    assert "publishability_views" in aggregate
+    assert set(aggregate["publishability_views"]) == {"calibrated", "fixed_040"}
+    assert float(
+        aggregate["publishability_views"]["fixed_040"]["median_positive_fraction"]
+    ) == pytest.approx(0.75)
+
+
+def test_run_torch_rank_key_prefers_nonzero_publishability_under_both_views() -> None:
+    module = _load_run_experiments_module()
+    better = {
+        "aggregate": {
+            "median_horizontal_error_m": 100.0,
+            "median_top1_accuracy": 0.25,
+            "median_publishability_brier_score": 0.20,
+            "publishability_views": {
+                "calibrated": {"median_positive_fraction": 0.10},
+                "fixed_040": {"median_positive_fraction": 0.20},
+            },
+        }
+    }
+    worse = {
+        "aggregate": {
+            "median_horizontal_error_m": 100.0,
+            "median_top1_accuracy": 0.25,
+            "median_publishability_brier_score": 0.20,
+            "publishability_views": {
+                "calibrated": {"median_positive_fraction": 0.10},
+                "fixed_040": {"median_positive_fraction": 0.0},
+            },
+        }
+    }
+
+    assert module._rank_key(better) < module._rank_key(worse)
+
+
+def test_run_torch_checkpoint_ranked_results_sorts_before_writing(
+    tmp_path: Path,
+) -> None:
+    module = _load_run_experiments_module()
+    output_path = tmp_path / "coarse_results.json"
+    results = [
+        {
+            "experiment_name": "coarse_bad",
+            "aggregate": {
+                "median_horizontal_error_m": 120.0,
+                "median_top1_accuracy": 0.20,
+                "median_publishability_brier_score": 0.21,
+                "publishability_views": {
+                    "calibrated": {"median_positive_fraction": 0.10},
+                    "fixed_040": {"median_positive_fraction": 0.10},
+                },
+            },
+        },
+        {
+            "experiment_name": "coarse_good",
+            "aggregate": {
+                "median_horizontal_error_m": 90.0,
+                "median_top1_accuracy": 0.25,
+                "median_publishability_brier_score": 0.20,
+                "publishability_views": {
+                    "calibrated": {"median_positive_fraction": 0.10},
+                    "fixed_040": {"median_positive_fraction": 0.10},
+                },
+            },
+        },
+    ]
+
+    module._checkpoint_ranked_results(output_path, results)
+
+    written = json.loads(output_path.read_text())
+    assert [item["experiment_name"] for item in written] == [
+        "coarse_good",
+        "coarse_bad",
+    ]

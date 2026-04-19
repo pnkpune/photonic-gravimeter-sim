@@ -11,6 +11,7 @@ from gravnav.datasets.bathymetry_loader import (
     BathymetryGrid,
     RegionalBathymetryManifest,
     RegionalDemoPackManifest,
+    _resolve_manifest_ref,
     load_bathymetry_grid_from_manifest,
     process_regular_array_bathymetry_grid,
     resolve_regional_demo_pack,
@@ -587,3 +588,52 @@ def test_run_maritime_demo_hybrid_runtime_selector_stays_in_sequence_segment() -
         hybrid["position_error"].horizontal_rmse_m,
         np.sqrt((10.0 ** 2 + 10.0 ** 2 + 5.0 ** 2 + 6.0 ** 2) / 4.0),
     )
+
+
+def test_resolve_manifest_ref_remaps_foreign_absolute_prefix(
+    tmp_path: Path,
+) -> None:
+    """Demo packs authored on another checkout (e.g. a Mac-absolute path) must
+    still resolve under the current project root when the suffix matches a
+    known top-level directory.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    real_asset = (
+        project_root
+        / "data"
+        / "gravity_maps"
+        / "processed"
+        / "norwegian_margin_gravity_map_manifest.json"
+    )
+    assert real_asset.exists(), (
+        "Test fixture relies on the tracked Norwegian gravity manifest existing "
+        "in the project; reseed it before running this test."
+    )
+    foreign_absolute = Path(
+        "/Users/someone/Downloads/photonic-gravimeter-sim"
+        "/data/gravity_maps/processed/norwegian_margin_gravity_map_manifest.json"
+    )
+    fake_manifest_path = tmp_path / "fake_demo_pack.json"
+    fake_manifest_path.write_text("{}", encoding="utf-8")
+
+    resolved = _resolve_manifest_ref(
+        foreign_absolute,
+        manifest_path=fake_manifest_path,
+    )
+    assert resolved == real_asset.resolve()
+
+
+def test_resolve_manifest_ref_returns_original_absolute_when_no_match(
+    tmp_path: Path,
+) -> None:
+    """If the absolute path cannot be remapped, the caller should still see the
+    original resolved absolute path so the error it raises is informative.
+    """
+    fake_manifest_path = tmp_path / "fake_demo_pack.json"
+    fake_manifest_path.write_text("{}", encoding="utf-8")
+    unresolvable = Path("/definitely/not/a/real/path/nowhere.json")
+    resolved = _resolve_manifest_ref(
+        unresolvable,
+        manifest_path=fake_manifest_path,
+    )
+    assert resolved == unresolvable.resolve()

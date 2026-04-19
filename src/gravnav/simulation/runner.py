@@ -2745,6 +2745,12 @@ class ScenarioSimulationRunner:
                                     selected_update,
                                     delayed_ins,
                                     current_time_s=t_now,
+                                    live_ins_state=ins.state,
+                                    previous_live_ins_state=(
+                                        None
+                                        if len(estimators.ins_states) == 0
+                                        else estimators.ins_states[-1]
+                                    ),
                                 )
                                 replayed_steps = 0
                                 matcher_reset = False
@@ -2824,6 +2830,12 @@ class ScenarioSimulationRunner:
                                     selected_update,
                                     ins,
                                     current_time_s=t_now,
+                                    live_ins_state=ins.state,
+                                    previous_live_ins_state=(
+                                        None
+                                        if len(estimators.ins_states) == 0
+                                        else estimators.ins_states[-1]
+                                    ),
                                 )
                                 seq_fb_summary = summarize_sequence_feedback(seq_fb_result)
                                 seq_fb_summary["target_step_index"] = None

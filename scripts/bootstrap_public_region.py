@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import Any
@@ -22,6 +23,21 @@ def _load_recipes(path: Path) -> dict[str, Any]:
     return dict(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _render_recipe_listing(path: Path) -> str:
+    recipes = _load_recipes(path)
+    lines: list[str] = []
+    for region_name in sorted(recipes):
+        recipe = dict(recipes[region_name])
+        description = str(recipe.get("description", "")).strip()
+        suggested_raw_path = str(recipe.get("suggested_raw_path", "")).strip()
+        lines.append(region_name)
+        if description:
+            lines.append(f"  description: {description}")
+        if suggested_raw_path:
+            lines.append(f"  suggested_raw_path: {suggested_raw_path}")
+    return "\n".join(lines)
+
+
 def _resolve_recipe(path: Path, region: str) -> dict[str, Any]:
     recipes = _load_recipes(path)
     if region not in recipes:
@@ -33,6 +49,33 @@ def _abs(path_str: str | None) -> str | None:
     if path_str is None:
         return None
     return str((PROJECT_ROOT / str(path_str)).resolve())
+
+
+def _validate_gravity_inputs(
+    *,
+    recipe: dict[str, Any],
+    raw_format: str,
+    raw_path: str,
+    dry_run: bool,
+) -> None:
+    supported_formats = {
+        str(value)
+        for value in recipe.get("supported_raw_formats", ())
+        if str(value).strip()
+    }
+    if raw_format not in supported_formats:
+        supported = ", ".join(sorted(supported_formats))
+        raise SystemExit(
+            f"--raw-format {raw_format!r} is not supported for {recipe['region_name']!r}. "
+            f"Supported formats: {supported}"
+        )
+    if dry_run:
+        return
+    if not Path(raw_path).expanduser().exists():
+        raise SystemExit(
+            f"Raw input does not exist: {raw_path}. "
+            f"Place a supported gravity file there or pass --raw-path explicitly."
+        )
 
 
 def _build_gravity_command(
@@ -163,7 +206,7 @@ def _build_multimodal_command(
 
 
 def _run_command(cmd: list[str], *, dry_run: bool) -> None:
-    print(" ".join(cmd))
+    print(shlex.join(cmd))
     if dry_run:
         return
     subprocess.run(cmd, check=True)
@@ -173,10 +216,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Bootstrap one external public region through the generic prep pipeline."
     )
-    parser.add_argument("--region", required=True)
+    parser.add_argument("--region")
     parser.add_argument(
         "--recipe-path",
         default=str(DEFAULT_RECIPE_PATH),
+    )
+    parser.add_argument(
+        "--list-regions",
+        action="store_true",
+        help="List available region recipes and exit.",
+    )
+    parser.add_argument(
+        "--print-recipe",
+        action="store_true",
+        help="Print the selected recipe before executing the requested stage.",
     )
     parser.add_argument(
         "--stage",
@@ -198,9 +251,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
     recipe_path = Path(args.recipe_path).expanduser().resolve()
+    if bool(args.list_regions):
+        print(_render_recipe_listing(recipe_path))
+        return 0
+    if not str(args.region).strip():
+        raise SystemExit("--region is required unless --list-regions is used.")
     recipe = _resolve_recipe(recipe_path, str(args.region))
     stage = str(args.stage)
     raw_path = (
@@ -210,6 +268,15 @@ def main() -> int:
     )
     if stage in {"gravity", "all"} and not str(args.raw_format).strip():
         raise SystemExit("--raw-format is required when stage includes gravity.")
+    if bool(args.print_recipe):
+        print(json.dumps(recipe, indent=2, sort_keys=True))
+    if stage in {"gravity", "all"}:
+        _validate_gravity_inputs(
+            recipe=recipe,
+            raw_format=str(args.raw_format),
+            raw_path=str(raw_path),
+            dry_run=bool(args.dry_run),
+        )
 
     if stage in {"gravity", "all"}:
         _run_command(

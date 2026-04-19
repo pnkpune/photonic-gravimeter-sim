@@ -84,6 +84,8 @@ def _run_one(
     directional_allowed = None
     sequence_applied = None
     sequence_allowed = None
+    sequence_trust_allowed = None
+    sequence_trust_positive = None
 
     if archive_path.exists():
         with np.load(archive_path, allow_pickle=False) as data:
@@ -95,6 +97,15 @@ def _run_one(
                 seq_rows = streams.get("sequence_feedback", [])
                 sequence_allowed = sum(1 for row in seq_rows if row.get("feedback_allowed"))
                 sequence_applied = sum(1 for row in seq_rows if row.get("applied"))
+                sequence_trust_allowed = sum(
+                    1 for row in seq_rows if row.get("trust_allowed") is True
+                )
+                sequence_trust_positive = sum(
+                    1
+                    for row in seq_rows
+                    if row.get("trust_probability") is not None
+                    and float(row["trust_probability"]) >= 0.5
+                )
 
     return {
         "label": label,
@@ -115,6 +126,8 @@ def _run_one(
         "directional_applied_updates": directional_applied,
         "sequence_allowed_updates": sequence_allowed,
         "sequence_applied_updates": sequence_applied,
+        "sequence_trust_allowed_updates": sequence_trust_allowed,
+        "sequence_trust_positive_updates": sequence_trust_positive,
         "metrics_path": str(metrics_path),
     }
 
@@ -235,6 +248,89 @@ def _profile_configs(profile: str) -> list[dict[str, Any]]:
                 ],
             },
         ]
+    if profile == "hybrid_feedback":
+        return [
+            {"label": "live_ins", "extra_flags": ["--disable-map-match"]},
+            {
+                "label": "sequence_lag_smoothed",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-lag-smoother",
+                ],
+            },
+            {
+                "label": "sequence_replay_heuristic",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                ],
+            },
+            {
+                "label": "sequence_replay_trust_gated",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                    "--sequence-feedback-min-projected-std-m",
+                    "1.0",
+                    "--sequence-feedback-inflation",
+                    "6.0",
+                    "--sequence-feedback-trust-gate-source",
+                    "both",
+                    "--sequence-feedback-max-predicted-error-delta-m",
+                    "0.0",
+                    "--sequence-feedback-apply-trust-covariance-scale",
+                ],
+            },
+            {
+                "label": "sequence_bias_transfer_heuristic",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "bias_transfer",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                ],
+            },
+            {
+                "label": "sequence_bias_transfer_trust_gated",
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "bias_transfer",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                    "--sequence-feedback-min-projected-std-m",
+                    "1.0",
+                    "--sequence-feedback-inflation",
+                    "6.0",
+                    "--sequence-feedback-trust-gate-source",
+                    "both",
+                    "--sequence-feedback-max-predicted-error-delta-m",
+                    "0.0",
+                    "--sequence-feedback-apply-trust-covariance-scale",
+                ],
+            },
+        ]
     raise ValueError(f"Unsupported benchmark profile {profile!r}.")
 
 
@@ -242,7 +338,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run benchmark comparisons across map-matching modes.")
     parser.add_argument(
         "--profile",
-        choices=("priority3_full", "regional_core"),
+        choices=("priority3_full", "regional_core", "hybrid_feedback"),
         default="priority3_full",
         help="Named benchmark configuration set.",
     )
@@ -269,6 +365,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional regional map name resolved through the dataset layer.",
     )
     parser.add_argument(
+        "--demo-pack-manifest",
+        default=None,
+        help="Optional demo-pack manifest passed through to run_single_scenario.py.",
+    )
+    parser.add_argument(
         "--regional-map-raw-path",
         default=None,
         help="Optional raw CSV override used when building the regional map cache.",
@@ -290,6 +391,40 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional PF particle-count override passed through to the single-run CLI.",
     )
+    parser.add_argument(
+        "--sequence-feedback-trust-model-path",
+        default=None,
+        help="Optional trust-model NPZ used by hybrid_feedback trust-gated runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-min-trust-probability",
+        type=float,
+        default=0.5,
+        help="Trust threshold passed through to trust-gated sequence feedback runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-apply-trust-gain-alpha",
+        action="store_true",
+        help="Apply trust-model gain alpha during trust-gated hybrid feedback runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-gain-alpha-min",
+        type=float,
+        default=0.0,
+        help="Minimum trust-derived gain alpha passed to trust-gated runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-gain-alpha-max",
+        type=float,
+        default=1.0,
+        help="Maximum trust-derived gain alpha passed to trust-gated runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-fixed-gain-alpha-override",
+        type=float,
+        default=None,
+        help="Optional fixed gain alpha override passed to trust-gated sequence-feedback runs.",
+    )
     return parser
 
 
@@ -298,6 +433,19 @@ def main() -> int:
     args = parser.parse_args()
     if args.map_path is not None and args.regional_map is not None:
         parser.error("--map-path and --regional-map are mutually exclusive.")
+    if args.demo_pack_manifest is not None and (
+        args.map_path is not None or args.regional_map is not None
+    ):
+        parser.error(
+            "--demo-pack-manifest cannot be combined with --map-path or --regional-map."
+        )
+    if (
+        args.profile == "hybrid_feedback"
+        and args.sequence_feedback_trust_model_path is None
+    ):
+        parser.error(
+            "--sequence-feedback-trust-model-path is required with --profile hybrid_feedback."
+        )
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -307,6 +455,11 @@ def main() -> int:
         base_flags.extend(["--map-path", args.map_path])
     if args.regional_map is not None:
         base_flags.extend(["--regional-map", args.regional_map])
+    if args.demo_pack_manifest is not None:
+        base_flags.extend(["--demo-pack-manifest", args.demo_pack_manifest])
+        base_flags.extend(
+            ["--use-bathymetry", "--use-magnetics", "--use-current-correction"]
+        )
     if args.regional_map_raw_path is not None:
         base_flags.extend(["--regional-map-raw-path", args.regional_map_raw_path])
     if args.regional_map_force_reprocess:
@@ -320,13 +473,40 @@ def main() -> int:
     configs = _profile_configs(args.profile)
     for cfg in configs:
         print(f"\n=== {cfg['label']} ===", flush=True)
+        extra_flags = list(cfg["extra_flags"])
+        if cfg["label"].endswith("trust_gated"):
+            extra_flags.extend(
+                [
+                    "--sequence-feedback-trust-model-path",
+                    str(args.sequence_feedback_trust_model_path),
+                    "--sequence-feedback-min-trust-probability",
+                    str(args.sequence_feedback_min_trust_probability),
+                ]
+            )
+            if args.sequence_feedback_apply_trust_gain_alpha:
+                extra_flags.extend(
+                    [
+                        "--sequence-feedback-apply-trust-gain-alpha",
+                        "--sequence-feedback-trust-gain-alpha-min",
+                        str(args.sequence_feedback_trust_gain_alpha_min),
+                        "--sequence-feedback-trust-gain-alpha-max",
+                        str(args.sequence_feedback_trust_gain_alpha_max),
+                    ]
+                )
+            if args.sequence_feedback_fixed_gain_alpha_override is not None:
+                extra_flags.extend(
+                    [
+                        "--sequence-feedback-fixed-gain-alpha-override",
+                        str(args.sequence_feedback_fixed_gain_alpha_override),
+                    ]
+                )
         row = _run_one(
             cfg["label"],
             output_dir=output_dir,
             seed=int(args.seed),
             scenario=args.scenario,
             base_flags=base_flags,
-            extra_flags=cfg["extra_flags"],
+            extra_flags=extra_flags,
         )
         rows.append(row)
         print(json.dumps(row, indent=2), flush=True)

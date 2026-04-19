@@ -32,7 +32,9 @@ if str(SRC_DIR) not in sys.path:
 
 import numpy as np
 
+from gravnav.datasets import resolve_regional_demo_pack
 from gravnav.datasets.gravity_loader import ensure_regional_gravity_map
+from gravnav.physics.tides import TideCorrectionSpec
 from gravnav.estimators.map_match_pf import MapMatchPFSpec
 from gravnav.physics.gravity_map import (
     GaussianAnomalySource,
@@ -40,9 +42,12 @@ from gravnav.physics.gravity_map import (
     SinusoidalAnomalySource,
     build_synthetic_gravity_map,
 )
+from gravnav.sensors.bathymetry import BathymetrySensorSpec
+from gravnav.sensors.current_profile import CurrentProfileSensorSpec
 from gravnav.sensors.depth import DepthSensorSpec
 from gravnav.sensors.gravimeter import GravimeterSpec
 from gravnav.sensors.gravity_gradiometer import GravityGradiometerSpec
+from gravnav.sensors.magnetometer import MagnetometerSensorSpec
 from gravnav.sensors.imu import IMUSpec
 from gravnav.sensors.velocity_aid import VelocityAidSpec
 from gravnav.simulation.metrics import ScenarioMetricsSummary, scenario_metrics_from_result
@@ -72,6 +77,9 @@ DEFAULT_GRAVIMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravimeter_proto.jso
 DEFAULT_DEPTH_CONFIG = PROJECT_ROOT / "configs/sensors/depth_sensor.json"
 DEFAULT_VELOCITY_AID_CONFIG = PROJECT_ROOT / "configs/sensors/velocity_aid.json"
 DEFAULT_GRADIOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/gravity_gradiometer_proto.json"
+DEFAULT_BATHYMETRY_CONFIG = PROJECT_ROOT / "configs/sensors/bathymetry_sensor.json"
+DEFAULT_MAGNETOMETER_CONFIG = PROJECT_ROOT / "configs/sensors/magnetometer_scalar.json"
+DEFAULT_CURRENT_PROFILE_CONFIG = PROJECT_ROOT / "configs/sensors/current_profile_sensor.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/outputs/runs/single_run"
 
 
@@ -104,14 +112,19 @@ def _resolve_json_config_path(path_or_name: str | Path, *, base_dir: Path) -> Pa
     return (base_dir / f"{Path(text).name}.json").resolve()
 
 
-def _instantiate_dataclass(spec_cls: type[SpecT], mapping: Mapping[str, Any]) -> SpecT:
+def _instantiate_dataclass(
+    spec_cls: type[SpecT],
+    mapping: Mapping[str, Any],
+    *,
+    ignore_unknown: bool = False,
+) -> SpecT:
     """Instantiate a dataclass from a mapping while rejecting unknown keys."""
     if not is_dataclass(spec_cls):
         raise TypeError(f"{spec_cls!r} is not a dataclass type.")
 
     allowed = {field.name for field in fields(spec_cls)}
     unknown = sorted(set(mapping.keys()) - allowed)
-    if unknown:
+    if unknown and not ignore_unknown:
         raise KeyError(
             f"Unsupported keys for {spec_cls.__name__}: {unknown}. "
             f"Allowed keys: {sorted(allowed)}."
@@ -275,6 +288,11 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         measurement_std_mps=args.velocity_measurement_std_mps,
         measurement_frame=args.velocity_measurement_frame,
     )
+    velocity_aid.use_current_correction = bool(
+        getattr(args, "use_current_correction", False)
+    )
+    if velocity_aid.use_current_correction:
+        velocity_aid.measurement_mode = "water_relative"
     depth_aid = DepthFusionConfig(
         enabled=not args.disable_depth_aid,
         schedule=PeriodicUpdateSchedule(every_steps=args.depth_update_every_steps),
@@ -314,12 +332,29 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         feedback_covariance_inflation=args.pf_feedback_covariance_inflation,
         use_directional_feedback=bool(getattr(args, "use_directional_feedback", False)),
         use_gradiometer=bool(getattr(args, "use_gradiometer", False)),
+        use_bathymetry=bool(getattr(args, "use_bathymetry", False)),
+        use_magnetics=bool(getattr(args, "use_magnetics", False)),
         gradient_meas_std_per_s2=(
             None
             if getattr(args, "pf_gradient_std_per_s2", None) is None
             else float(args.pf_gradient_std_per_s2)
         ),
         use_sequence_feedback=bool(getattr(args, "use_sequence_feedback", False)),
+    )
+    map_match.bathymetry_meas_std_m = (
+        None
+        if getattr(args, "bathymetry_measurement_std_m", None) is None
+        else float(args.bathymetry_measurement_std_m)
+    )
+    map_match.magnetic_meas_std_nt = (
+        None
+        if getattr(args, "magnetic_measurement_std_nt", None) is None
+        else float(args.magnetic_measurement_std_nt)
+    )
+    map_match.magnetic_gradient_meas_std_nt_per_m = (
+        None
+        if getattr(args, "magnetic_gradient_measurement_std_nt_per_m", None) is None
+        else float(args.magnetic_gradient_measurement_std_nt_per_m)
     )
     map_match.sequence_feedback_spec.min_peak_probability = (
         float(args.sequence_feedback_min_peak_prob)
@@ -330,6 +365,9 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
     )
     map_match.sequence_feedback_spec.min_horizontal_eigenvalue_ratio = float(
         args.sequence_feedback_min_eigenvalue_ratio
+    )
+    map_match.sequence_feedback_spec.min_projected_std_m = float(
+        args.sequence_feedback_min_projected_std_m
     )
     map_match.sequence_feedback_spec.max_horizontal_std_m = (
         float(args.sequence_feedback_max_horizontal_std_m)
@@ -347,6 +385,45 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         None
         if args.sequence_feedback_nis_threshold is None
         else float(args.sequence_feedback_nis_threshold)
+    )
+    map_match.sequence_feedback_spec.trust_model_export_path = (
+        None
+        if not str(args.sequence_feedback_trust_model_path).strip()
+        else str(_resolve_path(args.sequence_feedback_trust_model_path))
+    )
+    map_match.sequence_feedback_spec.trust_gate_source = str(
+        args.sequence_feedback_trust_gate_source
+    )
+    map_match.sequence_feedback_spec.min_trust_probability = float(
+        args.sequence_feedback_min_trust_probability
+    )
+    map_match.sequence_feedback_spec.max_predicted_error_delta_m = (
+        None
+        if args.sequence_feedback_max_predicted_error_delta_m is None
+        else float(args.sequence_feedback_max_predicted_error_delta_m)
+    )
+    map_match.sequence_feedback_spec.apply_trust_covariance_scale = bool(
+        args.sequence_feedback_apply_trust_covariance_scale
+    )
+    map_match.sequence_feedback_spec.trust_covariance_scale_min = float(
+        args.sequence_feedback_trust_covariance_scale_min
+    )
+    map_match.sequence_feedback_spec.trust_covariance_scale_max = float(
+        args.sequence_feedback_trust_covariance_scale_max
+    )
+    map_match.sequence_feedback_spec.apply_trust_gain_alpha = bool(
+        args.sequence_feedback_apply_trust_gain_alpha
+    )
+    map_match.sequence_feedback_spec.trust_gain_alpha_min = float(
+        args.sequence_feedback_trust_gain_alpha_min
+    )
+    map_match.sequence_feedback_spec.trust_gain_alpha_max = float(
+        args.sequence_feedback_trust_gain_alpha_max
+    )
+    map_match.sequence_feedback_spec.fixed_gain_alpha_override = (
+        None
+        if args.sequence_feedback_fixed_gain_alpha_override is None
+        else float(args.sequence_feedback_fixed_gain_alpha_override)
     )
     map_match.use_sequence_lag_smoother = bool(
         getattr(args, "use_sequence_lag_smoother", False)
@@ -434,6 +511,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gradiometer-config",
         default=_relative_to_root(DEFAULT_GRADIOMETER_CONFIG),
         help="Gravity-gradiometer spec config path or bare JSON stem under configs/sensors.",
+    )
+    parser.add_argument(
+        "--bathymetry-config",
+        default=_relative_to_root(DEFAULT_BATHYMETRY_CONFIG),
+        help="Bathymetry-sensor spec config path or bare JSON stem under configs/sensors.",
+    )
+    parser.add_argument(
+        "--magnetometer-config",
+        default=_relative_to_root(DEFAULT_MAGNETOMETER_CONFIG),
+        help="Magnetometer spec config path or bare JSON stem under configs/sensors.",
+    )
+    parser.add_argument(
+        "--current-profile-config",
+        default=_relative_to_root(DEFAULT_CURRENT_PROFILE_CONFIG),
+        help="Current-profile spec config path or bare JSON stem under configs/sensors.",
+    )
+    parser.add_argument(
+        "--demo-pack-manifest",
+        default=None,
+        help="Optional demo-pack manifest. When set it overrides scenario and regional asset selection.",
     )
     parser.add_argument(
         "--map-path",
@@ -595,6 +692,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Depth-aiding fusion standard deviation in metres.",
     )
     parser.add_argument(
+        "--bathymetry-measurement-std-m",
+        type=float,
+        default=1.5,
+        help="Bathymetry measurement standard deviation used by the sequence matcher.",
+    )
+    parser.add_argument(
+        "--magnetic-measurement-std-nt",
+        type=float,
+        default=6.0,
+        help="Magnetic total-field measurement standard deviation used by the sequence matcher.",
+    )
+    parser.add_argument(
+        "--magnetic-gradient-measurement-std-nt-per-m",
+        type=float,
+        default=0.5,
+        help="Magnetic gradient measurement standard deviation used by the sequence matcher.",
+    )
+    parser.add_argument(
         "--pf-gravity-std-mps2",
         type=float,
         default=1.0e-5,
@@ -639,6 +754,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--use-gradiometer",
         action="store_true",
         help="Enable horizontal gravity-gradient sampling and PF gradient likelihood.",
+    )
+    parser.add_argument(
+        "--use-bathymetry",
+        action="store_true",
+        help="Enable bathymetry sensing and bathymetry likelihood.",
+    )
+    parser.add_argument(
+        "--use-magnetics",
+        action="store_true",
+        help="Enable magnetic sensing and magnetic likelihood.",
+    )
+    parser.add_argument(
+        "--use-current-correction",
+        action="store_true",
+        help="Enable current-aware velocity correction using the current field.",
     )
     pf_feedback_group = parser.add_mutually_exclusive_group()
     pf_feedback_group.add_argument(
@@ -715,6 +845,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sequence-feedback-min-projected-std-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum allowed projected sequence-feedback standard deviation for "
+            "directional feedback. Use this to reject numerically overconfident "
+            "collapsed posteriors."
+        ),
+    )
+    parser.add_argument(
         "--sequence-feedback-max-horizontal-std-m",
         type=float,
         default=80.0,
@@ -743,6 +883,76 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=25.0,
         help="Optional NIS gate for delayed sequence feedback.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-model-path",
+        default="",
+        help="Optional exported trust-model NPZ used for sequence feedback gating.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-gate-source",
+        choices=("heuristic", "trust_model", "both"),
+        default="heuristic",
+        help="How sequence feedback trust gating should be applied.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-min-trust-probability",
+        type=float,
+        default=0.5,
+        help="Minimum trust probability required when trust gating is active.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-max-predicted-error-delta-m",
+        type=float,
+        default=None,
+        help=(
+            "Optional maximum trust-model predicted replay error delta in metres. "
+            "When set, trust-gated sequence feedback is rejected if the model "
+            "predicts a larger positive error delta."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-apply-trust-covariance-scale",
+        action="store_true",
+        help="Scale sequence feedback covariance using the trust model output.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-covariance-scale-min",
+        type=float,
+        default=0.75,
+        help="Minimum trust-derived covariance scale.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-covariance-scale-max",
+        type=float,
+        default=2.0,
+        help="Maximum trust-derived covariance scale.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-apply-trust-gain-alpha",
+        action="store_true",
+        help="Scale accepted sequence-feedback corrections using the trust-model gain alpha.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-gain-alpha-min",
+        type=float,
+        default=0.0,
+        help="Minimum trust-derived feedback gain alpha.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-gain-alpha-max",
+        type=float,
+        default=1.0,
+        help="Maximum trust-derived feedback gain alpha.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-fixed-gain-alpha-override",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed feedback gain alpha applied to accepted sequence updates. "
+            "When set it overrides trust-derived gain prediction."
+        ),
     )
     parser.add_argument(
         "--sequence-lag-output-steps",
@@ -874,8 +1084,32 @@ def main() -> int:
     args = parser.parse_args()
     if args.map_path is not None and args.regional_map is not None:
         parser.error("--map-path and --regional-map are mutually exclusive.")
+    if args.demo_pack_manifest is not None and (
+        args.map_path is not None or args.regional_map is not None
+    ):
+        parser.error(
+            "--demo-pack-manifest cannot be combined with --map-path or --regional-map."
+        )
 
-    scenario, scenario_source = _load_scenario(args.scenario)
+    demo_pack_assets = None
+    scenario_from_demo_pack = None
+    sequence_profile_source = None
+    if args.demo_pack_manifest is not None:
+        demo_pack_assets = resolve_regional_demo_pack(_resolve_path(args.demo_pack_manifest))
+        scenario_from_demo_pack = ScenarioSpec.from_mapping(
+            load_config_mapping(demo_pack_assets.scenario_path)
+        )
+        scenario = scenario_from_demo_pack
+        scenario_source = _relative_to_root(demo_pack_assets.scenario_path)
+        sequence_profile_source = _relative_to_root(demo_pack_assets.sequence_profile_path)
+        if demo_pack_assets.bathymetry_grid is not None:
+            args.use_bathymetry = True
+        if demo_pack_assets.magnetic_grid is not None:
+            args.use_magnetics = True
+        if demo_pack_assets.current_field is not None:
+            args.use_current_correction = True
+    else:
+        scenario, scenario_source = _load_scenario(args.scenario)
 
     imu_spec, imu_cfg, imu_source = _load_sensor_spec(
         IMUSpec,
@@ -906,15 +1140,61 @@ def main() -> int:
             args.gradiometer_config,
             base_dir=DEFAULT_GRADIOMETER_CONFIG.parent,
         )
+    bathymetry_spec = None
+    bathymetry_cfg = None
+    bathymetry_source = None
+    if args.use_bathymetry:
+        bathymetry_spec, bathymetry_cfg, bathymetry_source = _load_sensor_spec(
+            BathymetrySensorSpec,
+            args.bathymetry_config,
+            base_dir=DEFAULT_BATHYMETRY_CONFIG.parent,
+        )
+    magnetometer_spec = None
+    magnetometer_cfg = None
+    magnetometer_source = None
+    if args.use_magnetics:
+        magnetometer_spec, magnetometer_cfg, magnetometer_source = _load_sensor_spec(
+            MagnetometerSensorSpec,
+            args.magnetometer_config,
+            base_dir=DEFAULT_MAGNETOMETER_CONFIG.parent,
+        )
+    current_profile_spec = None
+    current_profile_cfg = None
+    current_profile_source = None
+    if args.use_current_correction:
+        current_profile_spec, current_profile_cfg, current_profile_source = _load_sensor_spec(
+            CurrentProfileSensorSpec,
+            args.current_profile_config,
+            base_dir=DEFAULT_CURRENT_PROFILE_CONFIG.parent,
+        )
 
     truth = build_truth_trajectory_from_scenario(scenario, dt_s=args.dt_s)
 
     map_source: str
     map_manifest_source: str | None = None
     regional_map_info: dict[str, Any] | None = None
+    bathymetry_map = None
+    magnetic_map = None
+    current_field = None
+    tide_correction_spec = None
     if args.disable_map_match:
         map_model: GravityGridMap | None = None
         map_source = "disabled"
+    elif demo_pack_assets is not None:
+        map_model = demo_pack_assets.gravity_map
+        map_source = _relative_to_root(demo_pack_assets.gravity_map_path)
+        map_manifest_source = _relative_to_root(demo_pack_assets.gravity_manifest_path)
+        regional_map_info = {
+            "demo_pack_region": demo_pack_assets.manifest.region_name,
+            "demo_pack_manifest": _relative_to_root(demo_pack_assets.manifest_path),
+        }
+        bathymetry_map = demo_pack_assets.bathymetry_grid if args.use_bathymetry else None
+        magnetic_map = demo_pack_assets.magnetic_grid if args.use_magnetics else None
+        current_field = demo_pack_assets.current_field if args.use_current_correction else None
+        if demo_pack_assets.tide_config_path is not None:
+            tide_correction_spec = TideCorrectionSpec(
+                **load_config_mapping(demo_pack_assets.tide_config_path)
+            )
     elif args.regional_map is not None:
         map_model, manifest, processed_map_path, manifest_path = ensure_regional_gravity_map(
             args.regional_map,
@@ -941,6 +1221,24 @@ def main() -> int:
         map_source = "synthetic"
 
     runner_config = _build_runner_config(args)
+    if demo_pack_assets is not None and sequence_profile_source is not None:
+        runner_config.map_match.sequence_spec = _instantiate_dataclass(
+            GravitySequenceMatcherSpec,
+            load_config_mapping(demo_pack_assets.sequence_profile_path),
+            ignore_unknown=True,
+        )
+        runner_config.map_match.gravity_meas_std_mps2 = float(
+            runner_config.map_match.sequence_spec.gravity_meas_std_mps2
+        )
+        runner_config.map_match.bathymetry_meas_std_m = (
+            runner_config.map_match.sequence_spec.bathymetry_meas_std_m
+        )
+        runner_config.map_match.magnetic_meas_std_nt = (
+            runner_config.map_match.sequence_spec.magnetic_meas_std_nt
+        )
+        runner_config.map_match.magnetic_gradient_meas_std_nt_per_m = (
+            runner_config.map_match.sequence_spec.magnetic_gradient_meas_std_nt_per_m
+        )
 
     effective_config = {
         "scenario_source": scenario_source,
@@ -956,19 +1254,32 @@ def main() -> int:
             "velocity_aid": velocity_cfg,
             "gradiometer_source": gradiometer_source,
             "gradiometer": gradiometer_cfg,
+            "bathymetry_source": bathymetry_source,
+            "bathymetry": bathymetry_cfg,
+            "magnetometer_source": magnetometer_source,
+            "magnetometer": magnetometer_cfg,
+            "current_profile_source": current_profile_source,
+            "current_profile": current_profile_cfg,
         },
         "runner": {
             "dt_s": float(scenario.default_dt_s if args.dt_s is None else args.dt_s),
             "seed": int(args.seed),
             "map_source": map_source,
             "map_manifest_source": map_manifest_source,
+            "sequence_profile_source": sequence_profile_source,
             "output_dir": _relative_to_root(_resolve_path(args.output_dir)),
             "regional_map": regional_map_info,
+            "demo_pack_manifest": (
+                None
+                if demo_pack_assets is None
+                else _relative_to_root(demo_pack_assets.manifest_path)
+            ),
             "velocity_aid": {
                 "enabled": not args.disable_velocity_aid,
                 "every_steps": int(args.velocity_update_every_steps),
                 "measurement_std_mps": list(args.velocity_measurement_std_mps),
                 "measurement_frame": args.velocity_measurement_frame,
+                "use_current_correction": bool(args.use_current_correction),
                 "velocity_only_update": True,
             },
             "depth_aid": {
@@ -989,6 +1300,17 @@ def main() -> int:
                     args.pf_feedback_covariance_inflation
                 ),
                 "use_gradiometer": bool(args.use_gradiometer),
+                "use_bathymetry": bool(args.use_bathymetry),
+                "use_magnetics": bool(args.use_magnetics),
+                "bathymetry_measurement_std_m": float(
+                    args.bathymetry_measurement_std_m
+                ),
+                "magnetic_measurement_std_nt": float(
+                    args.magnetic_measurement_std_nt
+                ),
+                "magnetic_gradient_measurement_std_nt_per_m": float(
+                    args.magnetic_gradient_measurement_std_nt_per_m
+                ),
                 "gradient_std_per_s2": float(args.pf_gradient_std_per_s2),
                 "use_sequence_feedback": bool(args.use_sequence_feedback),
                 "use_sequence_lag_smoother": bool(args.use_sequence_lag_smoother),
@@ -997,6 +1319,9 @@ def main() -> int:
                 ),
                 "sequence_feedback_max_horizontal_std_m": float(
                     args.sequence_feedback_max_horizontal_std_m
+                ),
+                "sequence_feedback_min_projected_std_m": float(
+                    args.sequence_feedback_min_projected_std_m
                 ),
                 "sequence_feedback_max_correction_m": float(
                     args.sequence_feedback_max_correction_m
@@ -1011,6 +1336,31 @@ def main() -> int:
                     None
                     if args.sequence_feedback_nis_threshold is None
                     else float(args.sequence_feedback_nis_threshold)
+                ),
+                "sequence_feedback_trust_model_path": (
+                    None
+                    if not str(args.sequence_feedback_trust_model_path).strip()
+                    else str(_resolve_path(args.sequence_feedback_trust_model_path))
+                ),
+                "sequence_feedback_trust_gate_source": str(
+                    args.sequence_feedback_trust_gate_source
+                ),
+                "sequence_feedback_min_trust_probability": float(
+                    args.sequence_feedback_min_trust_probability
+                ),
+                "sequence_feedback_max_predicted_error_delta_m": (
+                    None
+                    if args.sequence_feedback_max_predicted_error_delta_m is None
+                    else float(args.sequence_feedback_max_predicted_error_delta_m)
+                ),
+                "sequence_feedback_apply_trust_covariance_scale": bool(
+                    args.sequence_feedback_apply_trust_covariance_scale
+                ),
+                "sequence_feedback_trust_covariance_scale_min": float(
+                    args.sequence_feedback_trust_covariance_scale_min
+                ),
+                "sequence_feedback_trust_covariance_scale_max": float(
+                    args.sequence_feedback_trust_covariance_scale_max
                 ),
                 "sequence_lag_output_steps": (
                     None
@@ -1078,6 +1428,13 @@ def main() -> int:
         depth_spec=None if args.disable_depth_aid else depth_spec,
         velocity_aid_spec=None if args.disable_velocity_aid else velocity_aid_spec,
         gradiometer_spec=gradiometer_spec,
+        bathymetry_spec=bathymetry_spec,
+        bathymetry_map=bathymetry_map,
+        magnetometer_spec=magnetometer_spec,
+        magnetic_map=magnetic_map,
+        current_profile_spec=current_profile_spec,
+        current_field=current_field,
+        tide_correction_spec=tide_correction_spec,
         map_model=map_model,
         metadata=metadata,
         seed=args.seed,

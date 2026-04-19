@@ -2,7 +2,7 @@
 
 `photonic-gravimeter-sim` is a GPS-denied navigation simulator for passive, stealth-compatible missions. The target product is an INS-centered navigation stack where gravity is the primary Earth-signature anchor and additional passive data are used only to reduce ambiguity without reintroducing GNSS.
 
-The frozen milestone tag is `v0.1-off-grid-maritime-demo`. Current development is on `feature/photonic-digital-twin`.
+The frozen milestone tag is `v0.1-off-grid-maritime-demo`. Current development is on `feature/learned-earth-signature-localizer`.
 
 This README is the shortest repo-level answer to four questions:
 
@@ -40,6 +40,10 @@ Mission context for the headline numbers:
   - duration: about `4500 s` (`1.25 h`)
   - route pattern: `11` straight `300 s` legs plus `10` coordinated `120 s` turns at `4.0 m/s`
   - purpose: first realistic off-grid maritime/UUV-style passive-navigation demo
+- current hybrid INS-aiding checkpoint:
+  - architecture: classical sequence matcher proposes delayed corrections; ML trust logic gates and attenuates replay into the live INS
+  - aggregation: current headline numbers are seed `42` scout runs on Norway and Helgeland
+  - purpose: test whether ML can safely improve INS by modulating correction strength instead of replacing the INS
 - current three-region public branch result:
   - regions: Norwegian margin, Helgeland offshore, Nordland offshore
   - aggregation: medians across seeds `42/123/777`
@@ -75,6 +79,17 @@ Main validated numbers:
   - photonic gravity + bathymetry sequence `197.839 m`
   - photonic gravity + bathymetry lag `197.371 m`
   - horizontal HMI `0.000`
+- current hybrid INS-aiding scout:
+  - Norway:
+    - live INS `241.526 m`
+    - old trust-gated replay `234.578 m`
+    - trust-gated replay with fixed gain `0.50`: `179.606 m`
+    - horizontal HMI `0.000`
+  - Helgeland:
+    - live INS `161.608 m`
+    - old trust-gated replay `173.017 m`
+    - trust-gated replay with fixed gain `0.25`: `101.799 m`
+    - horizontal HMI `0.000`
 - current public three-region branch result:
   - Norwegian margin best validated reported output: `219.124 m` vs live INS `241.526 m`
   - Helgeland and Nordland now have useful raw Earth-signature windows, but the latest strict stateful selector falls back to INS there to keep HMI at `0.000`
@@ -82,10 +97,11 @@ Main validated numbers:
 What has not helped:
 
 - `current-aware prior` currently degrades all three public regions
-- direct feedback / replay / recentering heuristics have not produced a robust win
+- unattenuated direct feedback / replay / recentering heuristics have not produced a robust win
 - the photonic digital twin improved realism and diagnostics, not raw accuracy by itself
 - stricter publication logic removed weak-region HMI leaks, but only by falling back to INS
 - the first tiny real-data learned localizer bundle is mechanically valid, but it is not yet competitive with the classical matcher
+- trust-gated replay without gain control was safe but still slightly worse than live INS on the main acceptance regions
 
 ## Core Approach
 
@@ -95,8 +111,8 @@ The current architecture is still deliberately conservative:
 - Gravity disturbance is the mandatory global Earth-signature.
 - Gravity history is matched with a sequence estimator rather than pointwise only.
 - Bathymetry / acoustic terrain and magnetic anomaly are optional ambiguity-reduction channels.
-- The strongest product output today is delayed, not aggressively closed-loop.
-- An experimental learned delayed localizer now exists as an alternate matcher path.
+- The most promising current runtime path is hybrid: classical delayed sequence corrections plus ML trust / gain control into the live INS.
+- An experimental learned delayed localizer still exists as an alternate matcher path, but it is not the promoted runtime direction.
 - Any output that cannot maintain integrity must fall back to INS.
 
 The estimator family on the current branch is:
@@ -104,10 +120,11 @@ The estimator family on the current branch is:
 - live INS + depth + velocity
 - observe-only gravity sequence matcher
 - bounded-lag delayed output
+- hybrid sequence-feedback trust / gain controller for INS aiding
 - ambiguity-aware publication and fallback logic
 - experimental learned delayed localizer as an alternate delayed matcher
 
-The strongest validated path on this branch is still classical, not learned. No GNSS is used in the demo paths.
+The strongest mission-facing result on this branch is now hybrid classical+ML INS aiding, not a standalone learned navigator. No GNSS is used in the demo paths.
 
 ## Core Equations
 
@@ -490,6 +507,30 @@ Meaning:
 - the next ML work, if continued, must be large-corpus training and held-out regional evaluation rather than claiming a learned navigation win
 - an optional torch backend now exists on `feature/learned-earth-signature-localizer`, and its first held-out regional pass improves the offline corpus benchmark but still does not produce a publishable navigation result
 
+### Phase 11: Hybrid ML-aided INS correction
+
+What was tried:
+
+- keep the classical sequence matcher as the correction proposer
+- train an ML trust model to decide whether a delayed replay update is safe and useful
+- add runtime vetoes for predicted positive error delta and collapsed posteriors
+- attenuate trusted replay updates with gain control instead of always applying full-strength correction
+
+Result:
+
+- heuristic replay remained catastrophic and non-promotable
+- trust-gated replay became safe, but initially stayed slightly worse than live INS
+- fixed-gain scout runs then produced the first clear hybrid win:
+  - Norway: live INS `241.526 m` -> trust-gated replay with gain `0.50` at `179.606 m`
+  - Helgeland: live INS `161.608 m` -> trust-gated replay with gain `0.25` at `101.799 m`
+  - horizontal HMI stayed `0.000` on both
+
+Meaning:
+
+- ML is currently most useful as an INS aiding policy layer, not as an independent navigator
+- the main remaining problem is no longer basic safety gating
+- the next accuracy gain should come from learning state-dependent correction gain, not from adding more heuristic gates
+
 ## Current Branch State
 
 This branch now contains two major layers on top of the milestone baseline:
@@ -497,6 +538,7 @@ This branch now contains two major layers on top of the milestone baseline:
 - a phase-domain photonic gravimeter digital twin
 - Priority 9 Norway-first public-data expansion
 - an experimental learned delayed-localizer path
+- a hybrid sequence-feedback trust / gain path for ML-aided INS correction
 
 The current codebase includes:
 
@@ -507,6 +549,7 @@ The current codebase includes:
 - tide correction in [src/gravnav/physics/tides.py](src/gravnav/physics/tides.py)
 - magnetic and current dataset support in [src/gravnav/datasets/](src/gravnav/datasets/)
 - learned matcher training and runtime code in [src/gravnav/ml/](src/gravnav/ml/)
+- hybrid feedback corpus and benchmark scripts in [scripts/build_sequence_feedback_corpus.py](scripts/build_sequence_feedback_corpus.py), [scripts/train_sequence_feedback_trust_model.py](scripts/train_sequence_feedback_trust_model.py), and [scripts/run_hybrid_feedback_program.py](scripts/run_hybrid_feedback_program.py)
 
 ## Photonic Digital Twin
 
@@ -579,6 +622,31 @@ What these numbers mean:
 - The current problem is that the present delayed-output and publication stack cannot yet turn those local weak-region improvements into a promotable output without falling back to INS.
 - That is why the repo is now bottlenecked by delayed estimation quality, not by missing modality plumbing.
 
+## Current Hybrid INS-Aiding Result
+
+The most important new result on this branch is not the standalone learned matcher. It is the hybrid INS-aiding path:
+
+- classical sequence matcher proposes delayed replay corrections
+- ML trust logic gates them
+- gain control weakens the applied replay correction before it hits the live INS
+
+Seed `42` scout comparison:
+
+| Region | Variant | RMSE [m] | CEP95 [m] | Horizontal HMI |
+| --- | --- | ---: | ---: | ---: |
+| Norwegian margin | live INS | 241.526 | 427.030 | 0.000 |
+| Norwegian margin | trust-gated replay | 234.578 | 470.728 | 0.000 |
+| Norwegian margin | trust-gated replay + fixed gain `0.50` | 179.606 | 311.074 | 0.000 |
+| Helgeland offshore | live INS | 161.608 | 278.771 | 0.000 |
+| Helgeland offshore | trust-gated replay | 173.017 | 319.530 | 0.000 |
+| Helgeland offshore | trust-gated replay + fixed gain `0.25` | 101.799 | 180.123 | 0.000 |
+
+What this means:
+
+- the repo now has a real ML-aided INS win on both main acceptance regions
+- the win came from correction attenuation, not from replacing INS
+- the fixed gain is only a scout result; the next step is to learn gain as a function of event confidence and INS state
+
 ## Current Diagnosis
 
 The main bottleneck is no longer missing sensor physics or missing public-data plumbing.
@@ -596,27 +664,29 @@ Current practical diagnosis:
 - Helgeland and Nordland have useful raw Earth-signature content, but the current safe publication policy can only preserve integrity there by reverting to INS
 - current-aware correction is not ready for promotion
 - output-policy hardening alone is now close to exhausted as a source of new gains
+- the hybrid trust gate solved the catastrophic replay problem, and gain attenuation solved the remaining over-correction problem in scout runs
 - the experimental learned matcher path is wired end to end, but the first smoke-trained bundle is not yet good enough to change the product result
+- the current bottleneck is learning a state-dependent correction gain that generalizes beyond fixed manual attenuation
 
 ## Recommended Next Work
 
 Two statements are both true now:
 
-- the strongest validated product path is still the classical gravity-led delayed estimator
-- the branch now has an experimental learned delayed matcher path that is worth scaling, but not yet worth promoting
+- the strongest new mission-facing result is hybrid ML-aided INS correction, not standalone learned localization
+- the learned delayed localizer is still worth scaling as an offline benchmark, but it is not the immediate promotion path
 
-If continuing on the classical path:
+Immediate next work:
 
-- move beyond publication heuristics toward a better delayed-output formulation
-- keep the current gravity-led multi-modal stack fixed
-- improve the delayed-output path itself rather than only changing which existing path gets published
+- train a state-dependent gain model on the five-region feedback corpus instead of using fixed manual gain values
+- keep the current trust gate, predicted-error veto, and projected-std floor in place
+- rerun Norway, Helgeland, and the first external region with the learned gain controller
+- only claim promotion if the same gain policy beats live INS with `HMI = 0` across the acceptance regions
 
-If continuing on the learned path:
+Secondary ML work:
 
-- scale the real-data corpus well beyond the current smoke-test bundle
-- train on held-out-region splits instead of tiny single-region smoke data
-- keep the classical matcher as the acceptance baseline
-- do not claim a learned navigation result until it beats live INS with `HMI = 0`
+- keep scaling the held-out real-ocean localizer benchmark
+- use it as a research/control path for cross-region gravity learning
+- do not treat it as the primary runtime architecture until it beats the hybrid INS-aiding path
 
 Current torch branch checkpoint:
 
@@ -769,17 +839,53 @@ python3 scripts/run_maritime_demo.py \
   --output-dir /tmp/gravnav_ml_demo/maritime_learned
 ```
 
+Build the hybrid sequence-feedback corpus:
+
+```bash
+python3 scripts/build_sequence_feedback_corpus.py \
+  --demo-pack-manifests \
+    data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json \
+    data/bathymetry/processed/helgeland_offshore_demo_pack.json \
+    data/bathymetry/processed/mid_atlantic_ridge_public_demo_pack.json \
+  --output-path /tmp/gravnav_sequence_feedback/feedback_corpus.npz \
+  --minimum-useful-improvement-m 10.0
+```
+
+Train the hybrid trust model:
+
+```bash
+python3 scripts/train_sequence_feedback_trust_model.py \
+  --corpus-path /tmp/gravnav_sequence_feedback/feedback_corpus.npz \
+  --model-output-path /tmp/gravnav_sequence_feedback/trust_model.npz \
+  --trust-threshold 0.70
+```
+
+Run the hybrid benchmark program:
+
+```bash
+python3 scripts/run_hybrid_feedback_program.py \
+  --output-dir /tmp/gravnav_hybrid_feedback \
+  --sequence-feedback-min-trust-probability 0.70 \
+  --sequence-feedback-max-predicted-error-delta-m 0.0 \
+  --sequence-feedback-min-projected-std-m 1.0
+```
+
 ## Validation
 
 Latest targeted regression status on this branch:
 
 - `17 passed` for the public-bathymetry, multimodal preparation, and stateful selector path
+- `10 passed` for the hybrid feedback trust / gain path
 
 Latest public three-region demo artifacts from this work:
 
 - [/private/tmp/gravnav_priority9_emodnet_nm_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nm_hybrid3/hardware_tied_maritime_demo_report.md)
 - [/private/tmp/gravnav_priority9_emodnet_hel_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_hel_hybrid3/hardware_tied_maritime_demo_report.md)
 - [/private/tmp/gravnav_priority9_emodnet_nord_hybrid3/hardware_tied_maritime_demo_report.md](/private/tmp/gravnav_priority9_emodnet_nord_hybrid3/hardware_tied_maritime_demo_report.md)
+
+Latest hybrid gain-ablation artifact from this work:
+
+- [/private/tmp/gravnav_gain_alpha_ablation/comparison.md](/private/tmp/gravnav_gain_alpha_ablation/comparison.md)
 
 The tracked roadmap remains:
 

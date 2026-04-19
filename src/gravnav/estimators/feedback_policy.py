@@ -46,6 +46,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..analysis.observability import ObservabilitySnapshot
+from ..ml.feedback_trust import (
+    SequenceFeedbackTrustModel,
+    extract_sequence_feedback_features,
+    load_sequence_feedback_trust_model,
+)
 from .error_state_ins import (
     ERROR_STATE_SIZE,
     ERR_POS,
@@ -315,12 +320,24 @@ class SequenceFeedbackSpec:
     min_window_size: int = 5
     min_peak_probability: float = 0.12
     min_horizontal_eigenvalue_ratio: float = 1.0
+    min_projected_std_m: float = 0.0
     max_horizontal_std_m: float = 80.0
     max_correction_norm_m: float = 150.0
     covariance_inflation: float = 3.0
     transfer_rw_std_mps: float = 0.6
     reset_matcher_after_apply: bool = True
     nis_threshold: Optional[float] = 25.0
+    trust_model_export_path: Optional[str] = None
+    trust_gate_source: str = "heuristic"
+    min_trust_probability: float = 0.5
+    max_predicted_error_delta_m: Optional[float] = None
+    apply_trust_gain_alpha: bool = False
+    trust_gain_alpha_min: float = 0.0
+    trust_gain_alpha_max: float = 1.0
+    fixed_gain_alpha_override: Optional[float] = None
+    apply_trust_covariance_scale: bool = False
+    trust_covariance_scale_min: float = 0.75
+    trust_covariance_scale_max: float = 2.0
 
     def __post_init__(self) -> None:
         self.enabled = bool(self.enabled)
@@ -341,15 +358,45 @@ class SequenceFeedbackSpec:
         self.min_horizontal_eigenvalue_ratio = float(
             self.min_horizontal_eigenvalue_ratio
         )
+        self.min_projected_std_m = float(self.min_projected_std_m)
         self.max_horizontal_std_m = float(self.max_horizontal_std_m)
         self.max_correction_norm_m = float(self.max_correction_norm_m)
         self.covariance_inflation = float(self.covariance_inflation)
         self.transfer_rw_std_mps = float(self.transfer_rw_std_mps)
         self.reset_matcher_after_apply = bool(self.reset_matcher_after_apply)
+        self.trust_model_export_path = (
+            None
+            if self.trust_model_export_path is None
+            else str(self.trust_model_export_path).strip()
+        )
+        self.trust_gate_source = str(self.trust_gate_source).strip().lower()
+        if self.trust_gate_source not in {"heuristic", "trust_model", "both"}:
+            raise ValueError(
+                "trust_gate_source must be 'heuristic', 'trust_model', or 'both'."
+            )
+        self.min_trust_probability = float(self.min_trust_probability)
+        self.max_predicted_error_delta_m = (
+            None
+            if self.max_predicted_error_delta_m is None
+            else float(self.max_predicted_error_delta_m)
+        )
+        self.apply_trust_gain_alpha = bool(self.apply_trust_gain_alpha)
+        self.trust_gain_alpha_min = float(self.trust_gain_alpha_min)
+        self.trust_gain_alpha_max = float(self.trust_gain_alpha_max)
+        self.fixed_gain_alpha_override = (
+            None
+            if self.fixed_gain_alpha_override is None
+            else float(self.fixed_gain_alpha_override)
+        )
+        self.apply_trust_covariance_scale = bool(self.apply_trust_covariance_scale)
+        self.trust_covariance_scale_min = float(self.trust_covariance_scale_min)
+        self.trust_covariance_scale_max = float(self.trust_covariance_scale_max)
         if not (0.0 <= self.min_peak_probability <= 1.0):
             raise ValueError("min_peak_probability must lie in [0, 1].")
         if self.min_horizontal_eigenvalue_ratio < 1.0:
             raise ValueError("min_horizontal_eigenvalue_ratio must be >= 1.0.")
+        if self.min_projected_std_m < 0.0:
+            raise ValueError("min_projected_std_m must be nonnegative.")
         if self.max_horizontal_std_m <= 0.0:
             raise ValueError("max_horizontal_std_m must be positive.")
         if self.max_correction_norm_m <= 0.0:
@@ -360,6 +407,43 @@ class SequenceFeedbackSpec:
             raise ValueError("transfer_rw_std_mps must be nonnegative.")
         if self.nis_threshold is not None and float(self.nis_threshold) < 0.0:
             raise ValueError("nis_threshold must be nonnegative when provided.")
+        if not (0.0 <= self.min_trust_probability <= 1.0):
+            raise ValueError("min_trust_probability must lie in [0, 1].")
+        if (
+            self.max_predicted_error_delta_m is not None
+            and not np.isfinite(self.max_predicted_error_delta_m)
+        ):
+            raise ValueError(
+                "max_predicted_error_delta_m must be finite when provided."
+            )
+        if self.trust_gain_alpha_min < 0.0:
+            raise ValueError("trust_gain_alpha_min must be nonnegative.")
+        if self.trust_gain_alpha_max <= 0.0:
+            raise ValueError("trust_gain_alpha_max must be positive.")
+        if self.trust_gain_alpha_min > self.trust_gain_alpha_max:
+            raise ValueError(
+                "trust_gain_alpha_min must be <= trust_gain_alpha_max."
+            )
+        if (
+            self.fixed_gain_alpha_override is not None
+            and not np.isfinite(self.fixed_gain_alpha_override)
+        ):
+            raise ValueError("fixed_gain_alpha_override must be finite when provided.")
+        if self.trust_covariance_scale_min <= 0.0:
+            raise ValueError("trust_covariance_scale_min must be positive.")
+        if self.trust_covariance_scale_max <= 0.0:
+            raise ValueError("trust_covariance_scale_max must be positive.")
+        if self.trust_covariance_scale_min > self.trust_covariance_scale_max:
+            raise ValueError(
+                "trust_covariance_scale_min must be <= trust_covariance_scale_max."
+            )
+        if (
+            self.trust_gate_source in {"trust_model", "both"}
+            and not self.trust_model_export_path
+        ):
+            raise ValueError(
+                "trust_model_export_path is required when trust_gate_source uses a trust model."
+            )
 
 
 @dataclass
@@ -384,6 +468,15 @@ class SequenceFeedbackDiagnostics:
     posterior_entropy_nats: float
     covariance_inflation_applied: float
     transfer_std_m: float
+    heuristic_allowed: bool
+    heuristic_rejection_reason: Optional[str]
+    trust_gate_source: str
+    trust_probability: Optional[float]
+    trust_allowed: Optional[bool]
+    trust_rejection_reason: Optional[str]
+    gain_alpha_applied: float
+    trust_covariance_scale: float
+    predicted_error_delta_m: Optional[float]
     feedback_allowed: bool
     rejection_reason: Optional[str]
 
@@ -983,6 +1076,11 @@ class SequenceFeedbackController:
 
     def __init__(self, spec: SequenceFeedbackSpec) -> None:
         self.spec = spec
+        self._trust_model: Optional[SequenceFeedbackTrustModel] = None
+        if self.spec.trust_model_export_path:
+            self._trust_model = load_sequence_feedback_trust_model(
+                self.spec.trust_model_export_path
+            )
 
     def evaluate(
         self,
@@ -990,6 +1088,8 @@ class SequenceFeedbackController:
         ins: ErrorStateINS,
         *,
         current_time_s: float,
+        live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
+        previous_live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
     ) -> SequenceFeedbackResult:
         """
         Evaluate whether delayed sequence feedback should be applied and, if so,
@@ -1004,6 +1104,7 @@ class SequenceFeedbackController:
           ``sequence_update.time_s``.
         """
         age_s = max(0.0, float(current_time_s) - float(sequence_update.time_s))
+        trust_live_ins_state = ins if live_ins_state is None else live_ins_state
         offset_h = np.asarray(
             sequence_update.posterior_mean_offset_ned_m[:2],
             dtype=np.float64,
@@ -1039,49 +1140,174 @@ class SequenceFeedbackController:
             measurement_time_s = float(sequence_update.time_s)
             measurement_label = "sequence_horizontal_delayed"
 
-        feedback_allowed = True
-        rejection_reason: Optional[str] = None
+        preconditions_allowed = True
+        precondition_rejection_reason: Optional[str] = None
+        heuristic_allowed = True
+        heuristic_rejection_reason: Optional[str] = None
 
         if not self.spec.enabled:
-            feedback_allowed = False
-            rejection_reason = "disabled"
+            preconditions_allowed = False
+            precondition_rejection_reason = "disabled"
         elif int(sequence_update.window_size_used) < self.spec.min_window_size:
-            feedback_allowed = False
-            rejection_reason = (
+            heuristic_allowed = False
+            heuristic_rejection_reason = (
                 f"window_size={int(sequence_update.window_size_used)} < "
                 f"min={self.spec.min_window_size}"
             )
         elif not np.isfinite(peak_prob) or peak_prob < self.spec.min_peak_probability:
-            feedback_allowed = False
-            rejection_reason = (
+            heuristic_allowed = False
+            heuristic_rejection_reason = (
                 f"peak_probability={peak_prob:.3f} < "
                 f"min={self.spec.min_peak_probability:.3f}"
             )
         elif self.spec.measurement_geometry == "directional_horizontal":
             if horizontal_eigenvalue_ratio < self.spec.min_horizontal_eigenvalue_ratio:
-                feedback_allowed = False
-                rejection_reason = (
+                heuristic_allowed = False
+                heuristic_rejection_reason = (
                     f"horizontal_eigenvalue_ratio={horizontal_eigenvalue_ratio:.3f} < "
                     f"min={self.spec.min_horizontal_eigenvalue_ratio:.3f}"
                 )
+            elif (
+                not np.isfinite(projected_std)
+                or projected_std < self.spec.min_projected_std_m
+            ):
+                heuristic_allowed = False
+                heuristic_rejection_reason = (
+                    f"projected_std={projected_std:.3f} < "
+                    f"min={self.spec.min_projected_std_m:.3f}"
+                )
             elif not np.isfinite(projected_std) or projected_std > self.spec.max_horizontal_std_m:
-                feedback_allowed = False
-                rejection_reason = (
+                heuristic_allowed = False
+                heuristic_rejection_reason = (
                     f"projected_std={projected_std:.3f} > "
                     f"max={self.spec.max_horizontal_std_m:.3f}"
                 )
         elif np.any(~np.isfinite(std_h)) or float(np.max(std_h)) > self.spec.max_horizontal_std_m:
-            feedback_allowed = False
-            rejection_reason = (
+            heuristic_allowed = False
+            heuristic_rejection_reason = (
                 f"horizontal_std_max={float(np.max(std_h)):.3f} > "
                 f"max={self.spec.max_horizontal_std_m:.3f}"
             )
         elif not np.isfinite(correction_norm) or correction_norm > self.spec.max_correction_norm_m:
-            feedback_allowed = False
-            rejection_reason = (
+            heuristic_allowed = False
+            heuristic_rejection_reason = (
                 f"correction_norm={correction_norm:.3f} > "
                 f"max={self.spec.max_correction_norm_m:.3f}"
             )
+
+        trust_probability: Optional[float] = None
+        trust_allowed: Optional[bool] = None
+        trust_rejection_reason: Optional[str] = None
+        predicted_error_delta_m: Optional[float] = None
+        gain_alpha_applied = (
+            1.0
+            if self.spec.fixed_gain_alpha_override is None
+            else float(self.spec.fixed_gain_alpha_override)
+        )
+        trust_covariance_scale = 1.0
+        if self.spec.trust_gate_source in {"trust_model", "both"}:
+            if self._trust_model is None:
+                trust_allowed = False
+                trust_rejection_reason = "trust_model_missing"
+            else:
+                feature_vector, _ = extract_sequence_feedback_features(
+                    sequence_update,
+                    live_ins_state=trust_live_ins_state,
+                    current_time_s=current_time_s,
+                    previous_live_ins_state=previous_live_ins_state,
+                )
+                trust_probability = float(
+                    self._trust_model.predict_trust_probability(
+                        feature_vector,
+                        mode=self.spec.mode,
+                    )[0]
+                )
+                predicted_error_delta_m = float(
+                    self._trust_model.predict_error_delta_m(
+                        feature_vector,
+                        mode=self.spec.mode,
+                    )[0]
+                )
+                if self.spec.apply_trust_gain_alpha and self.spec.fixed_gain_alpha_override is None:
+                    gain_alpha_applied = float(
+                        self._trust_model.predict_gain_alpha(
+                            feature_vector,
+                            mode=self.spec.mode,
+                            alpha_min=self.spec.trust_gain_alpha_min,
+                            alpha_max=self.spec.trust_gain_alpha_max,
+                        )[0]
+                    )
+                trust_covariance_scale = float(
+                    self._trust_model.predict_covariance_scale(
+                        feature_vector,
+                        mode=self.spec.mode,
+                        scale_min=self.spec.trust_covariance_scale_min,
+                        scale_max=self.spec.trust_covariance_scale_max,
+                    )[0]
+                )
+                trust_allowed = bool(
+                    np.isfinite(trust_probability)
+                    and trust_probability >= self.spec.min_trust_probability
+                )
+                if not trust_allowed:
+                    trust_rejection_reason = (
+                        f"trust_probability={trust_probability:.3f} < "
+                        f"min={self.spec.min_trust_probability:.3f}"
+                    )
+                elif (
+                    self.spec.max_predicted_error_delta_m is not None
+                    and predicted_error_delta_m is not None
+                ):
+                    trust_allowed = bool(
+                        np.isfinite(predicted_error_delta_m)
+                        and predicted_error_delta_m
+                        <= float(self.spec.max_predicted_error_delta_m)
+                    )
+                    if not trust_allowed:
+                        trust_rejection_reason = (
+                            f"predicted_error_delta_m={predicted_error_delta_m:.3f} > "
+                            f"max={float(self.spec.max_predicted_error_delta_m):.3f}"
+                        )
+
+        gain_alpha_applied = float(
+            np.clip(
+                gain_alpha_applied,
+                self.spec.trust_gain_alpha_min,
+                self.spec.trust_gain_alpha_max,
+            )
+        )
+
+        if self.spec.apply_trust_covariance_scale and not np.isfinite(trust_covariance_scale):
+            trust_covariance_scale = 1.0
+        if not np.isfinite(gain_alpha_applied):
+            gain_alpha_applied = 1.0
+        if gain_alpha_applied <= 1.0e-6:
+            if self.spec.trust_gate_source == "heuristic":
+                heuristic_allowed = False
+                if heuristic_rejection_reason is None:
+                    heuristic_rejection_reason = "gain_alpha_applied<=1e-6"
+            else:
+                trust_allowed = False
+                if trust_rejection_reason is None:
+                    trust_rejection_reason = "gain_alpha_applied<=1e-6"
+
+        if not preconditions_allowed:
+            feedback_allowed = False
+            rejection_reason = precondition_rejection_reason
+        elif self.spec.trust_gate_source == "heuristic":
+            feedback_allowed = heuristic_allowed
+            rejection_reason = heuristic_rejection_reason
+        elif self.spec.trust_gate_source == "trust_model":
+            feedback_allowed = bool(trust_allowed)
+            rejection_reason = trust_rejection_reason
+        else:
+            feedback_allowed = heuristic_allowed and bool(trust_allowed)
+            if not heuristic_allowed:
+                rejection_reason = heuristic_rejection_reason
+            elif not bool(trust_allowed):
+                rejection_reason = trust_rejection_reason
+            else:
+                rejection_reason = None
 
         diagnostics = SequenceFeedbackDiagnostics(
             mode=self.spec.mode,
@@ -1098,8 +1324,28 @@ class SequenceFeedbackController:
             constrained_direction_ned=constrained_direction_ned.copy(),
             marginal_peak_probability=peak_prob,
             posterior_entropy_nats=entropy,
-            covariance_inflation_applied=float(self.spec.covariance_inflation),
+            covariance_inflation_applied=float(
+                self.spec.covariance_inflation
+                * (
+                    trust_covariance_scale
+                    if self.spec.apply_trust_covariance_scale
+                    else 1.0
+                )
+            ),
             transfer_std_m=transfer_std_m,
+            heuristic_allowed=bool(preconditions_allowed and heuristic_allowed),
+            heuristic_rejection_reason=(
+                precondition_rejection_reason
+                if not preconditions_allowed
+                else heuristic_rejection_reason
+            ),
+            trust_gate_source=self.spec.trust_gate_source,
+            trust_probability=trust_probability,
+            trust_allowed=trust_allowed,
+            trust_rejection_reason=trust_rejection_reason,
+            gain_alpha_applied=float(gain_alpha_applied),
+            trust_covariance_scale=float(trust_covariance_scale),
+            predicted_error_delta_m=predicted_error_delta_m,
             feedback_allowed=feedback_allowed,
             rejection_reason=rejection_reason,
         )
@@ -1111,25 +1357,27 @@ class SequenceFeedbackController:
             )
 
         if self.spec.measurement_geometry == "directional_horizontal":
-            projected_variance = float(eigvals_h[0] * self.spec.covariance_inflation)
+            projected_variance = float(
+                eigvals_h[0] * diagnostics.covariance_inflation_applied
+            )
             if transfer_std_m > 0.0:
                 projected_variance += transfer_std_m**2
             measurement = make_directional_position_measurement(
                 ins,
                 constrained_direction_ned,
-                projected_correction,
+                float(projected_correction * diagnostics.gain_alpha_applied),
                 projected_variance,
                 label=f"{measurement_label}_directional",
                 time_s=measurement_time_s,
             )
         else:
-            R_h = _symmetrize(P_h * float(self.spec.covariance_inflation))
+            R_h = _symmetrize(P_h * float(diagnostics.covariance_inflation_applied))
             if transfer_std_m > 0.0:
                 R_h += np.diag(np.full(2, transfer_std_m**2, dtype=np.float64))
 
             measurement = make_horizontal_ned_position_measurement(
                 ins,
-                offset_h,
+                offset_h * float(diagnostics.gain_alpha_applied),
                 R_h,
                 label=measurement_label,
                 time_s=measurement_time_s,
@@ -1324,6 +1572,15 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
         "feedback_allowed": d.feedback_allowed,
         "applied": result.applied,
         "rejection_reason": d.rejection_reason,
+        "heuristic_allowed": d.heuristic_allowed,
+        "heuristic_rejection_reason": d.heuristic_rejection_reason,
+        "trust_gate_source": d.trust_gate_source,
+        "trust_probability": d.trust_probability,
+        "trust_allowed": d.trust_allowed,
+        "trust_rejection_reason": d.trust_rejection_reason,
+        "gain_alpha_applied": d.gain_alpha_applied,
+        "trust_covariance_scale": d.trust_covariance_scale,
+        "predicted_error_delta_m": d.predicted_error_delta_m,
         "age_s": d.age_s,
         "window_size_used": d.window_size_used,
         "delayed_by_steps": d.delayed_by_steps,

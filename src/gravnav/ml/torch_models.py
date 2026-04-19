@@ -120,6 +120,7 @@ class TorchDelayedLocalizerTrainingSpec:
     head_epochs: int = 40
     head_learning_rate: float = 5.0e-4
     reliability_threshold: float = 0.65
+    calibrate_reliability_threshold: bool = True
     analytic_log_emission_gain: float = 0.35
     region_balance_power: float = 1.0
     label_balance_power: float = 1.0
@@ -587,6 +588,111 @@ def _weighted_batch_mean(values: Tensor, weights: Tensor | None) -> Tensor:
     return torch.sum(arr * weights) / denom
 
 
+def _binary_metrics_at_threshold(
+    probabilities: FloatArray,
+    labels: FloatArray,
+    *,
+    threshold: float,
+) -> dict[str, float]:
+    probs = np.asarray(probabilities, dtype=np.float64).reshape(-1)
+    y_true = np.asarray(labels, dtype=bool).reshape(-1)
+    y_pred = np.asarray(probs >= float(threshold), dtype=bool)
+    tp = float(np.sum(y_pred & y_true))
+    tn = float(np.sum((~y_pred) & (~y_true)))
+    fp = float(np.sum(y_pred & (~y_true)))
+    fn = float(np.sum((~y_pred) & y_true))
+    precision = tp / max(tp + fp, 1.0)
+    recall = tp / max(tp + fn, 1.0)
+    specificity = tn / max(tn + fp, 1.0)
+    f1 = 0.0 if (precision + recall) <= 0.0 else (2.0 * precision * recall) / (precision + recall)
+    return {
+        "threshold": float(threshold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "specificity": float(specificity),
+        "balanced_accuracy": float(0.5 * (recall + specificity)),
+        "f1": float(f1),
+        "positive_fraction": float(np.mean(y_pred.astype(np.float64))),
+    }
+
+
+def _select_binary_threshold(
+    probabilities: FloatArray,
+    labels: FloatArray,
+    *,
+    default_threshold: float,
+) -> tuple[float, dict[str, float | str]]:
+    probs = np.asarray(probabilities, dtype=np.float64).reshape(-1)
+    y_true = np.asarray(labels, dtype=bool).reshape(-1)
+    if probs.size == 0 or y_true.size == 0:
+        metrics = _binary_metrics_at_threshold(
+            probs,
+            y_true.astype(np.float64),
+            threshold=float(default_threshold),
+        )
+        return float(default_threshold), {
+            "source": "default_empty",
+            **metrics,
+        }
+    if np.unique(y_true.astype(np.int64)).size < 2:
+        metrics = _binary_metrics_at_threshold(
+            probs,
+            y_true.astype(np.float64),
+            threshold=float(default_threshold),
+        )
+        return float(default_threshold), {
+            "source": "default_single_class",
+            **metrics,
+        }
+
+    unique_probs = np.unique(np.clip(probs, 0.0, 1.0))
+    midpoint_thresholds = (
+        0.5 * (unique_probs[:-1] + unique_probs[1:])
+        if unique_probs.size > 1
+        else np.empty(0, dtype=np.float64)
+    )
+    candidate_thresholds = np.unique(
+        np.concatenate(
+            [
+                np.asarray([0.0, float(default_threshold), 1.0], dtype=np.float64),
+                unique_probs.astype(np.float64),
+                midpoint_thresholds.astype(np.float64),
+            ]
+        )
+    )
+
+    best_threshold = float(default_threshold)
+    best_metrics = _binary_metrics_at_threshold(
+        probs,
+        y_true.astype(np.float64),
+        threshold=best_threshold,
+    )
+    best_score = (
+        float(best_metrics["balanced_accuracy"]),
+        float(best_metrics["f1"]),
+        -abs(best_threshold - float(default_threshold)),
+    )
+    for threshold in candidate_thresholds:
+        metrics = _binary_metrics_at_threshold(
+            probs,
+            y_true.astype(np.float64),
+            threshold=float(threshold),
+        )
+        score = (
+            float(metrics["balanced_accuracy"]),
+            float(metrics["f1"]),
+            -abs(float(threshold) - float(default_threshold)),
+        )
+        if score > best_score:
+            best_threshold = float(threshold)
+            best_metrics = metrics
+            best_score = score
+    return best_threshold, {
+        "source": "validation_balanced_accuracy",
+        **best_metrics,
+    }
+
+
 def _stratified_validation_indices(
     corpus: RealOceanCorpus,
     *,
@@ -996,11 +1102,39 @@ def train_torch_delayed_localizer(
         cov_loss.backward()
         cov_optimizer.step()
 
+    threshold_indices_np = np.arange(corpus.num_examples, dtype=np.int64)
+    calibrated_threshold = float(train_spec.reliability_threshold)
+    threshold_metadata: dict[str, float | str] = {
+        "source": "fixed",
+        "threshold": float(train_spec.reliability_threshold),
+    }
+    if bool(train_spec.calibrate_reliability_threshold):
+        threshold_indices = torch.as_tensor(
+            threshold_indices_np,
+            dtype=torch.long,
+            device=device,
+        )
+        with torch.no_grad():
+            rel_prob_np = np.asarray(
+                torch.sigmoid(
+                    net.reliability_logits(rel_x[threshold_indices])
+                )
+                .detach()
+                .cpu()
+                .numpy(),
+                dtype=np.float64,
+            )
+        calibrated_threshold, threshold_metadata = _select_binary_threshold(
+            rel_prob_np,
+            corpus.publishability_labels[threshold_indices_np].astype(np.float64),
+            default_threshold=float(train_spec.reliability_threshold),
+        )
+
     net.eval()
     model = TorchRuntimeStudentModel(
         spec=runtime_spec,
         net=net,
-        reliability_threshold=float(train_spec.reliability_threshold),
+        reliability_threshold=float(calibrated_threshold),
         metadata={
             "training_name": train_spec.name,
             "device": device,
@@ -1012,6 +1146,17 @@ def train_torch_delayed_localizer(
             "best_monitor_metric": float(best_metric),
             "region_balance_power": float(train_spec.region_balance_power),
             "label_balance_power": float(train_spec.label_balance_power),
+            "calibrate_reliability_threshold": bool(
+                train_spec.calibrate_reliability_threshold
+            ),
+            "reliability_threshold_source": str(threshold_metadata["source"]),
+            "reliability_threshold_calibrated": float(calibrated_threshold),
+            "reliability_threshold_balanced_accuracy": float(
+                threshold_metadata.get("balanced_accuracy", np.nan)
+            ),
+            "reliability_threshold_f1": float(
+                threshold_metadata.get("f1", np.nan)
+            ),
             "support_expansion_positive_fraction": float(
                 np.mean(corpus.support_expansion_labels.astype(np.float64))
             ),

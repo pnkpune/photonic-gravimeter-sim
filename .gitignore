@@ -17,9 +17,9 @@ data/outputs/reports/*
 !data/outputs/reports/NEXT_STEPS_REPORT.md
 !data/outputs/reports/norwegian_margin_regional_benchmark_report.md
 data/gravity_maps/raw/*
-!data/gravity_maps/raw/norwegian_margin/
-data/gravity_maps/raw/norwegian_margin/*
-!data/gravity_maps/raw/norwegian_margin/README.md
+!data/gravity_maps/raw/*/
+data/gravity_maps/raw/*/*
+!data/gravity_maps/raw/*/README.md
 !data/gravity_maps/raw/norwegian_margin/norwegian_margin_fixture.csv
 data/gravity_maps/processed/
 data/gravity_maps/synthetic/

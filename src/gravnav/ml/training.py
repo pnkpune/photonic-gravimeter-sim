@@ -21,6 +21,7 @@ from .models import (
 )
 
 FloatArray = NDArray[np.float64]
+DEFAULT_FIXED_PUBLISHABILITY_THRESHOLD = 0.40
 
 
 @dataclass
@@ -407,16 +408,171 @@ def _binary_calibration_metrics(
     fn = int(np.sum(~preds & truth))
     precision = 0.0 if tp + fp == 0 else float(tp / max(tp + fp, 1))
     recall = 0.0 if tp + fn == 0 else float(tp / max(tp + fn, 1))
+    positive_fraction = float(np.mean(preds.astype(np.float64)))
+    f1 = (
+        0.0
+        if precision + recall <= 0.0
+        else float(2.0 * precision * recall / (precision + recall))
+    )
     return {
         f"{prefix}_brier_score": float(np.mean((probs - truth.astype(np.float64)) ** 2)),
+        f"{prefix}_positive_fraction": positive_fraction,
         f"{prefix}_precision": precision,
         f"{prefix}_recall": recall,
+        f"{prefix}_f1": f1,
     }
+
+
+def _publishability_views(
+    probabilities: FloatArray,
+    labels: NDArray[np.bool_] | FloatArray,
+    *,
+    calibrated_threshold: float,
+    fixed_threshold: float,
+    reporting_mode: str,
+) -> dict[str, dict[str, float]]:
+    view_specs = [("calibrated", float(calibrated_threshold))]
+    if str(reporting_mode) == "dual":
+        view_specs.append(("fixed_040", float(fixed_threshold)))
+    out: dict[str, dict[str, float]] = {}
+    for view_name, threshold in view_specs:
+        metrics = _binary_calibration_metrics(
+            probabilities,
+            labels,
+            threshold=threshold,
+            prefix="publishability",
+        )
+        out[view_name] = {
+            "threshold": float(threshold),
+            "positive_fraction": float(metrics["publishability_positive_fraction"]),
+            "precision": float(metrics["publishability_precision"]),
+            "recall": float(metrics["publishability_recall"]),
+            "f1": float(metrics["publishability_f1"]),
+        }
+    return out
+
+
+def aggregate_runtime_student_folds(
+    folds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    aggregate = {
+        "median_top1_accuracy": float(
+            np.median([float(fold["top1_accuracy"]) for fold in folds])
+        ),
+        "median_horizontal_error_m": float(
+            np.median([float(fold["median_horizontal_error_m"]) for fold in folds])
+        ),
+        "median_p90_horizontal_error_m": float(
+            np.median([float(fold["p90_horizontal_error_m"]) for fold in folds])
+        ),
+        "median_mean_publishability_probability": float(
+            np.median([float(fold["mean_publishability_probability"]) for fold in folds])
+        ),
+        "median_mean_support_expansion_probability": float(
+            np.median(
+                [float(fold["mean_support_expansion_probability"]) for fold in folds]
+            )
+        ),
+        "median_publishability_positive_fraction": float(
+            np.median(
+                [float(fold["publishability_positive_fraction"]) for fold in folds]
+            )
+        ),
+        "median_publishability_brier_score": float(
+            np.median([float(fold["publishability_brier_score"]) for fold in folds])
+        ),
+        "median_publishability_precision": float(
+            np.median([float(fold["publishability_precision"]) for fold in folds])
+        ),
+        "median_publishability_recall": float(
+            np.median([float(fold["publishability_recall"]) for fold in folds])
+        ),
+        "median_publishability_f1": float(
+            np.median([float(fold["publishability_f1"]) for fold in folds])
+        ),
+        "median_support_expansion_positive_fraction": float(
+            np.median(
+                [float(fold["support_expansion_positive_fraction"]) for fold in folds]
+            )
+        ),
+        "median_support_expansion_brier_score": float(
+            np.median([float(fold["support_expansion_brier_score"]) for fold in folds])
+        ),
+        "median_support_expansion_precision": float(
+            np.median([float(fold["support_expansion_precision"]) for fold in folds])
+        ),
+        "median_support_expansion_recall": float(
+            np.median([float(fold["support_expansion_recall"]) for fold in folds])
+        ),
+        "median_support_expansion_f1": float(
+            np.median([float(fold["support_expansion_f1"]) for fold in folds])
+        ),
+    }
+    if all("publishability_views" in fold for fold in folds):
+        aggregate["publishability_views"] = {}
+        view_names = sorted(
+            {
+                str(view_name)
+                for fold in folds
+                for view_name in dict(fold["publishability_views"]).keys()
+            }
+        )
+        for view_name in view_names:
+            aggregate["publishability_views"][view_name] = {
+                "median_threshold": float(
+                    np.median(
+                        [
+                            float(fold["publishability_views"][view_name]["threshold"])
+                            for fold in folds
+                        ]
+                    )
+                ),
+                "median_positive_fraction": float(
+                    np.median(
+                        [
+                            float(
+                                fold["publishability_views"][view_name][
+                                    "positive_fraction"
+                                ]
+                            )
+                            for fold in folds
+                        ]
+                    )
+                ),
+                "median_precision": float(
+                    np.median(
+                        [
+                            float(fold["publishability_views"][view_name]["precision"])
+                            for fold in folds
+                        ]
+                    )
+                ),
+                "median_recall": float(
+                    np.median(
+                        [
+                            float(fold["publishability_views"][view_name]["recall"])
+                            for fold in folds
+                        ]
+                    )
+                ),
+                "median_f1": float(
+                    np.median(
+                        [
+                            float(fold["publishability_views"][view_name]["f1"])
+                            for fold in folds
+                        ]
+                    )
+                ),
+            }
+    return aggregate
 
 
 def evaluate_runtime_student(
     corpus: RealOceanCorpus,
     student: Any,
+    *,
+    publishability_reporting_mode: str = "single",
+    fixed_publishability_threshold: float = DEFAULT_FIXED_PUBLISHABILITY_THRESHOLD,
 ) -> dict[str, Any]:
     scores = student.predict_candidate_scores(
         query_windows=corpus.query_windows,
@@ -453,13 +609,8 @@ def evaluate_runtime_student(
         "p90_horizontal_error_m": float(np.quantile(horizontal_error, 0.90)),
         "mean_horizontal_error_m": float(np.mean(horizontal_error)),
         "mean_publishability_probability": float(np.mean(publish_prob)),
-        "publishability_positive_fraction": float(
-            np.mean(publish_prob >= student.reliability_threshold)
-        ),
         "mean_support_expansion_probability": float(np.mean(support_prob)),
-        "support_expansion_positive_fraction": float(
-            np.mean(np.asarray(support_prob, dtype=np.float64) >= 0.5)
-        ),
+        "publishability_threshold": float(student.reliability_threshold),
     }
     metrics.update(
         _binary_calibration_metrics(
@@ -468,6 +619,13 @@ def evaluate_runtime_student(
             threshold=float(student.reliability_threshold),
             prefix="publishability",
         )
+    )
+    metrics["publishability_views"] = _publishability_views(
+        publish_prob,
+        corpus.publishability_labels,
+        calibrated_threshold=float(student.reliability_threshold),
+        fixed_threshold=float(fixed_publishability_threshold),
+        reporting_mode=str(publishability_reporting_mode),
     )
     metrics.update(
         _binary_calibration_metrics(
@@ -524,47 +682,10 @@ def cross_validate_delayed_localizer(
             }
         )
 
-    medians = {
-        "median_top1_accuracy": float(
-            np.median([float(fold["top1_accuracy"]) for fold in folds])
-        ),
-        "median_horizontal_error_m": float(
-            np.median([float(fold["median_horizontal_error_m"]) for fold in folds])
-        ),
-        "median_p90_horizontal_error_m": float(
-            np.median([float(fold["p90_horizontal_error_m"]) for fold in folds])
-        ),
-        "median_mean_publishability_probability": float(
-            np.median([float(fold["mean_publishability_probability"]) for fold in folds])
-        ),
-        "median_publishability_positive_fraction": float(
-            np.median(
-                [float(fold["publishability_positive_fraction"]) for fold in folds]
-            )
-        ),
-        "median_publishability_brier_score": float(
-            np.median([float(fold["publishability_brier_score"]) for fold in folds])
-        ),
-        "median_publishability_precision": float(
-            np.median([float(fold["publishability_precision"]) for fold in folds])
-        ),
-        "median_publishability_recall": float(
-            np.median([float(fold["publishability_recall"]) for fold in folds])
-        ),
-        "median_support_expansion_brier_score": float(
-            np.median([float(fold["support_expansion_brier_score"]) for fold in folds])
-        ),
-        "median_support_expansion_precision": float(
-            np.median([float(fold["support_expansion_precision"]) for fold in folds])
-        ),
-        "median_support_expansion_recall": float(
-            np.median([float(fold["support_expansion_recall"]) for fold in folds])
-        ),
-    }
     return {
         "num_folds": int(len(folds)),
         "folds": folds,
-        "aggregate": medians,
+        "aggregate": aggregate_runtime_student_folds(folds),
         "teacher_spec": asdict(TeacherTrainingSpec() if teacher_spec is None else teacher_spec),
         "train_spec": asdict(
             DelayedLocalizerTrainingSpec() if train_spec is None else train_spec

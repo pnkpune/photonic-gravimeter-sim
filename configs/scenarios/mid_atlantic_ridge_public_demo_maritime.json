@@ -1,0 +1,70 @@
+{
+  "name": "mid_atlantic_ridge_public_demo_maritime",
+  "initial_height_m": 0.0,
+  "default_dt_s": 1.0,
+  "description": "Public regional maritime benchmark selected inside mid_atlantic_ridge using the gravity-information score.",
+  "metadata": {
+    "platform_class": "surface_vessel",
+    "mission_style": "public_ocean_route_template",
+    "region_name": "mid_atlantic_ridge",
+    "route_selection": {
+      "information_score": 19.719980370578366,
+      "value_std_mgal": 12.18821473455746,
+      "mean_horizontal_gradient_mgal_per_km": 17.194945853012264,
+      "cross_gradient_alignment": 0.18919182343332652
+    }
+  },
+  "segments": [
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_1"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_rad": 0.13962634015954636,
+      "flight_path_angle_rad": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "gravity_mps2": null,
+      "label": "regional_turn_1"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_2"
+    },
+    {
+      "type": "coordinated_turn",
+      "duration_s": 120.0,
+      "speed_mps": 4.0,
+      "bank_angle_rad": 0.13962634015954636,
+      "flight_path_angle_rad": 0.0,
+      "roll_in_duration_s": 20.0,
+      "roll_out_duration_s": 20.0,
+      "smooth": true,
+      "gravity_mps2": null,
+      "label": "regional_turn_2"
+    },
+    {
+      "type": "straight",
+      "duration_s": 540.0,
+      "speed_mps": 4.0,
+      "flight_path_angle_rad": 0.0,
+      "roll_rad": 0.0,
+      "label": "regional_leg_3"
+    }
+  ],
+  "initial_lat_deg": 37.75,
+  "initial_lon_deg": -25.149999999999956,
+  "initial_heading_deg": 150.0
+}

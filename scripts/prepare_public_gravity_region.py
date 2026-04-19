@@ -28,8 +28,17 @@ from gravnav.datasets.gravity_loader import (
     load_regular_csv_gravity_map,
     load_regular_xyz_gravity_map,
 )
+from gravnav.physics.earth import (
+    meridian_radius,
+    normal_gravity,
+    prime_vertical_radius,
+)
 from gravnav.physics.gravity_map import GravityGridMap
-from gravnav.truth.scenarios import ScenarioSpec, build_truth_trajectory_from_scenario
+from gravnav.truth.scenarios import (
+    ScenarioSpec,
+    build_profile_from_scenario,
+    build_truth_trajectory_from_scenario,
+)
 from gravnav.utils.config import load_config_mapping
 
 
@@ -242,6 +251,247 @@ def _candidate_route_score(
         "cross_gradient_alignment": cross_grad_mean,
         "information_score": float(information_score),
     }
+
+
+def _build_heading_profile_cache(
+    template: ScenarioSpec,
+    *,
+    dt_s: float,
+    headings_deg: Any,
+    reference_lat_rad: float,
+) -> dict[float, dict[str, np.ndarray]]:
+    """
+    Pre-build one vehicle-kinematic profile per requested heading.
+
+    The profile shape (NED velocity, time base) only depends on the segment list,
+    the sample interval, the initial heading, and the reference gravity that is
+    used to convert bank angles into turn rates. For maritime route-selection we
+    use the mean search-region latitude to evaluate gravity; the resulting
+    profiles are reused across every (lat0, lon0) start in that heading so the
+    segment-building cost is paid once per heading instead of once per candidate.
+    """
+    g_ref = float(normal_gravity(float(reference_lat_rad), float(template.initial_height_m)))
+    cache: dict[float, dict[str, np.ndarray]] = {}
+    for raw_heading_deg in headings_deg:
+        heading_deg = float(raw_heading_deg)
+        if heading_deg in cache:
+            continue
+        scenario = ScenarioSpec(
+            name="route_search_prototype",
+            initial_lat_rad=float(reference_lat_rad),
+            initial_lon_rad=0.0,
+            initial_height_m=float(template.initial_height_m),
+            initial_heading_rad=float(np.deg2rad(heading_deg)),
+            segments=template.segments,
+            default_dt_s=float(template.default_dt_s),
+            description=template.description,
+            metadata=dict(template.metadata),
+        )
+        profile = build_profile_from_scenario(
+            scenario,
+            dt_s=float(dt_s),
+            gravity_mps2=g_ref,
+        )
+        times_s = np.asarray(profile.time_s, dtype=np.float64)
+        v_ned_mps = np.asarray(profile.velocity_ned_mps, dtype=np.float64)
+        # Trapezoidal cumulative NED displacement (meters) along the profile.
+        d_t = np.diff(times_s)
+        if d_t.size == 0:
+            d_north = np.zeros(1, dtype=np.float64)
+            d_east = np.zeros(1, dtype=np.float64)
+        else:
+            d_north = np.concatenate(
+                [
+                    [0.0],
+                    np.cumsum(0.5 * (v_ned_mps[:-1, 0] + v_ned_mps[1:, 0]) * d_t),
+                ]
+            )
+            d_east = np.concatenate(
+                [
+                    [0.0],
+                    np.cumsum(0.5 * (v_ned_mps[:-1, 1] + v_ned_mps[1:, 1]) * d_t),
+                ]
+            )
+        speed_mps = np.sqrt(v_ned_mps[:, 0] ** 2 + v_ned_mps[:, 1] ** 2)
+        route_dir_n = np.divide(
+            v_ned_mps[:, 0],
+            speed_mps,
+            out=np.zeros_like(v_ned_mps[:, 0]),
+            where=speed_mps > 0.0,
+        )
+        route_dir_e = np.divide(
+            v_ned_mps[:, 1],
+            speed_mps,
+            out=np.zeros_like(v_ned_mps[:, 1]),
+            where=speed_mps > 0.0,
+        )
+        cache[heading_deg] = {
+            "times_s": times_s,
+            "v_ned_mps": v_ned_mps,
+            "d_north_m": d_north,
+            "d_east_m": d_east,
+            "route_dir_n": route_dir_n,
+            "route_dir_e": route_dir_e,
+        }
+    return cache
+
+
+def _score_candidates_vectorized(
+    map_model: GravityGridMap,
+    *,
+    template: ScenarioSpec,
+    dt_s: float,
+    lat_values_deg: np.ndarray,
+    lon_values_deg: np.ndarray,
+    headings_deg: Any,
+) -> list[dict[str, Any]]:
+    """
+    Vectorized replacement for the (lat, lon, heading) candidate loop.
+
+    For each heading we build the profile once, then broadcast the per-heading
+    NED displacement path across every (lat0, lon0) starting point using
+    WGS84 curvilinear radii evaluated at each start latitude. Map contains,
+    disturbance samples, and disturbance gradients are taken with a single
+    batched call per heading.
+    """
+    lat_grid_rad = np.deg2rad(np.asarray(lat_values_deg, dtype=np.float64))
+    lon_grid_rad = np.deg2rad(np.asarray(lon_values_deg, dtype=np.float64))
+    lat_mesh_rad, lon_mesh_rad = np.meshgrid(lat_grid_rad, lon_grid_rad, indexing="ij")
+    lat0_rad = lat_mesh_rad.reshape(-1)
+    lon0_rad = lon_mesh_rad.reshape(-1)
+    n_starts = int(lat0_rad.size)
+    if n_starts == 0:
+        return []
+
+    reference_lat_rad = float(np.mean(lat_grid_rad))
+    cache = _build_heading_profile_cache(
+        template,
+        dt_s=float(dt_s),
+        headings_deg=headings_deg,
+        reference_lat_rad=reference_lat_rad,
+    )
+
+    r_meridian_m = np.asarray(meridian_radius(lat0_rad), dtype=np.float64) + float(
+        template.initial_height_m
+    )
+    r_prime_m = np.asarray(prime_vertical_radius(lat0_rad), dtype=np.float64) + float(
+        template.initial_height_m
+    )
+    cos_lat0 = np.cos(lat0_rad)
+    # Guard against (never reached in maritime) near-pole starts.
+    cos_lat0_safe = np.where(np.abs(cos_lat0) < 1.0e-9, 1.0e-9, cos_lat0)
+
+    inv_r_meridian = 1.0 / r_meridian_m
+    inv_r_prime_cos = 1.0 / (r_prime_m * cos_lat0_safe)
+    height_value = float(template.initial_height_m)
+
+    candidates: list[dict[str, Any]] = []
+    for heading_deg in headings_deg:
+        prof = cache[float(heading_deg)]
+        d_north_m = prof["d_north_m"]  # (T,)
+        d_east_m = prof["d_east_m"]  # (T,)
+        route_dir_n = prof["route_dir_n"]  # (T,)
+        route_dir_e = prof["route_dir_e"]  # (T,)
+
+        # Broadcast to (n_starts, T) trajectory positions (radians).
+        lat_traj_rad = lat0_rad[:, None] + d_north_m[None, :] * inv_r_meridian[:, None]
+        lon_traj_rad = lon0_rad[:, None] + d_east_m[None, :] * inv_r_prime_cos[:, None]
+
+        lat_flat = lat_traj_rad.reshape(-1)
+        lon_flat = lon_traj_rad.reshape(-1)
+
+        inside_flat = np.asarray(
+            map_model.contains(lat_flat, lon_flat),
+            dtype=bool,
+        ).reshape(lat_traj_rad.shape)
+        all_inside = np.all(inside_flat, axis=1)
+        if not np.any(all_inside):
+            continue
+
+        # Only sample the map for candidates that stay in-bounds, which is both
+        # correctness-preserving (out-of-bounds samples would have been rejected
+        # in the original scalar path) and substantially faster.
+        valid_rows = np.flatnonzero(all_inside)
+        lat_rows = lat_traj_rad[valid_rows]
+        lon_rows = lon_traj_rad[valid_rows]
+        lat_sample = lat_rows.reshape(-1)
+        lon_sample = lon_rows.reshape(-1)
+        h_sample = np.full_like(lat_sample, height_value)
+
+        values_flat = np.asarray(
+            map_model.sample_disturbance(
+                lat_sample,
+                lon_sample,
+                h_sample,
+                fill_value_mps2=np.nan,
+            ),
+            dtype=np.float64,
+        ).reshape(lat_rows.shape)
+
+        grad_flat = np.asarray(
+            map_model.disturbance_gradient_ned(
+                lat_sample,
+                lon_sample,
+                h_sample,
+                fill_value=np.nan,
+            ),
+            dtype=np.float64,
+        ).reshape(lat_rows.shape + (3,))
+
+        horiz_grad = np.linalg.norm(grad_flat[..., :2], axis=-1)
+        finite_values = np.all(np.isfinite(values_flat), axis=1)
+        finite_grad = np.all(np.isfinite(horiz_grad), axis=1)
+        finite_mask = finite_values & finite_grad
+        keep_rows = valid_rows[finite_mask]
+        if keep_rows.size == 0:
+            continue
+
+        values_keep = values_flat[finite_mask]
+        grad_keep = grad_flat[finite_mask]
+        horiz_grad_keep = horiz_grad[finite_mask]
+
+        grad_dir_n = np.divide(
+            grad_keep[..., 0],
+            horiz_grad_keep,
+            out=np.zeros_like(horiz_grad_keep),
+            where=horiz_grad_keep > 0.0,
+        )
+        grad_dir_e = np.divide(
+            grad_keep[..., 1],
+            horiz_grad_keep,
+            out=np.zeros_like(horiz_grad_keep),
+            where=horiz_grad_keep > 0.0,
+        )
+        cross = np.abs(
+            route_dir_n[None, :] * grad_dir_e - route_dir_e[None, :] * grad_dir_n
+        )
+
+        value_std_mgal = np.std(values_keep, axis=1) * 1.0e5
+        grad_mean_mgal_per_km = np.mean(horiz_grad_keep, axis=1) * 1.0e8
+        cross_grad_mean = np.mean(cross, axis=1)
+        information_score = (
+            1.0 * value_std_mgal
+            + 0.35 * grad_mean_mgal_per_km
+            + 8.0 * cross_grad_mean
+        )
+
+        lat_deg_keep = np.rad2deg(lat0_rad[keep_rows])
+        lon_deg_keep = np.rad2deg(lon0_rad[keep_rows])
+        for i in range(keep_rows.size):
+            candidates.append(
+                {
+                    "initial_lat_deg": float(lat_deg_keep[i]),
+                    "initial_lon_deg": float(lon_deg_keep[i]),
+                    "initial_heading_deg": float(heading_deg),
+                    "value_std_mgal": float(value_std_mgal[i]),
+                    "mean_horizontal_gradient_mgal_per_km": float(
+                        grad_mean_mgal_per_km[i]
+                    ),
+                    "cross_gradient_alignment": float(cross_grad_mean[i]),
+                    "information_score": float(information_score[i]),
+                }
+            )
+    return candidates
 
 
 def _build_best_scenario_mapping(
@@ -464,22 +714,16 @@ def main() -> int:
         }
 
     template = _load_template_scenario(template_scenario_path)
-    candidates: list[dict[str, Any]] = []
     lat_values = np.arange(args.search_lat_min, args.search_lat_max + 1.0e-12, args.lat_step_deg)
     lon_values = np.arange(args.search_lon_min, args.search_lon_max + 1.0e-12, args.lon_step_deg)
-    for lat_deg in lat_values:
-        for lon_deg in lon_values:
-            for heading_deg in args.headings_deg:
-                score = _candidate_route_score(
-                    map_model,
-                    lat_deg=float(lat_deg),
-                    lon_deg=float(lon_deg),
-                    heading_deg=float(heading_deg),
-                    template=template,
-                    dt_s=float(args.dt_s),
-                )
-                if score is not None:
-                    candidates.append(score)
+    candidates = _score_candidates_vectorized(
+        map_model,
+        template=template,
+        dt_s=float(args.dt_s),
+        lat_values_deg=lat_values,
+        lon_values_deg=lon_values,
+        headings_deg=[float(x) for x in args.headings_deg],
+    )
     if len(candidates) == 0:
         raise RuntimeError(
             "No in-bounds candidate routes were found in the requested search region."

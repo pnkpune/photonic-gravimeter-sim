@@ -16,7 +16,12 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from gravnav.ml import evaluate_runtime_student, load_real_ocean_corpus
+from gravnav.ml import (
+    aggregate_runtime_student_folds,
+    DEFAULT_FIXED_PUBLISHABILITY_THRESHOLD,
+    evaluate_runtime_student,
+    load_real_ocean_corpus,
+)
 from gravnav.ml.torch_models import (
     TorchDelayedLocalizerTrainingSpec,
     TorchRuntimeStudentModelSpec,
@@ -76,6 +81,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fusion-hidden-dim", type=int, default=128)
     parser.add_argument("--head-hidden-dim", type=int, default=32)
     parser.add_argument("--dropout-prob", type=float, default=0.0)
+    parser.add_argument(
+        "--publishability-reporting-mode",
+        choices=("single", "dual"),
+        default="dual",
+    )
+    parser.add_argument(
+        "--fixed-publishability-threshold",
+        type=float,
+        default=DEFAULT_FIXED_PUBLISHABILITY_THRESHOLD,
+    )
     return parser
 
 
@@ -153,7 +168,12 @@ def main() -> int:
             spec=train_spec,
             model_spec=model_spec,
         )
-        metrics = evaluate_runtime_student(eval_corpus, model)
+        metrics = evaluate_runtime_student(
+            eval_corpus,
+            model,
+            publishability_reporting_mode=str(args.publishability_reporting_mode),
+            fixed_publishability_threshold=float(args.fixed_publishability_threshold),
+        )
         folds.append(
             {
                 "held_out_region": held_out_region,
@@ -169,71 +189,7 @@ def main() -> int:
     summary = {
         "num_folds": int(len(folds)),
         "folds": folds,
-        "aggregate": {
-            "median_top1_accuracy": float(
-                sorted(float(f["top1_accuracy"]) for f in folds)[len(folds) // 2]
-            ),
-            "median_horizontal_error_m": float(
-                sorted(float(f["median_horizontal_error_m"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_p90_horizontal_error_m": float(
-                sorted(float(f["p90_horizontal_error_m"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_mean_publishability_probability": float(
-                sorted(float(f["mean_publishability_probability"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_mean_support_expansion_probability": float(
-                sorted(float(f["mean_support_expansion_probability"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_publishability_positive_fraction": float(
-                sorted(float(f["publishability_positive_fraction"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_publishability_brier_score": float(
-                sorted(float(f["publishability_brier_score"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_publishability_precision": float(
-                sorted(float(f["publishability_precision"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_publishability_recall": float(
-                sorted(float(f["publishability_recall"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_support_expansion_positive_fraction": float(
-                sorted(float(f["support_expansion_positive_fraction"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_support_expansion_brier_score": float(
-                sorted(float(f["support_expansion_brier_score"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_support_expansion_precision": float(
-                sorted(float(f["support_expansion_precision"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-            "median_support_expansion_recall": float(
-                sorted(float(f["support_expansion_recall"]) for f in folds)[
-                    len(folds) // 2
-                ]
-            ),
-        },
+        "aggregate": aggregate_runtime_student_folds(folds),
         "train_spec": {
             "epochs": int(train_spec.epochs),
             "batch_size": int(train_spec.batch_size),
@@ -283,6 +239,8 @@ def main() -> int:
             "head_hidden_dim": int(model_spec.head_hidden_dim),
             "dropout_prob": float(model_spec.dropout_prob),
         },
+        "publishability_reporting_mode": str(args.publishability_reporting_mode),
+        "fixed_publishability_threshold": float(args.fixed_publishability_threshold),
         "corpus_path": str(Path(args.corpus).expanduser().resolve()),
     }
     text = json.dumps(summary, indent=2) + "\n"
