@@ -406,6 +406,14 @@ class SequenceFeedbackTrustModelSpec:
     positive_error_weight_scale: float = 1.5
     positive_error_weight_reference_m: float = 50.0
     gain_alpha_l2: float = 1.0e-2
+    gain_focus_alpha_min: float = 0.25
+    gain_focus_alpha_max: float = 0.65
+    gain_focus_weight: float = 2.0
+    gain_nonzero_safe_weight: float = 1.5
+    gain_zero_alpha_weight: float = 0.75
+    gain_alpha_reference: float = 0.25
+    gain_alpha_prediction_scale: float = 0.35
+    gain_alpha_safe_max: float = 0.50
     name: str = "sequence_feedback_trust_reference"
 
 
@@ -476,6 +484,23 @@ class SequenceFeedbackTrustModel:
         scale = trust_term * delta_term
         return np.clip(scale, float(scale_min), float(scale_max)).astype(np.float64)
 
+    def _calibrate_gain_alpha(
+        self,
+        raw_pred: FloatArray,
+        *,
+        trust_probability: FloatArray,
+        alpha_min: float,
+        alpha_max: float,
+    ) -> FloatArray:
+        threshold = float(self.spec.trust_threshold)
+        denom = max(1.0 - threshold, 1.0e-6)
+        trust_confidence = np.clip((trust_probability - threshold) / denom, 0.0, 1.0)
+        ref = float(np.clip(self.spec.gain_alpha_reference, 0.0, 1.0))
+        scale = float(max(self.spec.gain_alpha_prediction_scale, 0.0))
+        pred = ref + scale * trust_confidence * (raw_pred - ref)
+        upper = min(float(alpha_max), float(self.spec.gain_alpha_safe_max))
+        return np.clip(pred, float(alpha_min), upper).astype(np.float64)
+
     def predict_gain_alpha(
         self,
         features: ArrayLike,
@@ -486,8 +511,14 @@ class SequenceFeedbackTrustModel:
     ) -> FloatArray:
         x = self._prepare(features)
         idx = self._mode_index(mode)
-        pred = x @ self.gain_alpha_weights[idx] + float(self.gain_alpha_bias[idx])
-        return np.clip(pred, float(alpha_min), float(alpha_max)).astype(np.float64)
+        raw_pred = x @ self.gain_alpha_weights[idx] + float(self.gain_alpha_bias[idx])
+        trust = self.predict_trust_probability(features, mode=mode)
+        return self._calibrate_gain_alpha(
+            np.asarray(raw_pred, dtype=np.float64),
+            trust_probability=np.asarray(trust, dtype=np.float64),
+            alpha_min=float(alpha_min),
+            alpha_max=float(alpha_max),
+        )
 
     def save_npz(self, path: str | Path) -> Path:
         p = Path(path).expanduser().resolve()
@@ -593,13 +624,55 @@ def _fit_ridge_regression(
     y: FloatArray,
     *,
     l2: float,
+    sample_weights: Optional[FloatArray] = None,
 ) -> tuple[FloatArray, float]:
     X = np.asarray(x, dtype=np.float64)
     target = np.asarray(y, dtype=np.float64).reshape(-1)
     X_aug = np.column_stack([X, np.ones(X.shape[0], dtype=np.float64)])
-    gram = X_aug.T @ X_aug + float(l2) * np.eye(X_aug.shape[1], dtype=np.float64)
-    sol = np.linalg.solve(gram, X_aug.T @ target)
+    if sample_weights is None:
+        weights = np.ones(target.size, dtype=np.float64)
+    else:
+        weights = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
+        if weights.shape != target.shape:
+            raise ValueError(
+                "sample_weights must match the target shape, "
+                f"got {weights.shape} for {target.shape}."
+            )
+        weights = np.maximum(weights, 1.0e-9)
+        weights /= float(np.mean(weights))
+    weighted_X = X_aug * weights[:, None]
+    weighted_y = target * weights
+    gram = weighted_X.T @ X_aug + float(l2) * np.eye(X_aug.shape[1], dtype=np.float64)
+    sol = np.linalg.solve(gram, weighted_X.T @ weighted_y)
     return np.asarray(sol[:-1], dtype=np.float64), float(sol[-1])
+
+
+def _median_or_zero(values: FloatArray) -> float:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return 0.0
+    return float(np.median(arr))
+
+
+def _gain_histogram_summary(
+    corpus: SequenceFeedbackEventCorpus,
+    *,
+    mode: str,
+) -> dict[str, dict[str, int]]:
+    target = np.asarray(corpus.mode_best_gain_alpha(mode), dtype=np.float64)
+    out: dict[str, dict[str, int]] = {}
+    for region_idx, region_name in enumerate(corpus.region_names):
+        region_mask = np.asarray(corpus.region_index == region_idx, dtype=bool)
+        if not np.any(region_mask):
+            out[str(region_name)] = {}
+            continue
+        rounded = np.round(target[region_mask], 2)
+        unique, counts = np.unique(rounded, return_counts=True)
+        out[str(region_name)] = {
+            f"{float(alpha):.2f}": int(count)
+            for alpha, count in zip(unique.tolist(), counts.tolist())
+        }
+    return out
 
 
 def _binary_metrics(
@@ -645,6 +718,7 @@ def fit_sequence_feedback_trust_model(
     gain_alpha_bias = np.ones_like(useful_bias)
 
     training_metrics: dict[str, Any] = {}
+    gain_histogram_summary: dict[str, Any] = {}
     for mode_idx, mode_name in enumerate(model_spec.mode_names):
         useful_target = corpus.mode_useful_and_safe(mode_name)
         error_target = corpus.mode_error_delta_m(mode_name)
@@ -664,6 +738,23 @@ def fit_sequence_feedback_trust_model(
         severity_weights[negative_mask & (~hmi_safe_target)] *= float(
             model_spec.unsafe_negative_weight
         )
+        gain_alpha_weights_target = np.ones_like(gain_alpha_target, dtype=np.float64)
+        zero_gain_mask = gain_alpha_target <= 1.0e-6
+        mid_gain_mask = (
+            gain_alpha_target >= float(model_spec.gain_focus_alpha_min)
+        ) & (
+            gain_alpha_target <= float(model_spec.gain_focus_alpha_max)
+        )
+        nonzero_safe_mask = useful_target & hmi_safe_target & (~zero_gain_mask)
+        gain_alpha_weights_target[zero_gain_mask] *= float(
+            model_spec.gain_zero_alpha_weight
+        )
+        gain_alpha_weights_target[mid_gain_mask] *= float(
+            model_spec.gain_focus_weight
+        )
+        gain_alpha_weights_target[nonzero_safe_mask] *= float(
+            model_spec.gain_nonzero_safe_weight
+        )
         useful_weights[mode_idx], useful_bias[mode_idx] = _fit_balanced_logistic(
             Xn,
             useful_target,
@@ -681,12 +772,32 @@ def fit_sequence_feedback_trust_model(
             Xn,
             gain_alpha_target,
             l2=model_spec.gain_alpha_l2,
+            sample_weights=gain_alpha_weights_target,
         )
         prob = _sigmoid(Xn @ useful_weights[mode_idx] + useful_bias[mode_idx])
-        pred_gain_alpha = np.clip(
+        raw_pred_gain_alpha = np.asarray(
             Xn @ gain_alpha_weights[mode_idx] + gain_alpha_bias[mode_idx],
-            0.0,
-            1.0,
+            dtype=np.float64,
+        )
+        pred_gain_alpha = SequenceFeedbackTrustModel(
+            spec=model_spec,
+            feature_mean=mean.astype(np.float64),
+            feature_std=std.astype(np.float64),
+            useful_weights=useful_weights,
+            useful_bias=useful_bias,
+            error_delta_weights=error_weights,
+            error_delta_bias=error_bias,
+            gain_alpha_weights=gain_alpha_weights,
+            gain_alpha_bias=gain_alpha_bias,
+            metadata={},
+        )._calibrate_gain_alpha(
+            raw_pred_gain_alpha,
+            trust_probability=np.asarray(prob, dtype=np.float64),
+            alpha_min=0.0,
+            alpha_max=1.0,
+        )
+        applied_mask = (prob >= float(model_spec.trust_threshold)) & (
+            pred_gain_alpha > 1.0e-6
         )
         metrics = _binary_metrics(
             useful_target,
@@ -707,7 +818,15 @@ def fit_sequence_feedback_trust_model(
         metrics["gain_alpha_rmse"] = float(
             np.sqrt(np.mean((pred_gain_alpha - gain_alpha_target) ** 2))
         )
+        metrics["median_applied_alpha"] = _median_or_zero(pred_gain_alpha[applied_mask])
+        metrics["median_target_gain_alpha"] = _median_or_zero(
+            gain_alpha_target[useful_target]
+        )
         training_metrics[str(mode_name)] = metrics
+        gain_histogram_summary[str(mode_name)] = _gain_histogram_summary(
+            corpus,
+            mode=str(mode_name),
+        )
 
     return SequenceFeedbackTrustModel(
         spec=model_spec,
@@ -722,6 +841,7 @@ def fit_sequence_feedback_trust_model(
         metadata={
             "feature_names": list(model_spec.feature_names),
             "training_metrics": training_metrics,
+            "gain_histogram_summary": gain_histogram_summary,
             "num_examples": int(corpus.num_examples),
             "region_example_counts": corpus.region_example_counts(),
         },
@@ -744,6 +864,7 @@ def cross_validate_sequence_feedback_trust_model(
             "brier_score": [],
             "error_delta_rmse_m": [],
             "gain_alpha_rmse": [],
+            "median_applied_alpha": [],
         }
         for mode in model_spec.mode_names
     }
@@ -824,6 +945,12 @@ def cross_validate_sequence_feedback_trust_model(
                         ** 2
                     )
                 )
+            )
+            applied_mask = (prob >= float(model_spec.trust_threshold)) & (
+                pred_gain_alpha > 1.0e-6
+            )
+            metrics["median_applied_alpha"] = _median_or_zero(
+                pred_gain_alpha[applied_mask]
             )
             fold_summary[str(mode)] = metrics
             for key, value in metrics.items():

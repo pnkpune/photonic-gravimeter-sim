@@ -335,6 +335,8 @@ class SequenceFeedbackSpec:
     trust_gain_alpha_min: float = 0.0
     trust_gain_alpha_max: float = 1.0
     fixed_gain_alpha_override: Optional[float] = None
+    learned_gain_cooldown_s: float = 0.0
+    learned_gain_max_applied_updates: Optional[int] = None
     apply_trust_covariance_scale: bool = False
     trust_covariance_scale_min: float = 0.75
     trust_covariance_scale_max: float = 2.0
@@ -388,6 +390,12 @@ class SequenceFeedbackSpec:
             if self.fixed_gain_alpha_override is None
             else float(self.fixed_gain_alpha_override)
         )
+        self.learned_gain_cooldown_s = float(self.learned_gain_cooldown_s)
+        self.learned_gain_max_applied_updates = (
+            None
+            if self.learned_gain_max_applied_updates is None
+            else int(self.learned_gain_max_applied_updates)
+        )
         self.apply_trust_covariance_scale = bool(self.apply_trust_covariance_scale)
         self.trust_covariance_scale_min = float(self.trust_covariance_scale_min)
         self.trust_covariance_scale_max = float(self.trust_covariance_scale_max)
@@ -429,6 +437,15 @@ class SequenceFeedbackSpec:
             and not np.isfinite(self.fixed_gain_alpha_override)
         ):
             raise ValueError("fixed_gain_alpha_override must be finite when provided.")
+        if self.learned_gain_cooldown_s < 0.0:
+            raise ValueError("learned_gain_cooldown_s must be nonnegative.")
+        if (
+            self.learned_gain_max_applied_updates is not None
+            and self.learned_gain_max_applied_updates < 1
+        ):
+            raise ValueError(
+                "learned_gain_max_applied_updates must be at least 1 when provided."
+            )
         if self.trust_covariance_scale_min <= 0.0:
             raise ValueError("trust_covariance_scale_min must be positive.")
         if self.trust_covariance_scale_max <= 0.0:
@@ -477,6 +494,11 @@ class SequenceFeedbackDiagnostics:
     gain_alpha_applied: float
     trust_covariance_scale: float
     predicted_error_delta_m: Optional[float]
+    runtime_budget_active: bool
+    runtime_budget_allowed: bool
+    runtime_budget_rejection_reason: Optional[str]
+    applied_update_count_before: int
+    cooldown_remaining_s: float
     feedback_allowed: bool
     rejection_reason: Optional[str]
 
@@ -1077,10 +1099,26 @@ class SequenceFeedbackController:
     def __init__(self, spec: SequenceFeedbackSpec) -> None:
         self.spec = spec
         self._trust_model: Optional[SequenceFeedbackTrustModel] = None
+        self._applied_update_count: int = 0
+        self._last_applied_time_s: Optional[float] = None
         if self.spec.trust_model_export_path:
             self._trust_model = load_sequence_feedback_trust_model(
                 self.spec.trust_model_export_path
             )
+
+    def reset(self) -> None:
+        self._applied_update_count = 0
+        self._last_applied_time_s = None
+
+    def _runtime_budget_active(self) -> bool:
+        return bool(
+            self.spec.apply_trust_gain_alpha
+            and self.spec.fixed_gain_alpha_override is None
+            and (
+                self.spec.learned_gain_cooldown_s > 0.0
+                or self.spec.learned_gain_max_applied_updates is not None
+            )
+        )
 
     def evaluate(
         self,
@@ -1309,6 +1347,39 @@ class SequenceFeedbackController:
             else:
                 rejection_reason = None
 
+        runtime_budget_active = self._runtime_budget_active()
+        runtime_budget_allowed = True
+        runtime_budget_rejection_reason: Optional[str] = None
+        cooldown_remaining_s = 0.0
+        applied_update_count_before = int(self._applied_update_count)
+        if feedback_allowed and runtime_budget_active:
+            if (
+                self.spec.learned_gain_max_applied_updates is not None
+                and self._applied_update_count
+                >= int(self.spec.learned_gain_max_applied_updates)
+            ):
+                runtime_budget_allowed = False
+                runtime_budget_rejection_reason = (
+                    "learned_gain_max_applied_updates_reached"
+                )
+            elif (
+                self.spec.learned_gain_cooldown_s > 0.0
+                and self._last_applied_time_s is not None
+            ):
+                elapsed_s = max(0.0, float(current_time_s) - float(self._last_applied_time_s))
+                cooldown_remaining_s = max(
+                    0.0,
+                    float(self.spec.learned_gain_cooldown_s) - elapsed_s,
+                )
+                if cooldown_remaining_s > 1.0e-9:
+                    runtime_budget_allowed = False
+                    runtime_budget_rejection_reason = (
+                        "learned_gain_cooldown_active"
+                    )
+            if not runtime_budget_allowed:
+                feedback_allowed = False
+                rejection_reason = runtime_budget_rejection_reason
+
         diagnostics = SequenceFeedbackDiagnostics(
             mode=self.spec.mode,
             measurement_geometry=self.spec.measurement_geometry,
@@ -1346,6 +1417,11 @@ class SequenceFeedbackController:
             gain_alpha_applied=float(gain_alpha_applied),
             trust_covariance_scale=float(trust_covariance_scale),
             predicted_error_delta_m=predicted_error_delta_m,
+            runtime_budget_active=bool(runtime_budget_active),
+            runtime_budget_allowed=bool(runtime_budget_allowed),
+            runtime_budget_rejection_reason=runtime_budget_rejection_reason,
+            applied_update_count_before=int(applied_update_count_before),
+            cooldown_remaining_s=float(cooldown_remaining_s),
             feedback_allowed=feedback_allowed,
             rejection_reason=rejection_reason,
         )
@@ -1387,6 +1463,9 @@ class SequenceFeedbackController:
             measurement,
             nis_threshold=self.spec.nis_threshold,
         )
+        if fusion_result.accepted:
+            self._applied_update_count += 1
+            self._last_applied_time_s = float(current_time_s)
         return SequenceFeedbackResult(
             diagnostics=diagnostics,
             fusion_result=fusion_result,
@@ -1581,6 +1660,11 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
         "gain_alpha_applied": d.gain_alpha_applied,
         "trust_covariance_scale": d.trust_covariance_scale,
         "predicted_error_delta_m": d.predicted_error_delta_m,
+        "runtime_budget_active": d.runtime_budget_active,
+        "runtime_budget_allowed": d.runtime_budget_allowed,
+        "runtime_budget_rejection_reason": d.runtime_budget_rejection_reason,
+        "applied_update_count_before": d.applied_update_count_before,
+        "cooldown_remaining_s": d.cooldown_remaining_s,
         "age_s": d.age_s,
         "window_size_used": d.window_size_used,
         "delayed_by_steps": d.delayed_by_steps,

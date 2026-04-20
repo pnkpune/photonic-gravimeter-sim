@@ -60,6 +60,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trust-threshold", type=float, default=0.5)
     parser.add_argument("--gain-alpha-l2", type=float, default=1.0e-2)
     parser.add_argument(
+        "--gain-alpha-reference",
+        type=float,
+        default=0.25,
+        help="Conservative fixed-gain reference used to center learned gain predictions.",
+    )
+    parser.add_argument(
+        "--gain-alpha-prediction-scale",
+        type=float,
+        default=0.35,
+        help="Shrinkage factor applied to learned gain deviations away from the reference.",
+    )
+    parser.add_argument(
+        "--gain-alpha-safe-max",
+        type=float,
+        default=0.50,
+        help="Maximum learned replay gain allowed by the calibrated gain head.",
+    )
+    parser.add_argument(
         "--covariance-scale-reference-error-m",
         type=float,
         default=50.0,
@@ -95,6 +113,9 @@ def main() -> int:
         max_iter=int(args.max_iter),
         trust_threshold=float(args.trust_threshold),
         gain_alpha_l2=float(args.gain_alpha_l2),
+        gain_alpha_reference=float(args.gain_alpha_reference),
+        gain_alpha_prediction_scale=float(args.gain_alpha_prediction_scale),
+        gain_alpha_safe_max=float(args.gain_alpha_safe_max),
         covariance_scale_reference_error_m=float(
             args.covariance_scale_reference_error_m
         ),
@@ -121,7 +142,11 @@ def main() -> int:
         "model_name": model.spec.name,
         "trust_threshold": float(model.spec.trust_threshold),
         "gain_alpha_l2": float(model.spec.gain_alpha_l2),
+        "gain_alpha_reference": float(model.spec.gain_alpha_reference),
+        "gain_alpha_prediction_scale": float(model.spec.gain_alpha_prediction_scale),
+        "gain_alpha_safe_max": float(model.spec.gain_alpha_safe_max),
         "training_metrics": model.metadata.get("training_metrics", {}),
+        "gain_histogram_summary": model.metadata.get("gain_histogram_summary", {}),
         "cv_summary_path": (
             None if cv_summary is None else str(cv_summary_output_path)
         ),

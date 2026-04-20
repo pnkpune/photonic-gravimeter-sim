@@ -66,28 +66,31 @@ def test_aggregate_and_acceptance_for_primary_target() -> None:
             "sequence_trust_positive_updates": None,
         },
         {
-            "label": "sequence_replay_trust_gated",
+            "label": "sequence_replay_learned_gain",
             "horizontal_rmse_m": 80.0,
             "cep95_m": 120.0,
             "hmi_horizontal": 0.0,
             "sequence_applied_updates": 3,
             "sequence_allowed_updates": 4,
             "sequence_trust_positive_updates": 4,
+            "sequence_median_gain_alpha_applied": 0.4,
         },
         {
-            "label": "sequence_replay_trust_gated",
+            "label": "sequence_replay_learned_gain",
             "horizontal_rmse_m": 82.0,
             "cep95_m": 121.0,
             "hmi_horizontal": 0.0,
             "sequence_applied_updates": 2,
             "sequence_allowed_updates": 5,
             "sequence_trust_positive_updates": 5,
+            "sequence_median_gain_alpha_applied": 0.5,
         },
     ]
     summary = module.aggregate_benchmark_rows(rows)
     decision = module.evaluate_target_acceptance(target, summary)
-    assert summary["sequence_replay_trust_gated"]["total_sequence_applied_updates"] == 5
-    assert summary["sequence_replay_trust_gated"]["hmi_zero_all_rows"] is True
+    assert summary["sequence_replay_learned_gain"]["total_sequence_applied_updates"] == 5
+    assert summary["sequence_replay_learned_gain"]["hmi_zero_all_rows"] is True
+    assert summary["sequence_replay_learned_gain"]["median_sequence_gain_alpha_applied"] == 0.45
     assert decision["beats_live"] is True
     assert decision["accepted"] is True
 
@@ -108,7 +111,7 @@ def test_nonregression_target_allows_small_regression_only() -> None:
             "hmi_horizontal": 0.0,
         },
         {
-            "label": "sequence_replay_trust_gated",
+            "label": "sequence_replay_learned_gain",
             "horizontal_rmse_m": 104.0,
             "cep95_m": 141.0,
             "hmi_horizontal": 0.0,

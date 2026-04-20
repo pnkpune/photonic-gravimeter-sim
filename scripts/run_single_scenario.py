@@ -425,6 +425,14 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         if args.sequence_feedback_fixed_gain_alpha_override is None
         else float(args.sequence_feedback_fixed_gain_alpha_override)
     )
+    map_match.sequence_feedback_spec.learned_gain_cooldown_s = float(
+        args.sequence_feedback_learned_gain_cooldown_s
+    )
+    map_match.sequence_feedback_spec.learned_gain_max_applied_updates = (
+        None
+        if args.sequence_feedback_learned_gain_max_applied_updates is None
+        else int(args.sequence_feedback_learned_gain_max_applied_updates)
+    )
     map_match.use_sequence_lag_smoother = bool(
         getattr(args, "use_sequence_lag_smoother", False)
     )
@@ -955,6 +963,25 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sequence-feedback-learned-gain-cooldown-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional cooldown applied only to learned-gain sequence feedback. "
+            "Accepted learned-gain updates are suppressed until this many seconds "
+            "have elapsed since the last accepted learned-gain correction."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-learned-gain-max-applied-updates",
+        type=int,
+        default=None,
+        help=(
+            "Optional per-run cap on accepted learned-gain sequence-feedback "
+            "corrections. Only active when trust-derived gain alpha is used."
+        ),
+    )
+    parser.add_argument(
         "--sequence-lag-output-steps",
         type=int,
         default=None,
@@ -1361,6 +1388,28 @@ def main() -> int:
                 ),
                 "sequence_feedback_trust_covariance_scale_max": float(
                     args.sequence_feedback_trust_covariance_scale_max
+                ),
+                "sequence_feedback_apply_trust_gain_alpha": bool(
+                    args.sequence_feedback_apply_trust_gain_alpha
+                ),
+                "sequence_feedback_trust_gain_alpha_min": float(
+                    args.sequence_feedback_trust_gain_alpha_min
+                ),
+                "sequence_feedback_trust_gain_alpha_max": float(
+                    args.sequence_feedback_trust_gain_alpha_max
+                ),
+                "sequence_feedback_fixed_gain_alpha_override": (
+                    None
+                    if args.sequence_feedback_fixed_gain_alpha_override is None
+                    else float(args.sequence_feedback_fixed_gain_alpha_override)
+                ),
+                "sequence_feedback_learned_gain_cooldown_s": float(
+                    args.sequence_feedback_learned_gain_cooldown_s
+                ),
+                "sequence_feedback_learned_gain_max_applied_updates": (
+                    None
+                    if args.sequence_feedback_learned_gain_max_applied_updates is None
+                    else int(args.sequence_feedback_learned_gain_max_applied_updates)
                 ),
                 "sequence_lag_output_steps": (
                     None

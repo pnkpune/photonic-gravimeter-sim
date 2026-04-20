@@ -28,6 +28,8 @@ DEFAULT_FEEDBACK_MANIFESTS = (
     PROJECT_ROOT / "data/bathymetry/processed/norwegian_margin_maritime_demo_pack.json",
     PROJECT_ROOT / "data/bathymetry/processed/helgeland_offshore_demo_pack.json",
     PROJECT_ROOT / "data/bathymetry/processed/mid_atlantic_ridge_public_demo_pack.json",
+    PROJECT_ROOT / "data/bathymetry/processed/iceland_greenland_margin_public_demo_pack.json",
+    PROJECT_ROOT / "data/bathymetry/processed/mariana_approach_public_demo_pack.json",
 )
 
 
@@ -66,11 +68,10 @@ DEFAULT_BENCHMARK_TARGETS = (
 TARGET_BY_NAME = {target.name: target for target in DEFAULT_BENCHMARK_TARGETS}
 HYBRID_BENCHMARK_LABELS = (
     "live_ins",
-    "sequence_lag_smoothed",
-    "sequence_replay_heuristic",
-    "sequence_replay_trust_gated",
-    "sequence_bias_transfer_heuristic",
-    "sequence_bias_transfer_trust_gated",
+    "sequence_replay_trust_only",
+    "sequence_replay_gain025",
+    "sequence_replay_gain050",
+    "sequence_replay_learned_gain",
 )
 
 
@@ -155,6 +156,18 @@ def aggregate_benchmark_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, 
         trust_positive_updates = _float_values(
             [row.get("sequence_trust_positive_updates") for row in label_rows]
         )
+        runtime_budget_rejections = _float_values(
+            [row.get("sequence_runtime_budget_rejections") for row in label_rows]
+        )
+        runtime_budget_cooldown_rejections = _float_values(
+            [row.get("sequence_runtime_budget_cooldown_rejections") for row in label_rows]
+        )
+        runtime_budget_max_update_rejections = _float_values(
+            [row.get("sequence_runtime_budget_max_update_rejections") for row in label_rows]
+        )
+        applied_alpha_values = _float_values(
+            [row.get("sequence_median_gain_alpha_applied") for row in label_rows]
+        )
 
         summary[label] = {
             "label": label,
@@ -173,6 +186,25 @@ def aggregate_benchmark_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, 
                 trust_positive_updates
             ),
             "total_sequence_trust_positive_updates": int(sum(trust_positive_updates)),
+            "median_sequence_runtime_budget_rejections": _median_or_none(
+                runtime_budget_rejections
+            ),
+            "total_sequence_runtime_budget_rejections": int(
+                sum(runtime_budget_rejections)
+            ),
+            "median_sequence_runtime_budget_cooldown_rejections": _median_or_none(
+                runtime_budget_cooldown_rejections
+            ),
+            "total_sequence_runtime_budget_cooldown_rejections": int(
+                sum(runtime_budget_cooldown_rejections)
+            ),
+            "median_sequence_runtime_budget_max_update_rejections": _median_or_none(
+                runtime_budget_max_update_rejections
+            ),
+            "total_sequence_runtime_budget_max_update_rejections": int(
+                sum(runtime_budget_max_update_rejections)
+            ),
+            "median_sequence_gain_alpha_applied": _median_or_none(applied_alpha_values),
             "per_seed_rows": label_rows,
         }
     return summary
@@ -184,33 +216,33 @@ def evaluate_target_acceptance(
 ) -> dict[str, Any]:
     if "live_ins" not in label_summary:
         raise KeyError(f"Target {target.name!r} is missing the live_ins row.")
-    if "sequence_replay_trust_gated" not in label_summary:
+    if "sequence_replay_learned_gain" not in label_summary:
         raise KeyError(
-            f"Target {target.name!r} is missing the sequence_replay_trust_gated row."
+            f"Target {target.name!r} is missing the sequence_replay_learned_gain row."
         )
 
     live = label_summary["live_ins"]
-    trust = label_summary["sequence_replay_trust_gated"]
+    learned = label_summary["sequence_replay_learned_gain"]
     live_rmse = live["median_horizontal_rmse_m"]
     live_cep95 = live["median_cep95_m"]
-    trust_rmse = trust["median_horizontal_rmse_m"]
-    trust_cep95 = trust["median_cep95_m"]
+    learned_rmse = learned["median_horizontal_rmse_m"]
+    learned_cep95 = learned["median_cep95_m"]
 
     beats_live = bool(
         live_rmse is not None
         and live_cep95 is not None
-        and trust_rmse is not None
-        and trust_cep95 is not None
-        and trust_rmse < live_rmse
-        and trust_cep95 < live_cep95
+        and learned_rmse is not None
+        and learned_cep95 is not None
+        and learned_rmse < live_rmse
+        and learned_cep95 < live_cep95
     )
     within_live_5pct = bool(
         live_rmse is not None
-        and trust_rmse is not None
-        and trust_rmse <= 1.05 * live_rmse
+        and learned_rmse is not None
+        and learned_rmse <= 1.05 * live_rmse
     )
-    zero_hmi = bool(trust["hmi_zero_all_rows"])
-    applied_nonzero = int(trust["total_sequence_applied_updates"]) > 0
+    zero_hmi = bool(learned["hmi_zero_all_rows"])
+    applied_nonzero = int(learned["total_sequence_applied_updates"]) > 0
 
     if target.acceptance_mode == "beat_live":
         accepted = bool(beats_live and zero_hmi and applied_nonzero)
@@ -231,12 +263,34 @@ def evaluate_target_acceptance(
         "applied_updates_nonzero": applied_nonzero,
         "live_ins_median_horizontal_rmse_m": live_rmse,
         "live_ins_median_cep95_m": live_cep95,
-        "trust_gated_median_horizontal_rmse_m": trust_rmse,
-        "trust_gated_median_cep95_m": trust_cep95,
-        "trust_gated_total_sequence_applied_updates": int(
-            trust["total_sequence_applied_updates"]
+        "learned_gain_median_horizontal_rmse_m": learned_rmse,
+        "learned_gain_median_cep95_m": learned_cep95,
+        "learned_gain_total_sequence_applied_updates": int(
+            learned["total_sequence_applied_updates"]
         ),
     }
+
+
+def _primary_average_rmse(
+    benchmark_summaries: list[dict[str, Any]],
+    *,
+    label: str,
+) -> float | None:
+    values: list[float] = []
+    for scenario in benchmark_summaries:
+        summary = scenario["label_summary"].get(label)
+        if summary is None:
+            return None
+        value = summary.get("median_horizontal_rmse_m")
+        if value is None:
+            return None
+        target = TARGET_BY_NAME.get(str(scenario["target_name"]))
+        if target is None or target.acceptance_mode != "beat_live":
+            continue
+        values.append(float(value))
+    if not values:
+        return None
+    return float(sum(values) / len(values))
 
 
 def _write_markdown_report(
@@ -254,6 +308,11 @@ def _write_markdown_report(
         f"- accepted: `{summary['accepted']}`",
         f"- primary targets passed: `{summary['primary_targets_passed']}`",
         f"- external target passed: `{summary['external_target_passed']}`",
+        f"- learned gain beats trust-only average: `{summary['learned_gain_beats_trust_only_average']}`",
+        f"- learned gain beats fixed-gain scout average: `{summary['learned_gain_beats_fixed_gain_average']}`",
+        f"- recommended runtime label: `{summary['recommended_runtime_label']}`",
+        f"- learned-gain cooldown [s]: `{summary['sequence_feedback_learned_gain_cooldown_s']}`",
+        f"- learned-gain max applied updates: `{summary['sequence_feedback_learned_gain_max_applied_updates']}`",
         "",
         "## Acceptance Table",
         "",
@@ -284,11 +343,10 @@ def _write_markdown_report(
         label_summary = scenario["label_summary"]
         for label in (
             "live_ins",
-            "sequence_lag_smoothed",
-            "sequence_replay_heuristic",
-            "sequence_replay_trust_gated",
-            "sequence_bias_transfer_heuristic",
-            "sequence_bias_transfer_trust_gated",
+            "sequence_replay_trust_only",
+            "sequence_replay_gain025",
+            "sequence_replay_gain050",
+            "sequence_replay_learned_gain",
         ):
             if label not in label_summary:
                 continue
@@ -310,6 +368,7 @@ def _write_markdown_report(
             "## Artifacts",
             "",
             f"- feedback corpus: `{summary['feedback_corpus_path']}`",
+            f"- feedback event cache: `{summary['event_cache_dir']}`",
             f"- trust model: `{summary['trust_model_output_path']}`",
             f"- trust model summary: `{summary['trust_model_summary_path']}`",
             f"- trust model CV summary: `{summary['trust_model_cv_summary_path']}`",
@@ -347,10 +406,11 @@ def _run_benchmark_one_seed(
     min_trust_probability: float,
     max_predicted_error_delta_m: float | None,
     min_projected_std_m: float | None,
-    apply_trust_gain_alpha: bool,
     trust_gain_alpha_min: float,
     trust_gain_alpha_max: float,
-    fixed_gain_alpha_override: float | None,
+    learned_gain_cooldown_s: float,
+    learned_gain_max_applied_updates: int | None,
+    include_bias_transfer_rows: bool,
     dt_s: float | None,
 ) -> Path:
     seed_dir = output_dir / target.name / f"seed_{int(seed)}"
@@ -372,7 +432,25 @@ def _run_benchmark_one_seed(
         str(trust_model_path),
         "--sequence-feedback-min-trust-probability",
         str(float(min_trust_probability)),
+        "--sequence-feedback-trust-gain-alpha-min",
+        str(float(trust_gain_alpha_min)),
+        "--sequence-feedback-trust-gain-alpha-max",
+        str(float(trust_gain_alpha_max)),
     ]
+    if learned_gain_cooldown_s > 0.0:
+        cmd.extend(
+            [
+                "--sequence-feedback-learned-gain-cooldown-s",
+                str(float(learned_gain_cooldown_s)),
+            ]
+        )
+    if learned_gain_max_applied_updates is not None:
+        cmd.extend(
+            [
+                "--sequence-feedback-learned-gain-max-applied-updates",
+                str(int(learned_gain_max_applied_updates)),
+            ]
+        )
     if max_predicted_error_delta_m is not None:
         cmd.extend(
             [
@@ -387,23 +465,8 @@ def _run_benchmark_one_seed(
                 str(float(min_projected_std_m)),
             ]
         )
-    if apply_trust_gain_alpha:
-        cmd.extend(
-            [
-                "--sequence-feedback-apply-trust-gain-alpha",
-                "--sequence-feedback-trust-gain-alpha-min",
-                str(float(trust_gain_alpha_min)),
-                "--sequence-feedback-trust-gain-alpha-max",
-                str(float(trust_gain_alpha_max)),
-            ]
-        )
-    if fixed_gain_alpha_override is not None:
-        cmd.extend(
-            [
-                "--sequence-feedback-fixed-gain-alpha-override",
-                str(float(fixed_gain_alpha_override)),
-            ]
-        )
+    if include_bias_transfer_rows:
+        cmd.append("--include-bias-transfer-rows")
     if dt_s is not None:
         cmd.extend(["--dt-s", str(float(dt_s))])
     _run_command(cmd)
@@ -426,6 +489,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--feedback-corpus-path",
         default=None,
         help="Optional output NPZ path for the feedback corpus.",
+    )
+    parser.add_argument(
+        "--event-cache-dir",
+        default=None,
+        help="Optional directory for reusable sequence-feedback event caches.",
+    )
+    parser.add_argument(
+        "--reuse-event-cache",
+        action="store_true",
+        help="Reuse --event-cache-dir instead of rerunning sequence matching during corpus build.",
     )
     parser.add_argument(
         "--trust-model-output-path",
@@ -459,7 +532,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--corpus-seeds",
         nargs="+",
         type=int,
-        default=[42],
+        default=[42, 123, 777],
         help="Seeds used when building the feedback corpus.",
     )
     parser.add_argument(
@@ -472,7 +545,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dt-s",
         type=float,
-        default=None,
+        default=2.0,
         help="Optional dt override passed to both corpus-build and benchmark runs.",
     )
     parser.add_argument("--horizon-s", type=float, default=60.0)
@@ -490,14 +563,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gain-alpha-candidates",
         nargs="+",
         type=float,
-        default=[0.1, 0.25, 0.5, 0.75, 1.0],
+        default=[0.1, 0.25, 0.4, 0.5, 0.65, 0.8, 1.0],
         help="Candidate correction gains swept when labeling the best safe replay gain.",
     )
     parser.add_argument("--l2", type=float, default=1.0e-2)
     parser.add_argument("--learning-rate", type=float, default=0.15)
     parser.add_argument("--max-iter", type=int, default=300)
-    parser.add_argument("--trust-threshold", type=float, default=0.5)
+    parser.add_argument("--trust-threshold", type=float, default=0.70)
     parser.add_argument("--gain-alpha-l2", type=float, default=1.0e-2)
+    parser.add_argument("--gain-alpha-reference", type=float, default=0.25)
+    parser.add_argument("--gain-alpha-prediction-scale", type=float, default=0.35)
+    parser.add_argument("--gain-alpha-safe-max", type=float, default=0.50)
     parser.add_argument(
         "--covariance-scale-reference-error-m",
         type=float,
@@ -506,7 +582,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sequence-feedback-min-trust-probability",
         type=float,
-        default=0.5,
+        default=0.70,
         help="Trust threshold applied during the live hybrid-feedback benchmarks.",
     )
     parser.add_argument(
@@ -528,11 +604,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--sequence-feedback-apply-trust-gain-alpha",
-        action="store_true",
-        help="Apply trust-model gain alpha during the live hybrid-feedback benchmarks.",
-    )
-    parser.add_argument(
         "--sequence-feedback-trust-gain-alpha-min",
         type=float,
         default=0.0,
@@ -545,6 +616,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum trust-derived gain alpha used during the live benchmarks.",
     )
     parser.add_argument(
+        "--sequence-feedback-learned-gain-cooldown-s",
+        type=float,
+        default=600.0,
+        help=(
+            "Cooldown applied only to the learned-gain live benchmark row after "
+            "each accepted learned-gain correction."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-learned-gain-max-applied-updates",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of learned-gain replay corrections allowed per run "
+            "during the live benchmarks."
+        ),
+    )
+    parser.add_argument(
         "--sequence-feedback-fixed-gain-alpha-override",
         type=float,
         default=None,
@@ -552,6 +641,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional fixed gain alpha override used during the live benchmarks. "
             "When set it overrides trust-derived gain prediction."
         ),
+    )
+    parser.add_argument(
+        "--include-bias-transfer-rows",
+        action="store_true",
+        help="Append optional bias-transfer rows to the hybrid benchmark profile.",
     )
     parser.add_argument(
         "--skip-corpus-build",
@@ -582,6 +676,11 @@ def main() -> int:
         if args.feedback_corpus_path is None
         else _resolve_path(args.feedback_corpus_path)
     )
+    event_cache_dir = (
+        output_dir / "sequence_feedback_event_cache"
+        if args.event_cache_dir is None
+        else _resolve_path(args.event_cache_dir)
+    )
     trust_model_output_path = (
         output_dir / "sequence_feedback_trust_model.npz"
         if args.trust_model_output_path is None
@@ -606,6 +705,8 @@ def main() -> int:
             *[str(_resolve_path(path)) for path in args.feedback_demo_pack_manifests],
             "--output-path",
             str(feedback_corpus_path),
+            "--event-cache-dir",
+            str(event_cache_dir),
             "--horizon-s",
             str(float(args.horizon_s)),
             "--max-events-per-region-seed",
@@ -617,6 +718,8 @@ def main() -> int:
             "--seeds",
             *[str(int(seed)) for seed in args.corpus_seeds],
         ]
+        if args.reuse_event_cache:
+            cmd.append("--reuse-event-cache")
         if args.dt_s is not None:
             cmd.extend(["--dt-s", str(float(args.dt_s))])
         _run_command(cmd)
@@ -639,6 +742,12 @@ def main() -> int:
             str(float(args.trust_threshold)),
             "--gain-alpha-l2",
             str(float(args.gain_alpha_l2)),
+            "--gain-alpha-reference",
+            str(float(args.gain_alpha_reference)),
+            "--gain-alpha-prediction-scale",
+            str(float(args.gain_alpha_prediction_scale)),
+            "--gain-alpha-safe-max",
+            str(float(args.gain_alpha_safe_max)),
             "--covariance-scale-reference-error-m",
             str(float(args.covariance_scale_reference_error_m)),
         ]
@@ -670,20 +779,22 @@ def main() -> int:
                         if args.sequence_feedback_min_projected_std_m is None
                         else float(args.sequence_feedback_min_projected_std_m)
                     ),
-                    apply_trust_gain_alpha=bool(
-                        args.sequence_feedback_apply_trust_gain_alpha
-                    ),
                     trust_gain_alpha_min=float(
                         args.sequence_feedback_trust_gain_alpha_min
                     ),
                     trust_gain_alpha_max=float(
                         args.sequence_feedback_trust_gain_alpha_max
                     ),
-                    fixed_gain_alpha_override=(
-                        None
-                        if args.sequence_feedback_fixed_gain_alpha_override is None
-                        else float(args.sequence_feedback_fixed_gain_alpha_override)
+                    learned_gain_cooldown_s=float(
+                        args.sequence_feedback_learned_gain_cooldown_s
                     ),
+                    learned_gain_max_applied_updates=(
+                        None
+                        if args.sequence_feedback_learned_gain_max_applied_updates
+                        is None
+                        else int(args.sequence_feedback_learned_gain_max_applied_updates)
+                    ),
+                    include_bias_transfer_rows=bool(args.include_bias_transfer_rows),
                     dt_s=(None if args.dt_s is None else float(args.dt_s)),
                 )
                 payload = json.loads(summary_file.read_text(encoding="utf-8"))
@@ -713,6 +824,54 @@ def main() -> int:
         for row in target_acceptance
         if row["acceptance_mode"] == "nonregress_live_5pct"
     ]
+    learned_gain_primary_average_rmse = _primary_average_rmse(
+        benchmark_summaries,
+        label="sequence_replay_learned_gain",
+    )
+    trust_only_primary_average_rmse = _primary_average_rmse(
+        benchmark_summaries,
+        label="sequence_replay_trust_only",
+    )
+    gain025_primary_average_rmse = _primary_average_rmse(
+        benchmark_summaries,
+        label="sequence_replay_gain025",
+    )
+    gain050_primary_average_rmse = _primary_average_rmse(
+        benchmark_summaries,
+        label="sequence_replay_gain050",
+    )
+    fixed_baseline_average_candidates = [
+        value
+        for value in (
+            gain025_primary_average_rmse,
+            gain050_primary_average_rmse,
+        )
+        if value is not None
+    ]
+    best_fixed_primary_average_rmse = (
+        None
+        if not fixed_baseline_average_candidates
+        else float(min(fixed_baseline_average_candidates))
+    )
+    learned_gain_beats_trust_only_average = bool(
+        learned_gain_primary_average_rmse is not None
+        and trust_only_primary_average_rmse is not None
+        and learned_gain_primary_average_rmse < trust_only_primary_average_rmse
+    )
+    learned_gain_beats_fixed_gain_average = bool(
+        learned_gain_primary_average_rmse is not None
+        and best_fixed_primary_average_rmse is not None
+        and learned_gain_primary_average_rmse < best_fixed_primary_average_rmse
+    )
+    recommended_runtime_label = "sequence_replay_learned_gain"
+    if not learned_gain_beats_fixed_gain_average:
+        if gain025_primary_average_rmse is not None and (
+            gain050_primary_average_rmse is None
+            or gain025_primary_average_rmse <= gain050_primary_average_rmse
+        ):
+            recommended_runtime_label = "sequence_replay_gain025"
+        elif gain050_primary_average_rmse is not None:
+            recommended_runtime_label = "sequence_replay_gain050"
 
     trust_model_summary_path = trust_model_output_path.with_name(
         trust_model_output_path.stem + "_summary.json"
@@ -724,11 +883,28 @@ def main() -> int:
         "entry_point": _relative_to_root(__file__),
         "output_dir": _relative_to_root(output_dir),
         "feedback_corpus_path": _relative_to_root(feedback_corpus_path),
+        "event_cache_dir": _relative_to_root(event_cache_dir),
         "trust_model_output_path": _relative_to_root(trust_model_output_path),
         "trust_model_summary_path": _relative_to_root(trust_model_summary_path),
         "trust_model_cv_summary_path": _relative_to_root(trust_model_cv_summary_path),
         "benchmark_summaries": benchmark_summaries,
         "target_acceptance": target_acceptance,
+        "learned_gain_primary_average_rmse_m": learned_gain_primary_average_rmse,
+        "trust_only_primary_average_rmse_m": trust_only_primary_average_rmse,
+        "gain025_primary_average_rmse_m": gain025_primary_average_rmse,
+        "gain050_primary_average_rmse_m": gain050_primary_average_rmse,
+        "best_fixed_primary_average_rmse_m": best_fixed_primary_average_rmse,
+        "sequence_feedback_learned_gain_cooldown_s": float(
+            args.sequence_feedback_learned_gain_cooldown_s
+        ),
+        "sequence_feedback_learned_gain_max_applied_updates": (
+            None
+            if args.sequence_feedback_learned_gain_max_applied_updates is None
+            else int(args.sequence_feedback_learned_gain_max_applied_updates)
+        ),
+        "learned_gain_beats_trust_only_average": learned_gain_beats_trust_only_average,
+        "learned_gain_beats_fixed_gain_average": learned_gain_beats_fixed_gain_average,
+        "recommended_runtime_label": recommended_runtime_label,
         "primary_targets_passed": bool(
             primary_targets and all(bool(row["accepted"]) for row in primary_targets)
         ),
@@ -742,6 +918,7 @@ def main() -> int:
                 not external_targets
                 or all(bool(row["accepted"]) for row in external_targets)
             )
+            and learned_gain_beats_fixed_gain_average
         ),
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)

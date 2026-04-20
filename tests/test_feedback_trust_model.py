@@ -225,12 +225,16 @@ def test_fit_and_cross_validate_sequence_feedback_trust_model() -> None:
     prob = model.predict_trust_probability(features, mode="lag_replay")
     assert prob.shape == (6,)
     assert float(prob[2]) > float(prob[1])
+    assert "median_applied_alpha" in model.metadata["training_metrics"]["lag_replay"]
+    assert "gain_histogram_summary" in model.metadata
+    assert "region_a" in model.metadata["gain_histogram_summary"]["lag_replay"]
 
     cv = cross_validate_sequence_feedback_trust_model(corpus)
     assert cv["num_folds"] == 2
     assert "lag_replay" in cv["aggregate"]
     assert "median_brier_score" in cv["aggregate"]["lag_replay"]
     assert "median_gain_alpha_rmse" in cv["aggregate"]["lag_replay"]
+    assert "median_median_applied_alpha" in cv["aggregate"]["lag_replay"]
 
 
 def test_sequence_feedback_controller_rejects_positive_predicted_error_delta(
@@ -338,6 +342,108 @@ def test_sequence_feedback_controller_applies_trust_gain_alpha(tmp_path) -> None
     assert result.applied is True
     assert result.diagnostics.trust_allowed is True
     assert result.diagnostics.gain_alpha_applied == 0.25
+
+
+def test_predict_gain_alpha_is_conservative_around_reference() -> None:
+    model = SequenceFeedbackTrustModel(
+        spec=SequenceFeedbackTrustModelSpec(
+            trust_threshold=0.5,
+            gain_alpha_reference=0.25,
+            gain_alpha_prediction_scale=0.5,
+            gain_alpha_safe_max=0.5,
+        ),
+        feature_mean=np.zeros(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        feature_std=np.ones(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        useful_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        useful_bias=np.array([3.0, -3.0], dtype=np.float64),
+        error_delta_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        error_delta_bias=np.zeros(2, dtype=np.float64),
+        gain_alpha_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        gain_alpha_bias=np.array([1.0, 1.0], dtype=np.float64),
+        metadata={},
+    )
+    predicted = model.predict_gain_alpha(
+        np.zeros((1, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        mode="lag_replay",
+        alpha_min=0.0,
+        alpha_max=1.0,
+    )
+    assert predicted.shape == (1,)
+    assert predicted[0] <= 0.5
+    assert predicted[0] > 0.25
+
+
+def test_sequence_feedback_controller_limits_learned_gain_updates(tmp_path) -> None:
+    model = SequenceFeedbackTrustModel(
+        spec=SequenceFeedbackTrustModelSpec(),
+        feature_mean=np.zeros(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        feature_std=np.ones(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        useful_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        useful_bias=np.array([3.0, -3.0], dtype=np.float64),
+        error_delta_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        error_delta_bias=np.array([-10.0, 5.0], dtype=np.float64),
+        gain_alpha_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        gain_alpha_bias=np.array([0.25, 0.75], dtype=np.float64),
+        metadata={},
+    )
+    model_path = tmp_path / "trust_model_gain_alpha_budget.npz"
+    model.save_npz(model_path)
+
+    spec = SequenceFeedbackSpec(
+        enabled=True,
+        mode="lag_replay",
+        measurement_geometry="directional_horizontal",
+        min_window_size=1,
+        min_peak_probability=0.0,
+        min_horizontal_eigenvalue_ratio=1.0,
+        max_horizontal_std_m=1.0e6,
+        max_correction_norm_m=1.0e6,
+        covariance_inflation=4.0,
+        nis_threshold=None,
+        trust_model_export_path=str(model_path),
+        trust_gate_source="both",
+        min_trust_probability=0.5,
+        apply_trust_gain_alpha=True,
+        trust_gain_alpha_min=0.1,
+        trust_gain_alpha_max=0.9,
+        learned_gain_max_applied_updates=1,
+    )
+    ctrl = SequenceFeedbackController(spec)
+    first = ctrl.evaluate(
+        _make_sequence_update(),
+        ErrorStateINS(_make_state(time_s=50.0).copy()),
+        current_time_s=53.0,
+        live_ins_state=_make_state(time_s=53.0),
+        previous_live_ins_state=_make_state(
+            time_s=52.0, north_speed_mps=1.0, east_speed_mps=0.2
+        ),
+    )
+    second = ctrl.evaluate(
+        _make_sequence_update(),
+        ErrorStateINS(_make_state(time_s=57.0).copy()),
+        current_time_s=60.0,
+        live_ins_state=_make_state(time_s=60.0),
+        previous_live_ins_state=_make_state(
+            time_s=59.0, north_speed_mps=1.0, east_speed_mps=0.2
+        ),
+    )
+
+    assert first.applied is True
+    assert first.diagnostics.runtime_budget_active is True
+    assert first.diagnostics.runtime_budget_allowed is True
+    assert first.diagnostics.applied_update_count_before == 0
+
+    assert second.applied is False
+    assert second.diagnostics.runtime_budget_active is True
+    assert second.diagnostics.runtime_budget_allowed is False
+    assert (
+        second.diagnostics.runtime_budget_rejection_reason
+        == "learned_gain_max_applied_updates_reached"
+    )
+    assert second.diagnostics.applied_update_count_before == 1
+    assert second.diagnostics.rejection_reason == (
+        "learned_gain_max_applied_updates_reached"
+    )
 
 
 def test_sequence_feedback_controller_rejects_overconfident_projected_std() -> None:

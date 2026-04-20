@@ -86,6 +86,10 @@ def _run_one(
     sequence_allowed = None
     sequence_trust_allowed = None
     sequence_trust_positive = None
+    sequence_runtime_budget_rejections = None
+    sequence_runtime_budget_cooldown_rejections = None
+    sequence_runtime_budget_max_update_rejections = None
+    sequence_applied_alpha_values: list[float] = []
 
     if archive_path.exists():
         with np.load(archive_path, allow_pickle=False) as data:
@@ -103,9 +107,29 @@ def _run_one(
                 sequence_trust_positive = sum(
                     1
                     for row in seq_rows
-                    if row.get("trust_probability") is not None
-                    and float(row["trust_probability"]) >= 0.5
+                    if row.get("trust_allowed") is True
                 )
+                sequence_runtime_budget_rejections = sum(
+                    1 for row in seq_rows if row.get("runtime_budget_allowed") is False
+                )
+                sequence_runtime_budget_cooldown_rejections = sum(
+                    1
+                    for row in seq_rows
+                    if row.get("runtime_budget_rejection_reason")
+                    == "learned_gain_cooldown_active"
+                )
+                sequence_runtime_budget_max_update_rejections = sum(
+                    1
+                    for row in seq_rows
+                    if row.get("runtime_budget_rejection_reason")
+                    == "learned_gain_max_applied_updates_reached"
+                )
+                sequence_applied_alpha_values = [
+                    float(row["gain_alpha_applied"])
+                    for row in seq_rows
+                    if row.get("applied")
+                    and row.get("gain_alpha_applied") is not None
+                ]
 
     return {
         "label": label,
@@ -128,6 +152,18 @@ def _run_one(
         "sequence_applied_updates": sequence_applied,
         "sequence_trust_allowed_updates": sequence_trust_allowed,
         "sequence_trust_positive_updates": sequence_trust_positive,
+        "sequence_runtime_budget_rejections": sequence_runtime_budget_rejections,
+        "sequence_runtime_budget_cooldown_rejections": (
+            sequence_runtime_budget_cooldown_rejections
+        ),
+        "sequence_runtime_budget_max_update_rejections": (
+            sequence_runtime_budget_max_update_rejections
+        ),
+        "sequence_median_gain_alpha_applied": (
+            None
+            if not sequence_applied_alpha_values
+            else float(np.median(np.asarray(sequence_applied_alpha_values, dtype=np.float64)))
+        ),
         "metrics_path": str(metrics_path),
     }
 
@@ -252,16 +288,8 @@ def _profile_configs(profile: str) -> list[dict[str, Any]]:
         return [
             {"label": "live_ins", "extra_flags": ["--disable-map-match"]},
             {
-                "label": "sequence_lag_smoothed",
-                "extra_flags": [
-                    "--map-matcher",
-                    "sequence",
-                    "--use-gradiometer",
-                    "--use-sequence-lag-smoother",
-                ],
-            },
-            {
-                "label": "sequence_replay_heuristic",
+                "label": "sequence_replay_trust_only",
+                "trust_row": True,
                 "extra_flags": [
                     "--map-matcher",
                     "sequence",
@@ -271,67 +299,114 @@ def _profile_configs(profile: str) -> list[dict[str, Any]]:
                     "lag_replay",
                     "--sequence-feedback-geometry",
                     "directional_horizontal",
-                ],
-            },
-            {
-                "label": "sequence_replay_trust_gated",
-                "extra_flags": [
-                    "--map-matcher",
-                    "sequence",
-                    "--use-gradiometer",
-                    "--use-sequence-feedback",
-                    "--sequence-feedback-mode",
-                    "lag_replay",
-                    "--sequence-feedback-geometry",
-                    "directional_horizontal",
-                    "--sequence-feedback-min-projected-std-m",
-                    "1.0",
                     "--sequence-feedback-inflation",
                     "6.0",
                     "--sequence-feedback-trust-gate-source",
                     "both",
-                    "--sequence-feedback-max-predicted-error-delta-m",
-                    "0.0",
                     "--sequence-feedback-apply-trust-covariance-scale",
                 ],
             },
             {
-                "label": "sequence_bias_transfer_heuristic",
+                "label": "sequence_replay_gain025",
+                "trust_row": True,
+                "fixed_gain_alpha_override": 0.25,
                 "extra_flags": [
                     "--map-matcher",
                     "sequence",
                     "--use-gradiometer",
                     "--use-sequence-feedback",
                     "--sequence-feedback-mode",
-                    "bias_transfer",
+                    "lag_replay",
                     "--sequence-feedback-geometry",
                     "directional_horizontal",
-                ],
-            },
-            {
-                "label": "sequence_bias_transfer_trust_gated",
-                "extra_flags": [
-                    "--map-matcher",
-                    "sequence",
-                    "--use-gradiometer",
-                    "--use-sequence-feedback",
-                    "--sequence-feedback-mode",
-                    "bias_transfer",
-                    "--sequence-feedback-geometry",
-                    "directional_horizontal",
-                    "--sequence-feedback-min-projected-std-m",
-                    "1.0",
                     "--sequence-feedback-inflation",
                     "6.0",
                     "--sequence-feedback-trust-gate-source",
                     "both",
-                    "--sequence-feedback-max-predicted-error-delta-m",
-                    "0.0",
+                    "--sequence-feedback-apply-trust-covariance-scale",
+                ],
+            },
+            {
+                "label": "sequence_replay_gain050",
+                "trust_row": True,
+                "fixed_gain_alpha_override": 0.50,
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                    "--sequence-feedback-inflation",
+                    "6.0",
+                    "--sequence-feedback-trust-gate-source",
+                    "both",
+                    "--sequence-feedback-apply-trust-covariance-scale",
+                ],
+            },
+            {
+                "label": "sequence_replay_learned_gain",
+                "trust_row": True,
+                "apply_trust_gain_alpha": True,
+                "learned_gain_cooldown_s": 600.0,
+                "learned_gain_max_applied_updates": 1,
+                "extra_flags": [
+                    "--map-matcher",
+                    "sequence",
+                    "--use-gradiometer",
+                    "--use-sequence-feedback",
+                    "--sequence-feedback-mode",
+                    "lag_replay",
+                    "--sequence-feedback-geometry",
+                    "directional_horizontal",
+                    "--sequence-feedback-inflation",
+                    "6.0",
+                    "--sequence-feedback-trust-gate-source",
+                    "both",
                     "--sequence-feedback-apply-trust-covariance-scale",
                 ],
             },
         ]
     raise ValueError(f"Unsupported benchmark profile {profile!r}.")
+
+
+def _hybrid_bias_transfer_configs() -> list[dict[str, Any]]:
+    return [
+        {
+            "label": "sequence_bias_transfer_heuristic",
+            "extra_flags": [
+                "--map-matcher",
+                "sequence",
+                "--use-gradiometer",
+                "--use-sequence-feedback",
+                "--sequence-feedback-mode",
+                "bias_transfer",
+                "--sequence-feedback-geometry",
+                "directional_horizontal",
+            ],
+        },
+        {
+            "label": "sequence_bias_transfer_trust_gated",
+            "trust_row": True,
+            "extra_flags": [
+                "--map-matcher",
+                "sequence",
+                "--use-gradiometer",
+                "--use-sequence-feedback",
+                "--sequence-feedback-mode",
+                "bias_transfer",
+                "--sequence-feedback-geometry",
+                "directional_horizontal",
+                "--sequence-feedback-inflation",
+                "6.0",
+                "--sequence-feedback-trust-gate-source",
+                "both",
+                "--sequence-feedback-apply-trust-covariance-scale",
+            ],
+        },
+    ]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -399,7 +474,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sequence-feedback-min-trust-probability",
         type=float,
-        default=0.5,
+        default=0.70,
         help="Trust threshold passed through to trust-gated sequence feedback runs.",
     )
     parser.add_argument(
@@ -424,6 +499,41 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Optional fixed gain alpha override passed to trust-gated sequence-feedback runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-learned-gain-cooldown-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional learned-gain-only cooldown passed through to trust-gated "
+            "sequence-feedback runs."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-learned-gain-max-applied-updates",
+        type=int,
+        default=None,
+        help=(
+            "Optional learned-gain-only cap on accepted sequence-feedback updates "
+            "passed through to trust-gated runs."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-max-predicted-error-delta-m",
+        type=float,
+        default=0.0,
+        help="Maximum predicted replay error delta passed to trust-gated hybrid rows.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-min-projected-std-m",
+        type=float,
+        default=1.0,
+        help="Minimum projected replay standard deviation passed to trust-gated hybrid rows.",
+    )
+    parser.add_argument(
+        "--include-bias-transfer-rows",
+        action="store_true",
+        help="Append heuristic and trust-gated bias-transfer rows after the primary hybrid rows.",
     )
     return parser
 
@@ -471,19 +581,25 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     configs = _profile_configs(args.profile)
+    if args.profile == "hybrid_feedback" and args.include_bias_transfer_rows:
+        configs = [*configs, *_hybrid_bias_transfer_configs()]
     for cfg in configs:
         print(f"\n=== {cfg['label']} ===", flush=True)
         extra_flags = list(cfg["extra_flags"])
-        if cfg["label"].endswith("trust_gated"):
+        if bool(cfg.get("trust_row")):
             extra_flags.extend(
                 [
                     "--sequence-feedback-trust-model-path",
                     str(args.sequence_feedback_trust_model_path),
                     "--sequence-feedback-min-trust-probability",
                     str(args.sequence_feedback_min_trust_probability),
+                    "--sequence-feedback-max-predicted-error-delta-m",
+                    str(args.sequence_feedback_max_predicted_error_delta_m),
+                    "--sequence-feedback-min-projected-std-m",
+                    str(args.sequence_feedback_min_projected_std_m),
                 ]
             )
-            if args.sequence_feedback_apply_trust_gain_alpha:
+            if bool(cfg.get("apply_trust_gain_alpha")) or args.sequence_feedback_apply_trust_gain_alpha:
                 extra_flags.extend(
                     [
                         "--sequence-feedback-apply-trust-gain-alpha",
@@ -493,11 +609,37 @@ def main() -> int:
                         str(args.sequence_feedback_trust_gain_alpha_max),
                     ]
                 )
-            if args.sequence_feedback_fixed_gain_alpha_override is not None:
+                learned_gain_cooldown_s = cfg.get(
+                    "learned_gain_cooldown_s",
+                    args.sequence_feedback_learned_gain_cooldown_s,
+                )
+                if float(learned_gain_cooldown_s) > 0.0:
+                    extra_flags.extend(
+                        [
+                            "--sequence-feedback-learned-gain-cooldown-s",
+                            str(float(learned_gain_cooldown_s)),
+                        ]
+                    )
+                learned_gain_max_applied_updates = cfg.get(
+                    "learned_gain_max_applied_updates",
+                    args.sequence_feedback_learned_gain_max_applied_updates,
+                )
+                if learned_gain_max_applied_updates is not None:
+                    extra_flags.extend(
+                        [
+                            "--sequence-feedback-learned-gain-max-applied-updates",
+                            str(int(learned_gain_max_applied_updates)),
+                        ]
+                    )
+            fixed_gain_alpha_override = cfg.get(
+                "fixed_gain_alpha_override",
+                args.sequence_feedback_fixed_gain_alpha_override,
+            )
+            if fixed_gain_alpha_override is not None:
                 extra_flags.extend(
                     [
                         "--sequence-feedback-fixed-gain-alpha-override",
-                        str(args.sequence_feedback_fixed_gain_alpha_override),
+                        str(fixed_gain_alpha_override),
                     ]
                 )
         row = _run_one(
