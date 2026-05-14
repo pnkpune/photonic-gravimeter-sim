@@ -89,6 +89,10 @@ def _run_one(
     sequence_runtime_budget_rejections = None
     sequence_runtime_budget_cooldown_rejections = None
     sequence_runtime_budget_max_update_rejections = None
+    sequence_committee_rejections = None
+    sequence_committee_member_count = None
+    sequence_candidate_hypothesis_applied_updates = None
+    sequence_candidate_selection_median_rank = None
     sequence_applied_alpha_values: list[float] = []
 
     if archive_path.exists():
@@ -124,12 +128,49 @@ def _run_one(
                     if row.get("runtime_budget_rejection_reason")
                     == "learned_gain_max_applied_updates_reached"
                 )
+                sequence_committee_rejections = sum(
+                    1
+                    for row in seq_rows
+                    if row.get("committee_rejection_reason") is not None
+                )
+                committee_member_counts = [
+                    int(row["committee_member_count"])
+                    for row in seq_rows
+                    if row.get("committee_member_count") is not None
+                ]
+                sequence_committee_member_count = (
+                    None
+                    if not committee_member_counts
+                    else int(np.median(np.asarray(committee_member_counts, dtype=np.float64)))
+                )
                 sequence_applied_alpha_values = [
                     float(row["gain_alpha_applied"])
                     for row in seq_rows
                     if row.get("applied")
                     and row.get("gain_alpha_applied") is not None
                 ]
+                candidate_selection_ranks = [
+                    int(row["candidate_selection_selected_rank"])
+                    for row in seq_rows
+                    if row.get("applied")
+                    and row.get("candidate_selection_selected_rank") is not None
+                ]
+                sequence_candidate_hypothesis_applied_updates = sum(
+                    1
+                    for row in seq_rows
+                    if row.get("applied")
+                    and row.get("candidate_selection_selected_source")
+                    == "candidate_hypothesis"
+                )
+                sequence_candidate_selection_median_rank = (
+                    None
+                    if not candidate_selection_ranks
+                    else float(
+                        np.median(
+                            np.asarray(candidate_selection_ranks, dtype=np.float64)
+                        )
+                    )
+                )
 
     return {
         "label": label,
@@ -158,6 +199,14 @@ def _run_one(
         ),
         "sequence_runtime_budget_max_update_rejections": (
             sequence_runtime_budget_max_update_rejections
+        ),
+        "sequence_committee_rejections": sequence_committee_rejections,
+        "sequence_committee_member_count": sequence_committee_member_count,
+        "sequence_candidate_hypothesis_applied_updates": (
+            sequence_candidate_hypothesis_applied_updates
+        ),
+        "sequence_candidate_selection_median_rank": (
+            sequence_candidate_selection_median_rank
         ),
         "sequence_median_gain_alpha_applied": (
             None
@@ -409,6 +458,60 @@ def _hybrid_bias_transfer_configs() -> list[dict[str, Any]]:
     ]
 
 
+def _hybrid_committee_config() -> dict[str, Any]:
+    return {
+        "label": "sequence_replay_committee_gain",
+        "trust_row": True,
+        "committee_row": True,
+        "apply_trust_gain_alpha": True,
+        "learned_gain_cooldown_s": 600.0,
+        "learned_gain_max_applied_updates": 1,
+        "extra_flags": [
+            "--map-matcher",
+            "sequence",
+            "--use-gradiometer",
+            "--use-sequence-feedback",
+            "--sequence-feedback-mode",
+            "lag_replay",
+            "--sequence-feedback-geometry",
+            "directional_horizontal",
+            "--sequence-feedback-inflation",
+            "6.0",
+            "--sequence-feedback-trust-gate-source",
+            "both",
+            "--sequence-feedback-apply-trust-covariance-scale",
+        ],
+    }
+
+
+def _hybrid_committee_topk_config() -> dict[str, Any]:
+    return {
+        "label": "sequence_replay_committee_topk_gain",
+        "trust_row": True,
+        "committee_row": True,
+        "apply_trust_gain_alpha": True,
+        "learned_gain_cooldown_s": 600.0,
+        "learned_gain_max_applied_updates": 1,
+        "extra_flags": [
+            "--map-matcher",
+            "sequence",
+            "--use-gradiometer",
+            "--use-sequence-feedback",
+            "--sequence-feedback-mode",
+            "lag_replay",
+            "--sequence-feedback-geometry",
+            "directional_horizontal",
+            "--sequence-feedback-inflation",
+            "6.0",
+            "--sequence-feedback-trust-gate-source",
+            "both",
+            "--sequence-feedback-apply-trust-covariance-scale",
+            "--sequence-feedback-candidate-selection-mode",
+            "topk_trust_rerank",
+        ],
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run benchmark comparisons across map-matching modes.")
     parser.add_argument(
@@ -470,6 +573,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sequence-feedback-trust-model-path",
         default=None,
         help="Optional trust-model NPZ used by hybrid_feedback trust-gated runs.",
+    )
+    parser.add_argument(
+        "--sequence-feedback-trust-committee-manifest-path",
+        default=None,
+        help="Optional committee manifest JSON used by the committee-gated hybrid row.",
     )
     parser.add_argument(
         "--sequence-feedback-min-trust-probability",
@@ -581,24 +689,47 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     configs = _profile_configs(args.profile)
+    if (
+        args.profile == "hybrid_feedback"
+        and args.sequence_feedback_trust_committee_manifest_path
+    ):
+        configs = [
+            *configs,
+            _hybrid_committee_config(),
+            _hybrid_committee_topk_config(),
+        ]
     if args.profile == "hybrid_feedback" and args.include_bias_transfer_rows:
         configs = [*configs, *_hybrid_bias_transfer_configs()]
     for cfg in configs:
         print(f"\n=== {cfg['label']} ===", flush=True)
         extra_flags = list(cfg["extra_flags"])
         if bool(cfg.get("trust_row")):
-            extra_flags.extend(
-                [
-                    "--sequence-feedback-trust-model-path",
-                    str(args.sequence_feedback_trust_model_path),
-                    "--sequence-feedback-min-trust-probability",
-                    str(args.sequence_feedback_min_trust_probability),
-                    "--sequence-feedback-max-predicted-error-delta-m",
-                    str(args.sequence_feedback_max_predicted_error_delta_m),
-                    "--sequence-feedback-min-projected-std-m",
-                    str(args.sequence_feedback_min_projected_std_m),
-                ]
-            )
+            if bool(cfg.get("committee_row")):
+                extra_flags.extend(
+                    [
+                        "--sequence-feedback-trust-committee-manifest-path",
+                        str(args.sequence_feedback_trust_committee_manifest_path),
+                        "--sequence-feedback-min-trust-probability",
+                        str(args.sequence_feedback_min_trust_probability),
+                        "--sequence-feedback-max-predicted-error-delta-m",
+                        str(args.sequence_feedback_max_predicted_error_delta_m),
+                        "--sequence-feedback-min-projected-std-m",
+                        str(args.sequence_feedback_min_projected_std_m),
+                    ]
+                )
+            else:
+                extra_flags.extend(
+                    [
+                        "--sequence-feedback-trust-model-path",
+                        str(args.sequence_feedback_trust_model_path),
+                        "--sequence-feedback-min-trust-probability",
+                        str(args.sequence_feedback_min_trust_probability),
+                        "--sequence-feedback-max-predicted-error-delta-m",
+                        str(args.sequence_feedback_max_predicted_error_delta_m),
+                        "--sequence-feedback-min-projected-std-m",
+                        str(args.sequence_feedback_min_projected_std_m),
+                    ]
+                )
             if bool(cfg.get("apply_trust_gain_alpha")) or args.sequence_feedback_apply_trust_gain_alpha:
                 extra_flags.extend(
                     [

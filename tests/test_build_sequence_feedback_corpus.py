@@ -14,6 +14,7 @@ from gravnav.estimators.error_state_ins import (
 from gravnav.estimators.gravity_sequence_match import (
     GravitySequenceMatcherSpec,
     SequenceAmbiguityDiagnostics,
+    SequenceCandidateHypothesis,
     SequenceMatchEstimate,
     SequenceMatchUpdateResult,
 )
@@ -149,6 +150,21 @@ def _make_update() -> SequenceMatchUpdateResult:
         viterbi_offset_ned_m=np.array([10.0, -8.0, 0.0], dtype=np.float64),
         posterior_mean_offset_ned_m=np.array([8.0, -4.0, 0.0], dtype=np.float64),
         ambiguity_diagnostics=ambiguity,
+        candidate_hypotheses=(
+            SequenceCandidateHypothesis(
+                rank=0,
+                candidate_index=3,
+                marginal_probability=0.44,
+                probability_gap_to_best=0.0,
+                lat_rad=np.deg2rad(63.00012),
+                lon_rad=np.deg2rad(10.00002),
+                height_m=0.0,
+                offset_ned_m=np.array([4.0, -2.0, 0.0], dtype=np.float64),
+                predicted_disturbance_mps2=1.1e-5,
+                predicted_bathymetry_m=101.0,
+                predicted_magnetic_total_nt=45010.0,
+            ),
+        ),
         publishability_probability=0.72,
         support_expansion_probability=0.33,
         learned_covariance_scale=0.9,
@@ -159,6 +175,7 @@ def _collect_examples(module, runner, cached_run: dict[str, object]) -> dict[str
     outputs = {
         "features": [],
         "region_names": [],
+        "event_seed": [],
         "current_time_s": [],
         "update_time_s": [],
         "current_step_index": [],
@@ -262,6 +279,8 @@ def test_feedback_event_cache_roundtrip_and_reuse(tmp_path: Path) -> None:
 
     assert direct_outputs["counts"] == cached_outputs["counts"]
     assert np.allclose(direct_outputs["features"][0], cached_outputs["features"][0])
+    assert direct_outputs["event_seed"] == cached_outputs["event_seed"]
     assert direct_outputs["lag_replay_applied"] == cached_outputs["lag_replay_applied"]
     assert direct_outputs["lag_replay_best_gain_alpha"] == cached_outputs["lag_replay_best_gain_alpha"]
     assert direct_outputs["bias_transfer_best_gain_alpha"] == cached_outputs["bias_transfer_best_gain_alpha"]
+    assert loaded["event_rows"][0]["update"]["candidate_hypotheses"][0]["rank"] == 0

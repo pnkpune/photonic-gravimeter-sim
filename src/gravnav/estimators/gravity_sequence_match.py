@@ -219,6 +219,7 @@ class GravitySequenceMatcherSpec:
     ambiguity_min_gravity_information_ratio: float = 0.50
     ambiguity_min_bathymetry_information_ratio: float = 0.50
     ambiguity_min_magnetic_information_ratio: float = 0.50
+    top_candidate_hypotheses_count: int = 3
     name: str = "gravity_sequence_match"
 
     def __post_init__(self) -> None:
@@ -352,6 +353,10 @@ class GravitySequenceMatcherSpec:
         self.ambiguity_min_magnetic_information_ratio = float(
             self.ambiguity_min_magnetic_information_ratio
         )
+        self.top_candidate_hypotheses_count = max(
+            1,
+            int(self.top_candidate_hypotheses_count),
+        )
         if not (0.0 <= self.adaptive_expand_edge_mass_fraction <= 1.0):
             raise ValueError("adaptive_expand_edge_mass_fraction must be in [0, 1].")
         if not (0.0 <= self.adaptive_contract_edge_mass_fraction <= 1.0):
@@ -454,6 +459,35 @@ class SequenceAnchorEstimate:
 
 
 @dataclass
+class SequenceCandidateHypothesis:
+    """
+    One discrete delayed-state hypothesis from the marginal posterior.
+
+    This keeps a small ranked subset of the candidate grid so downstream
+    feedback logic can rerank or abstain without rerunning sequence inference.
+    """
+
+    rank: int
+    candidate_index: int
+    marginal_probability: float
+    probability_gap_to_best: float
+    lat_rad: float
+    lon_rad: float
+    height_m: float
+    offset_ned_m: FloatArray
+    predicted_disturbance_mps2: Optional[float] = None
+    predicted_bathymetry_m: Optional[float] = None
+    predicted_magnetic_total_nt: Optional[float] = None
+
+    @property
+    def geodetic_vector(self) -> FloatArray:
+        return np.array(
+            [self.lat_rad, self.lon_rad, self.height_m],
+            dtype=np.float64,
+        )
+
+
+@dataclass
 class SequenceMatchUpdateResult:
     """
     Diagnostics/result of one emitted sequence estimate.
@@ -476,6 +510,7 @@ class SequenceMatchUpdateResult:
     viterbi_offset_ned_m: FloatArray
     posterior_mean_offset_ned_m: FloatArray
     ambiguity_diagnostics: SequenceAmbiguityDiagnostics
+    candidate_hypotheses: tuple[SequenceCandidateHypothesis, ...] = ()
     anchor_estimates: tuple[SequenceAnchorEstimate, ...] = ()
     publishability_probability: Optional[float] = None
     support_expansion_probability: Optional[float] = None
@@ -1556,6 +1591,53 @@ class GravitySequenceMatcher:
             ambiguity,
         )
 
+    def _top_candidate_hypotheses(
+        self,
+        obs: _SequenceObservation,
+        weights: FloatArray,
+    ) -> tuple[SequenceCandidateHypothesis, ...]:
+        probs = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if probs.size == 0:
+            return ()
+        order = np.argsort(-probs, kind="stable")
+        top_count = min(
+            int(self.spec.top_candidate_hypotheses_count),
+            int(probs.size),
+        )
+        best_prob = float(np.max(probs))
+        out: list[SequenceCandidateHypothesis] = []
+        for rank, raw_idx in enumerate(order[:top_count].tolist()):
+            idx = int(raw_idx)
+            out.append(
+                SequenceCandidateHypothesis(
+                    rank=int(rank),
+                    candidate_index=idx,
+                    marginal_probability=float(probs[idx]),
+                    probability_gap_to_best=float(best_prob - float(probs[idx])),
+                    lat_rad=float(obs.candidate_lat_rad[idx]),
+                    lon_rad=float(obs.candidate_lon_rad[idx]),
+                    height_m=float(obs.candidate_height_m[idx]),
+                    offset_ned_m=np.asarray(
+                        obs.candidate_offsets_ned_m[idx],
+                        dtype=np.float64,
+                    ),
+                    predicted_disturbance_mps2=float(
+                        obs.predicted_disturbance_mps2[idx]
+                    ),
+                    predicted_bathymetry_m=(
+                        None
+                        if obs.predicted_bathymetry_m is None
+                        else float(obs.predicted_bathymetry_m[idx])
+                    ),
+                    predicted_magnetic_total_nt=(
+                        None
+                        if obs.predicted_magnetic_total_nt is None
+                        else float(obs.predicted_magnetic_total_nt[idx])
+                    ),
+                )
+            )
+        return tuple(out)
+
     def _emit_result_for_index(
         self,
         window: list[_SequenceObservation],
@@ -1583,6 +1665,15 @@ class GravitySequenceMatcher:
             delta,
             psi,
             target_local_index,
+        )
+        target_obs = window[target_local_index]
+        log_gamma = np.asarray(
+            alpha[target_local_index] + beta[target_local_index],
+            dtype=np.float64,
+        )
+        candidate_hypotheses = self._top_candidate_hypotheses(
+            target_obs,
+            self._stable_posterior_weights(log_gamma, target_obs),
         )
         anchor_estimates = tuple(
             self._estimate_for_window_index(
@@ -1622,6 +1713,7 @@ class GravitySequenceMatcher:
             used_bathymetry=used_bathymetry,
             used_magnetics=used_magnetics,
             ambiguity_diagnostics=ambiguity,
+            candidate_hypotheses=candidate_hypotheses,
             viterbi_log_score=float(delta[-1][best_last]),
             viterbi_offset_ned_m=np.asarray(target_anchor.viterbi_offset_ned_m, dtype=np.float64),
             posterior_mean_offset_ned_m=np.asarray(
@@ -1796,11 +1888,81 @@ class GravitySequenceMatcher:
         return results
 
 
+def sequence_update_with_candidate_hypothesis(
+    update: SequenceMatchUpdateResult,
+    hypothesis: SequenceCandidateHypothesis,
+) -> SequenceMatchUpdateResult:
+    """
+    Return a shallow variant of ``update`` centered on one discrete hypothesis.
+
+    The posterior covariance and ambiguity diagnostics remain attached to the
+    parent delayed update; only the candidate-specific geodetic position,
+    offset, and predicted map values are replaced.
+    """
+    estimate = SequenceMatchEstimate(
+        lat_rad=float(hypothesis.lat_rad),
+        lon_rad=float(hypothesis.lon_rad),
+        height_m=float(hypothesis.height_m),
+        covariance_ned_m2=np.asarray(
+            update.estimate.covariance_ned_m2,
+            dtype=np.float64,
+        ).copy(),
+        covariance_geodetic=np.asarray(
+            update.estimate.covariance_geodetic,
+            dtype=np.float64,
+        ).copy(),
+        predicted_disturbance_mps2=hypothesis.predicted_disturbance_mps2,
+        marginal_peak_probability=float(hypothesis.marginal_probability),
+        predicted_bathymetry_m=hypothesis.predicted_bathymetry_m,
+        predicted_magnetic_total_nt=hypothesis.predicted_magnetic_total_nt,
+    )
+    remaining_hypotheses = tuple(
+        cand
+        for cand in update.candidate_hypotheses
+        if int(cand.candidate_index) != int(hypothesis.candidate_index)
+    )
+    return SequenceMatchUpdateResult(
+        estimate=estimate,
+        global_index=int(update.global_index),
+        time_s=float(update.time_s),
+        window_size_used=int(update.window_size_used),
+        delayed_by_steps=int(update.delayed_by_steps),
+        num_candidates=int(update.num_candidates),
+        posterior_entropy_nats=float(update.posterior_entropy_nats),
+        marginal_peak_probability=float(hypothesis.marginal_probability),
+        predicted_disturbance_mean_mps2=float(
+            hypothesis.predicted_disturbance_mps2
+        ),
+        predicted_disturbance_std_mps2=float(update.predicted_disturbance_std_mps2),
+        used_gradient=bool(update.used_gradient),
+        used_bathymetry=bool(update.used_bathymetry),
+        used_magnetics=bool(update.used_magnetics),
+        viterbi_log_score=float(update.viterbi_log_score),
+        viterbi_offset_ned_m=np.asarray(
+            hypothesis.offset_ned_m,
+            dtype=np.float64,
+        ).copy(),
+        posterior_mean_offset_ned_m=np.asarray(
+            hypothesis.offset_ned_m,
+            dtype=np.float64,
+        ).copy(),
+        ambiguity_diagnostics=update.ambiguity_diagnostics,
+        candidate_hypotheses=remaining_hypotheses,
+        anchor_estimates=tuple(update.anchor_estimates),
+        publishability_probability=update.publishability_probability,
+        support_expansion_probability=update.support_expansion_probability,
+        learned_covariance_scale=update.learned_covariance_scale,
+        localizer_name=str(update.localizer_name),
+    )
+
+
 __all__ = [
     "GravitySequenceMatcher",
     "GravitySequenceMatcherSpec",
     "SequenceAmbiguityDiagnostics",
     "SequenceAnchorEstimate",
+    "SequenceCandidateHypothesis",
     "SequenceMatchEstimate",
     "SequenceMatchUpdateResult",
+    "sequence_update_with_candidate_hypothesis",
 ]

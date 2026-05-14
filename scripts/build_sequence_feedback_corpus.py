@@ -31,6 +31,7 @@ from gravnav.estimators.feedback_policy import SequenceFeedbackController, Seque
 from gravnav.estimators.gravity_sequence_match import (
     SequenceAmbiguityDiagnostics,
     SequenceAnchorEstimate,
+    SequenceCandidateHypothesis,
     SequenceMatchEstimate,
     SequenceMatchUpdateResult,
 )
@@ -595,6 +596,25 @@ def _serialize_sequence_update(
             }
             for anchor in update.anchor_estimates
         ],
+        "candidate_hypotheses": [
+            {
+                "rank": int(candidate.rank),
+                "candidate_index": int(candidate.candidate_index),
+                "marginal_probability": float(candidate.marginal_probability),
+                "probability_gap_to_best": float(candidate.probability_gap_to_best),
+                "lat_rad": float(candidate.lat_rad),
+                "lon_rad": float(candidate.lon_rad),
+                "height_m": float(candidate.height_m),
+                "offset_ned_m": np.asarray(
+                    candidate.offset_ned_m,
+                    dtype=np.float64,
+                ).tolist(),
+                "predicted_disturbance_mps2": candidate.predicted_disturbance_mps2,
+                "predicted_bathymetry_m": candidate.predicted_bathymetry_m,
+                "predicted_magnetic_total_nt": candidate.predicted_magnetic_total_nt,
+            }
+            for candidate in update.candidate_hypotheses
+        ],
         "publishability_probability": update.publishability_probability,
         "support_expansion_probability": update.support_expansion_probability,
         "learned_covariance_scale": update.learned_covariance_scale,
@@ -608,6 +628,7 @@ def _deserialize_sequence_update(
     estimate_payload = payload["estimate"]
     ambiguity_payload = payload["ambiguity_diagnostics"]
     anchor_payloads = payload.get("anchor_estimates", [])
+    candidate_payloads = payload.get("candidate_hypotheses", [])
     return SequenceMatchUpdateResult(
         estimate=SequenceMatchEstimate(
             lat_rad=float(estimate_payload["lat_rad"]),
@@ -730,6 +751,29 @@ def _deserialize_sequence_update(
                 delayed_by_steps=int(anchor["delayed_by_steps"]),
             )
             for anchor in anchor_payloads
+        ),
+        candidate_hypotheses=tuple(
+            SequenceCandidateHypothesis(
+                rank=int(candidate["rank"]),
+                candidate_index=int(candidate["candidate_index"]),
+                marginal_probability=float(candidate["marginal_probability"]),
+                probability_gap_to_best=float(candidate["probability_gap_to_best"]),
+                lat_rad=float(candidate["lat_rad"]),
+                lon_rad=float(candidate["lon_rad"]),
+                height_m=float(candidate["height_m"]),
+                offset_ned_m=np.asarray(
+                    candidate["offset_ned_m"],
+                    dtype=np.float64,
+                ),
+                predicted_disturbance_mps2=candidate.get(
+                    "predicted_disturbance_mps2"
+                ),
+                predicted_bathymetry_m=candidate.get("predicted_bathymetry_m"),
+                predicted_magnetic_total_nt=candidate.get(
+                    "predicted_magnetic_total_nt"
+                ),
+            )
+            for candidate in candidate_payloads
         ),
         publishability_probability=payload.get("publishability_probability"),
         support_expansion_probability=payload.get("support_expansion_probability"),
@@ -1330,6 +1374,7 @@ def _build_cached_event_rows(
         event_rows.append(
             {
                 "feature_vector": np.asarray(feature_vector, dtype=np.float64).tolist(),
+                "event_seed": int(seed),
                 "current_time_s": float(truth.time_s[current_step]),
                 "update_time_s": float(update.time_s),
                 "current_step": int(current_step),
@@ -1355,6 +1400,7 @@ def _append_region_seed_examples(
     gain_alpha_candidates: list[float],
     features: list[np.ndarray],
     region_names: list[str],
+    event_seed: list[int],
     current_time_s: list[float],
     update_time_s: list[float],
     current_step_index: list[int],
@@ -1432,6 +1478,14 @@ def _append_region_seed_examples(
 
         features.append(np.asarray(event_row["feature_vector"], dtype=np.float64))
         region_names.append(str(region_name))
+        event_seed.append(
+            int(
+                event_row.get(
+                    "event_seed",
+                    cached_run.get("metadata", {}).get("seed", -1),
+                )
+            )
+        )
         current_time_s.append(float(event_row["current_time_s"]))
         update_time_s.append(float(event_row["update_time_s"]))
         current_step_index.append(current_step)
@@ -1506,6 +1560,7 @@ def main() -> int:
 
     features: list[np.ndarray] = []
     region_names: list[str] = []
+    event_seed: list[int] = []
     current_time_s: list[float] = []
     update_time_s: list[float] = []
     current_step_index: list[int] = []
@@ -1675,6 +1730,7 @@ def main() -> int:
                 gain_alpha_candidates=gain_alpha_candidates,
                 features=features,
                 region_names=region_names,
+                event_seed=event_seed,
                 current_time_s=current_time_s,
                 update_time_s=update_time_s,
                 current_step_index=current_step_index,
@@ -1730,6 +1786,7 @@ def main() -> int:
         region_names=unique_regions,
         region_index=region_index,
         event_region_names=tuple(region_names),
+        event_seed=np.asarray(event_seed, dtype=np.int64),
         current_time_s=np.asarray(current_time_s, dtype=np.float64),
         update_time_s=np.asarray(update_time_s, dtype=np.float64),
         current_step_index=np.asarray(current_step_index, dtype=np.int64),

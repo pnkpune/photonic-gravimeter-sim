@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -257,6 +257,7 @@ class SequenceFeedbackEventCorpus:
     region_names: tuple[str, ...]
     region_index: NDArray[np.int64]
     event_region_names: tuple[str, ...]
+    event_seed: NDArray[np.int64]
     current_time_s: FloatArray
     update_time_s: FloatArray
     current_step_index: NDArray[np.int64]
@@ -289,6 +290,7 @@ class SequenceFeedbackEventCorpus:
             region_names=np.asarray(self.region_names, dtype=object),
             region_index=np.asarray(self.region_index, dtype=np.int64),
             event_region_names=np.asarray(self.event_region_names, dtype=object),
+            event_seed=np.asarray(self.event_seed, dtype=np.int64),
             current_time_s=np.asarray(self.current_time_s, dtype=np.float64),
             update_time_s=np.asarray(self.update_time_s, dtype=np.float64),
             current_step_index=np.asarray(self.current_step_index, dtype=np.int64),
@@ -317,12 +319,18 @@ class SequenceFeedbackEventCorpus:
     def from_npz(cls, path: str | Path) -> "SequenceFeedbackEventCorpus":
         p = Path(path).expanduser().resolve()
         with np.load(p, allow_pickle=True) as data:
+            features = np.asarray(data["features"], dtype=np.float64)
             return cls(
                 feature_names=tuple(str(x) for x in data["feature_names"].tolist()),
-                features=np.asarray(data["features"], dtype=np.float64),
+                features=features,
                 region_names=tuple(str(x) for x in data["region_names"].tolist()),
                 region_index=np.asarray(data["region_index"], dtype=np.int64),
                 event_region_names=tuple(str(x) for x in data["event_region_names"].tolist()),
+                event_seed=(
+                    np.asarray(data["event_seed"], dtype=np.int64)
+                    if "event_seed" in data
+                    else np.full(features.shape[0], -1, dtype=np.int64)
+                ),
                 current_time_s=np.asarray(data["current_time_s"], dtype=np.float64),
                 update_time_s=np.asarray(data["update_time_s"], dtype=np.float64),
                 current_step_index=np.asarray(data["current_step_index"], dtype=np.int64),
@@ -392,6 +400,76 @@ class SequenceFeedbackEventCorpus:
             out[str(name)] = int(np.sum(self.region_index == idx))
         return out
 
+    def subset(self, mask: ArrayLike) -> "SequenceFeedbackEventCorpus":
+        keep = np.asarray(mask, dtype=bool).reshape(-1)
+        if keep.shape[0] != self.num_examples:
+            raise ValueError(
+                "subset mask must match the corpus length, "
+                f"got {keep.shape[0]} for {self.num_examples}."
+            )
+        subset_region_names = tuple(
+            str(self.event_region_names[idx])
+            for idx, selected in enumerate(keep.tolist())
+            if selected
+        )
+        unique_regions = tuple(dict.fromkeys(subset_region_names).keys())
+        region_lookup = {name: idx for idx, name in enumerate(unique_regions)}
+        return SequenceFeedbackEventCorpus(
+            feature_names=self.feature_names,
+            features=self.features[keep],
+            region_names=unique_regions,
+            region_index=np.asarray(
+                [region_lookup[name] for name in subset_region_names],
+                dtype=np.int64,
+            ),
+            event_region_names=subset_region_names,
+            event_seed=np.asarray(self.event_seed[keep], dtype=np.int64),
+            current_time_s=np.asarray(self.current_time_s[keep], dtype=np.float64),
+            update_time_s=np.asarray(self.update_time_s[keep], dtype=np.float64),
+            current_step_index=np.asarray(self.current_step_index[keep], dtype=np.int64),
+            target_step_index=np.asarray(self.target_step_index[keep], dtype=np.int64),
+            lag_replay_applied=np.asarray(self.lag_replay_applied[keep], dtype=bool),
+            lag_replay_improves_error=np.asarray(
+                self.lag_replay_improves_error[keep],
+                dtype=bool,
+            ),
+            lag_replay_hmi_safe=np.asarray(self.lag_replay_hmi_safe[keep], dtype=bool),
+            lag_replay_useful_and_safe=np.asarray(
+                self.lag_replay_useful_and_safe[keep],
+                dtype=bool,
+            ),
+            lag_replay_error_delta_m=np.asarray(
+                self.lag_replay_error_delta_m[keep],
+                dtype=np.float64,
+            ),
+            lag_replay_best_gain_alpha=np.asarray(
+                self.lag_replay_best_gain_alpha[keep],
+                dtype=np.float64,
+            ),
+            bias_transfer_applied=np.asarray(self.bias_transfer_applied[keep], dtype=bool),
+            bias_transfer_improves_error=np.asarray(
+                self.bias_transfer_improves_error[keep],
+                dtype=bool,
+            ),
+            bias_transfer_hmi_safe=np.asarray(
+                self.bias_transfer_hmi_safe[keep],
+                dtype=bool,
+            ),
+            bias_transfer_useful_and_safe=np.asarray(
+                self.bias_transfer_useful_and_safe[keep],
+                dtype=bool,
+            ),
+            bias_transfer_error_delta_m=np.asarray(
+                self.bias_transfer_error_delta_m[keep],
+                dtype=np.float64,
+            ),
+            bias_transfer_best_gain_alpha=np.asarray(
+                self.bias_transfer_best_gain_alpha[keep],
+                dtype=np.float64,
+            ),
+            metadata=dict(self.metadata),
+        )
+
 
 @dataclass
 class SequenceFeedbackTrustModelSpec:
@@ -414,6 +492,7 @@ class SequenceFeedbackTrustModelSpec:
     gain_alpha_reference: float = 0.25
     gain_alpha_prediction_scale: float = 0.35
     gain_alpha_safe_max: float = 0.50
+    primary_failure_negative_weight: float = 4.0
     name: str = "sequence_feedback_trust_reference"
 
 
@@ -568,10 +647,236 @@ class SequenceFeedbackTrustModel:
             )
 
 
+@dataclass(frozen=True)
+class SequenceFeedbackTrustCommitteeMember:
+    name: str
+    drop_seed: int
+    model_path: str
+    model: SequenceFeedbackTrustModel
+
+
+@dataclass(frozen=True)
+class SequenceFeedbackTrustCommitteePrediction:
+    trust_probability: float
+    predicted_error_delta_m: float
+    gain_alpha: float
+    covariance_scale: float
+    trust_allowed: bool
+    member_trust_probabilities: tuple[float, ...]
+    member_predicted_error_delta_m: tuple[float, ...]
+    member_gain_alpha: tuple[float, ...]
+    member_covariance_scale: tuple[float, ...]
+    members_passing: int
+    rejection_reason: Optional[str]
+
+
+@dataclass
+class SequenceFeedbackTrustCommittee:
+    aggregator: str
+    members: tuple[SequenceFeedbackTrustCommitteeMember, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_manifest_json(
+        cls,
+        path: str | Path,
+    ) -> "SequenceFeedbackTrustCommittee":
+        manifest_path = Path(path).expanduser().resolve()
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        members: list[SequenceFeedbackTrustCommitteeMember] = []
+        for raw_member in payload.get("members", []):
+            model_path = Path(str(raw_member["model_path"])).expanduser()
+            if not model_path.is_absolute():
+                model_path = (manifest_path.parent / model_path).resolve()
+            else:
+                model_path = model_path.resolve()
+            members.append(
+                SequenceFeedbackTrustCommitteeMember(
+                    name=str(raw_member["name"]),
+                    drop_seed=int(raw_member["drop_seed"]),
+                    model_path=str(model_path),
+                    model=load_sequence_feedback_trust_model(model_path),
+                )
+            )
+        return cls(
+            aggregator=str(payload.get("aggregator", "conservative_unanimity_v1")),
+            members=tuple(members),
+            metadata={
+                "manifest_path": str(manifest_path),
+                **dict(payload.get("metadata", {})),
+            },
+        )
+
+    def predict(
+        self,
+        features: ArrayLike,
+        *,
+        mode: str,
+        min_trust_probability: float,
+        max_predicted_error_delta_m: Optional[float],
+        alpha_min: float,
+        alpha_max: float,
+        covariance_scale_min: float,
+        covariance_scale_max: float,
+    ) -> SequenceFeedbackTrustCommitteePrediction:
+        if self.aggregator != "conservative_unanimity_v1":
+            raise ValueError(f"Unsupported committee aggregator {self.aggregator!r}.")
+        if not self.members:
+            raise ValueError("Trust committee must include at least one member.")
+
+        member_trust: list[float] = []
+        member_delta: list[float] = []
+        member_gain: list[float] = []
+        member_cov_scale: list[float] = []
+        member_pass: list[bool] = []
+        rejection_reason: Optional[str] = None
+        for member in self.members:
+            trust_probability = float(
+                member.model.predict_trust_probability(features, mode=mode)[0]
+            )
+            predicted_error_delta_m = float(
+                member.model.predict_error_delta_m(features, mode=mode)[0]
+            )
+            gain_alpha = float(
+                member.model.predict_gain_alpha(
+                    features,
+                    mode=mode,
+                    alpha_min=alpha_min,
+                    alpha_max=alpha_max,
+                )[0]
+            )
+            covariance_scale = float(
+                member.model.predict_covariance_scale(
+                    features,
+                    mode=mode,
+                    scale_min=covariance_scale_min,
+                    scale_max=covariance_scale_max,
+                )[0]
+            )
+            trust_ok = bool(
+                np.isfinite(trust_probability)
+                and trust_probability >= float(min_trust_probability)
+            )
+            delta_ok = True
+            if max_predicted_error_delta_m is not None:
+                delta_ok = bool(
+                    np.isfinite(predicted_error_delta_m)
+                    and predicted_error_delta_m
+                    <= float(max_predicted_error_delta_m)
+                )
+            passes = bool(trust_ok and delta_ok)
+            if not passes and rejection_reason is None:
+                if not trust_ok:
+                    rejection_reason = (
+                        f"committee_member_{member.name}_trust_probability_"
+                        f"{trust_probability:.3f}_below_{float(min_trust_probability):.3f}"
+                    )
+                else:
+                    rejection_reason = (
+                        f"committee_member_{member.name}_predicted_error_delta_m_"
+                        f"{predicted_error_delta_m:.3f}_above_"
+                        f"{float(max_predicted_error_delta_m):.3f}"
+                    )
+            member_trust.append(trust_probability)
+            member_delta.append(predicted_error_delta_m)
+            member_gain.append(gain_alpha)
+            member_cov_scale.append(covariance_scale)
+            member_pass.append(passes)
+
+        return SequenceFeedbackTrustCommitteePrediction(
+            trust_probability=float(np.min(np.asarray(member_trust, dtype=np.float64))),
+            predicted_error_delta_m=float(
+                np.max(np.asarray(member_delta, dtype=np.float64))
+            ),
+            gain_alpha=float(np.min(np.asarray(member_gain, dtype=np.float64))),
+            covariance_scale=float(
+                np.max(np.asarray(member_cov_scale, dtype=np.float64))
+            ),
+            trust_allowed=bool(all(member_pass)),
+            member_trust_probabilities=tuple(float(x) for x in member_trust),
+            member_predicted_error_delta_m=tuple(float(x) for x in member_delta),
+            member_gain_alpha=tuple(float(x) for x in member_gain),
+            member_covariance_scale=tuple(float(x) for x in member_cov_scale),
+            members_passing=int(sum(1 for passed in member_pass if passed)),
+            rejection_reason=rejection_reason,
+        )
+
+
 def load_sequence_feedback_trust_model(
     path: str | Path,
 ) -> SequenceFeedbackTrustModel:
     return SequenceFeedbackTrustModel.from_npz(path)
+
+
+def load_sequence_feedback_trust_committee(
+    path: str | Path,
+) -> SequenceFeedbackTrustCommittee:
+    return SequenceFeedbackTrustCommittee.from_manifest_json(path)
+
+
+def _normalize_failure_seed_pairs(
+    manifest: Optional[
+        Mapping[str, Sequence[int]]
+        | Sequence[Mapping[str, Any]]
+        | Sequence[tuple[str, int]]
+        | set[tuple[str, int]]
+    ],
+) -> set[tuple[str, int]]:
+    if manifest is None:
+        return set()
+    if isinstance(manifest, set):
+        return {(str(region), int(seed)) for region, seed in manifest}
+    if isinstance(manifest, Sequence) and manifest and isinstance(manifest[0], tuple):
+        return {(str(region), int(seed)) for region, seed in manifest}
+    if isinstance(manifest, Mapping):
+        payload = manifest
+        if "failure_pairs" in payload:
+            return _normalize_failure_seed_pairs(payload["failure_pairs"])
+        if "regions" in payload and isinstance(payload["regions"], Mapping):
+            return _normalize_failure_seed_pairs(payload["regions"])
+        pairs: set[tuple[str, int]] = set()
+        for region_name, seeds in payload.items():
+            if isinstance(seeds, (list, tuple, set)):
+                for seed in seeds:
+                    pairs.add((str(region_name), int(seed)))
+        return pairs
+    pairs = set()
+    for row in manifest:
+        region_name = str(row["region_name"])
+        for seed in row.get("seeds", []):
+            pairs.add((region_name, int(seed)))
+    return pairs
+
+
+def load_sequence_feedback_failure_manifest(
+    path: str | Path,
+) -> set[tuple[str, int]]:
+    payload = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    return _normalize_failure_seed_pairs(payload)
+
+
+def _primary_failure_negative_mask(
+    corpus: SequenceFeedbackEventCorpus,
+    manifest: Optional[
+        Mapping[str, Sequence[int]]
+        | Sequence[Mapping[str, Any]]
+        | Sequence[tuple[str, int]]
+        | set[tuple[str, int]]
+    ],
+) -> NDArray[np.bool_]:
+    pairs = _normalize_failure_seed_pairs(manifest)
+    if not pairs:
+        return np.zeros(corpus.num_examples, dtype=bool)
+    return np.asarray(
+        [
+            (str(region_name), int(seed)) in pairs
+            for region_name, seed in zip(
+                corpus.event_region_names,
+                corpus.event_seed.tolist(),
+            )
+        ],
+        dtype=bool,
+    )
 
 
 def _fit_balanced_logistic(
@@ -703,12 +1008,22 @@ def fit_sequence_feedback_trust_model(
     corpus: SequenceFeedbackEventCorpus,
     *,
     spec: Optional[SequenceFeedbackTrustModelSpec] = None,
+    hard_negative_manifest: Optional[
+        Mapping[str, Sequence[int]]
+        | Sequence[Mapping[str, Any]]
+        | Sequence[tuple[str, int]]
+        | set[tuple[str, int]]
+    ] = None,
 ) -> SequenceFeedbackTrustModel:
     model_spec = SequenceFeedbackTrustModelSpec() if spec is None else spec
     X = np.asarray(corpus.features, dtype=np.float64)
     mean = np.mean(X, axis=0)
     std = _stable_std(X)
     Xn = (X - mean) / std
+    primary_failure_mask = _primary_failure_negative_mask(
+        corpus,
+        hard_negative_manifest,
+    )
 
     useful_weights = np.zeros((len(model_spec.mode_names), X.shape[1]), dtype=np.float64)
     useful_bias = np.zeros(len(model_spec.mode_names), dtype=np.float64)
@@ -738,6 +1053,11 @@ def fit_sequence_feedback_trust_model(
         severity_weights[negative_mask & (~hmi_safe_target)] *= float(
             model_spec.unsafe_negative_weight
         )
+        primary_failure_negative_mask = negative_mask & primary_failure_mask
+        if str(mode_name) == "lag_replay":
+            severity_weights[primary_failure_negative_mask] *= float(
+                model_spec.primary_failure_negative_weight
+            )
         gain_alpha_weights_target = np.ones_like(gain_alpha_target, dtype=np.float64)
         zero_gain_mask = gain_alpha_target <= 1.0e-6
         mid_gain_mask = (
@@ -755,6 +1075,10 @@ def fit_sequence_feedback_trust_model(
         gain_alpha_weights_target[nonzero_safe_mask] *= float(
             model_spec.gain_nonzero_safe_weight
         )
+        if str(mode_name) == "lag_replay":
+            gain_alpha_weights_target[primary_failure_negative_mask] *= float(
+                model_spec.primary_failure_negative_weight
+            )
         useful_weights[mode_idx], useful_bias[mode_idx] = _fit_balanced_logistic(
             Xn,
             useful_target,
@@ -767,6 +1091,7 @@ def fit_sequence_feedback_trust_model(
             Xn,
             error_target,
             l2=model_spec.l2,
+            sample_weights=severity_weights,
         )
         gain_alpha_weights[mode_idx], gain_alpha_bias[mode_idx] = _fit_ridge_regression(
             Xn,
@@ -822,6 +1147,9 @@ def fit_sequence_feedback_trust_model(
         metrics["median_target_gain_alpha"] = _median_or_zero(
             gain_alpha_target[useful_target]
         )
+        metrics["primary_failure_negative_count"] = int(
+            np.sum(primary_failure_negative_mask)
+        )
         training_metrics[str(mode_name)] = metrics
         gain_histogram_summary[str(mode_name)] = _gain_histogram_summary(
             corpus,
@@ -844,6 +1172,13 @@ def fit_sequence_feedback_trust_model(
             "gain_histogram_summary": gain_histogram_summary,
             "num_examples": int(corpus.num_examples),
             "region_example_counts": corpus.region_example_counts(),
+            "primary_failure_negative_example_count": int(np.sum(primary_failure_mask)),
+            "primary_failure_seed_pairs": [
+                {"region_name": str(region_name), "seed": int(seed)}
+                for region_name, seed in sorted(
+                    _normalize_failure_seed_pairs(hard_negative_manifest)
+                )
+            ],
         },
     )
 
@@ -852,6 +1187,12 @@ def cross_validate_sequence_feedback_trust_model(
     corpus: SequenceFeedbackEventCorpus,
     *,
     spec: Optional[SequenceFeedbackTrustModelSpec] = None,
+    hard_negative_manifest: Optional[
+        Mapping[str, Sequence[int]]
+        | Sequence[Mapping[str, Any]]
+        | Sequence[tuple[str, int]]
+        | set[tuple[str, int]]
+    ] = None,
 ) -> dict[str, Any]:
     model_spec = SequenceFeedbackTrustModelSpec() if spec is None else spec
     folds: list[dict[str, Any]] = []
@@ -873,42 +1214,12 @@ def cross_validate_sequence_feedback_trust_model(
         train_mask = ~test_mask
         if not np.any(train_mask) or not np.any(test_mask):
             continue
-        train_region_names = tuple(
-            corpus.region_names[int(idx)]
-            for idx in corpus.region_index[train_mask]
+        train_corpus = corpus.subset(train_mask)
+        model = fit_sequence_feedback_trust_model(
+            train_corpus,
+            spec=model_spec,
+            hard_negative_manifest=hard_negative_manifest,
         )
-        unique_train_regions = tuple(dict.fromkeys(train_region_names).keys())
-        train_region_lookup = {
-            name: idx for idx, name in enumerate(unique_train_regions)
-        }
-        train_corpus = SequenceFeedbackEventCorpus(
-            feature_names=corpus.feature_names,
-            features=corpus.features[train_mask],
-            region_names=unique_train_regions,
-            region_index=np.asarray(
-                [train_region_lookup[name] for name in train_region_names],
-                dtype=np.int64,
-            ),
-            event_region_names=train_region_names,
-            current_time_s=corpus.current_time_s[train_mask],
-            update_time_s=corpus.update_time_s[train_mask],
-            current_step_index=corpus.current_step_index[train_mask],
-            target_step_index=corpus.target_step_index[train_mask],
-            lag_replay_applied=corpus.lag_replay_applied[train_mask],
-            lag_replay_improves_error=corpus.lag_replay_improves_error[train_mask],
-            lag_replay_hmi_safe=corpus.lag_replay_hmi_safe[train_mask],
-            lag_replay_useful_and_safe=corpus.lag_replay_useful_and_safe[train_mask],
-            lag_replay_error_delta_m=corpus.lag_replay_error_delta_m[train_mask],
-            lag_replay_best_gain_alpha=corpus.lag_replay_best_gain_alpha[train_mask],
-            bias_transfer_applied=corpus.bias_transfer_applied[train_mask],
-            bias_transfer_improves_error=corpus.bias_transfer_improves_error[train_mask],
-            bias_transfer_hmi_safe=corpus.bias_transfer_hmi_safe[train_mask],
-            bias_transfer_useful_and_safe=corpus.bias_transfer_useful_and_safe[train_mask],
-            bias_transfer_error_delta_m=corpus.bias_transfer_error_delta_m[train_mask],
-            bias_transfer_best_gain_alpha=corpus.bias_transfer_best_gain_alpha[train_mask],
-            metadata=dict(corpus.metadata),
-        )
-        model = fit_sequence_feedback_trust_model(train_corpus, spec=model_spec)
         fold_summary: dict[str, Any] = {"held_out_region": str(region_name), "num_examples": int(np.sum(test_mask))}
         for mode in model_spec.mode_names:
             prob = model.predict_trust_probability(corpus.features[test_mask], mode=mode)
@@ -969,6 +1280,12 @@ def cross_validate_sequence_feedback_trust_model(
         "feature_names": list(model_spec.feature_names),
         "modes": list(model_spec.mode_names),
         "trust_threshold": float(model_spec.trust_threshold),
+        "primary_failure_seed_pairs": [
+            {"region_name": str(region_name), "seed": int(seed)}
+            for region_name, seed in sorted(
+                _normalize_failure_seed_pairs(hard_negative_manifest)
+            )
+        ],
         "folds": folds,
         "aggregate": aggregate,
     }
@@ -978,10 +1295,15 @@ __all__ = [
     "SEQUENCE_FEEDBACK_FEATURE_NAMES",
     "SEQUENCE_FEEDBACK_MODES",
     "SequenceFeedbackEventCorpus",
+    "SequenceFeedbackTrustCommittee",
+    "SequenceFeedbackTrustCommitteeMember",
+    "SequenceFeedbackTrustCommitteePrediction",
     "SequenceFeedbackTrustModel",
     "SequenceFeedbackTrustModelSpec",
     "cross_validate_sequence_feedback_trust_model",
     "extract_sequence_feedback_features",
     "fit_sequence_feedback_trust_model",
+    "load_sequence_feedback_failure_manifest",
+    "load_sequence_feedback_trust_committee",
     "load_sequence_feedback_trust_model",
 ]

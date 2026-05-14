@@ -47,8 +47,10 @@ from numpy.typing import NDArray
 
 from ..analysis.observability import ObservabilitySnapshot
 from ..ml.feedback_trust import (
+    SequenceFeedbackTrustCommittee,
     SequenceFeedbackTrustModel,
     extract_sequence_feedback_features,
+    load_sequence_feedback_trust_committee,
     load_sequence_feedback_trust_model,
 )
 from .error_state_ins import (
@@ -57,7 +59,12 @@ from .error_state_ins import (
     ErrorStateINS,
     ErrorStateINSState,
 )
-from .gravity_sequence_match import SequenceAnchorEstimate, SequenceMatchUpdateResult
+from .gravity_sequence_match import (
+    SequenceAnchorEstimate,
+    SequenceCandidateHypothesis,
+    SequenceMatchUpdateResult,
+    sequence_update_with_candidate_hypothesis,
+)
 from .fusion import (
     FusionUpdateResult,
     LinearMeasurement,
@@ -328,6 +335,7 @@ class SequenceFeedbackSpec:
     reset_matcher_after_apply: bool = True
     nis_threshold: Optional[float] = 25.0
     trust_model_export_path: Optional[str] = None
+    trust_committee_manifest_path: Optional[str] = None
     trust_gate_source: str = "heuristic"
     min_trust_probability: float = 0.5
     max_predicted_error_delta_m: Optional[float] = None
@@ -335,6 +343,7 @@ class SequenceFeedbackSpec:
     trust_gain_alpha_min: float = 0.0
     trust_gain_alpha_max: float = 1.0
     fixed_gain_alpha_override: Optional[float] = None
+    candidate_selection_mode: str = "posterior_mean"
     learned_gain_cooldown_s: float = 0.0
     learned_gain_max_applied_updates: Optional[int] = None
     apply_trust_covariance_scale: bool = False
@@ -371,6 +380,11 @@ class SequenceFeedbackSpec:
             if self.trust_model_export_path is None
             else str(self.trust_model_export_path).strip()
         )
+        self.trust_committee_manifest_path = (
+            None
+            if self.trust_committee_manifest_path is None
+            else str(self.trust_committee_manifest_path).strip()
+        )
         self.trust_gate_source = str(self.trust_gate_source).strip().lower()
         if self.trust_gate_source not in {"heuristic", "trust_model", "both"}:
             raise ValueError(
@@ -390,6 +404,17 @@ class SequenceFeedbackSpec:
             if self.fixed_gain_alpha_override is None
             else float(self.fixed_gain_alpha_override)
         )
+        self.candidate_selection_mode = str(
+            self.candidate_selection_mode
+        ).strip().lower()
+        if self.candidate_selection_mode not in {
+            "posterior_mean",
+            "topk_trust_rerank",
+        }:
+            raise ValueError(
+                "candidate_selection_mode must be 'posterior_mean' or "
+                "'topk_trust_rerank'."
+            )
         self.learned_gain_cooldown_s = float(self.learned_gain_cooldown_s)
         self.learned_gain_max_applied_updates = (
             None
@@ -455,11 +480,20 @@ class SequenceFeedbackSpec:
                 "trust_covariance_scale_min must be <= trust_covariance_scale_max."
             )
         if (
-            self.trust_gate_source in {"trust_model", "both"}
-            and not self.trust_model_export_path
+            self.trust_model_export_path
+            and self.trust_committee_manifest_path
         ):
             raise ValueError(
-                "trust_model_export_path is required when trust_gate_source uses a trust model."
+                "trust_model_export_path and trust_committee_manifest_path are mutually exclusive."
+            )
+        if (
+            self.trust_gate_source in {"trust_model", "both"}
+            and not self.trust_model_export_path
+            and not self.trust_committee_manifest_path
+        ):
+            raise ValueError(
+                "Either trust_model_export_path or trust_committee_manifest_path is required "
+                "when trust_gate_source uses a trust model."
             )
 
 
@@ -471,6 +505,11 @@ class SequenceFeedbackDiagnostics:
 
     mode: str
     measurement_geometry: str
+    candidate_selection_mode: str
+    candidate_selection_selected_source: str
+    candidate_selection_selected_rank: Optional[int]
+    candidate_selection_selected_probability: Optional[float]
+    candidate_selection_considered: int
     age_s: float
     window_size_used: int
     delayed_by_steps: int
@@ -491,6 +530,12 @@ class SequenceFeedbackDiagnostics:
     trust_probability: Optional[float]
     trust_allowed: Optional[bool]
     trust_rejection_reason: Optional[str]
+    committee_member_count: int
+    committee_member_trust_probabilities: tuple[float, ...]
+    committee_member_predicted_error_delta_m: tuple[float, ...]
+    committee_member_gain_alpha: tuple[float, ...]
+    committee_members_passing: Optional[int]
+    committee_rejection_reason: Optional[str]
     gain_alpha_applied: float
     trust_covariance_scale: float
     predicted_error_delta_m: Optional[float]
@@ -1099,11 +1144,16 @@ class SequenceFeedbackController:
     def __init__(self, spec: SequenceFeedbackSpec) -> None:
         self.spec = spec
         self._trust_model: Optional[SequenceFeedbackTrustModel] = None
+        self._trust_committee: Optional[SequenceFeedbackTrustCommittee] = None
         self._applied_update_count: int = 0
         self._last_applied_time_s: Optional[float] = None
         if self.spec.trust_model_export_path:
             self._trust_model = load_sequence_feedback_trust_model(
                 self.spec.trust_model_export_path
+            )
+        if self.spec.trust_committee_manifest_path:
+            self._trust_committee = load_sequence_feedback_trust_committee(
+                self.spec.trust_committee_manifest_path
             )
 
     def reset(self) -> None:
@@ -1120,7 +1170,69 @@ class SequenceFeedbackController:
             )
         )
 
-    def evaluate(
+    def _candidate_updates_for_selection(
+        self,
+        sequence_update: SequenceMatchUpdateResult,
+    ) -> list[tuple[SequenceMatchUpdateResult, str, Optional[int], float]]:
+        candidates: list[tuple[SequenceMatchUpdateResult, str, Optional[int], float]] = [
+            (
+                sequence_update,
+                "posterior_mean",
+                None,
+                float(sequence_update.marginal_peak_probability),
+            )
+        ]
+        for hypothesis in sequence_update.candidate_hypotheses:
+            candidates.append(
+                (
+                    sequence_update_with_candidate_hypothesis(
+                        sequence_update,
+                        hypothesis,
+                    ),
+                    "candidate_hypothesis",
+                    int(hypothesis.rank),
+                    float(hypothesis.marginal_probability),
+                )
+            )
+        return candidates
+
+    def _candidate_selection_key(
+        self,
+        result: SequenceFeedbackResult,
+        *,
+        selected_source: str,
+        selected_rank: Optional[int],
+        selected_probability: float,
+    ) -> tuple[float, ...]:
+        diagnostics = result.diagnostics
+        predicted_error_delta_m = diagnostics.predicted_error_delta_m
+        predicted_error_score = (
+            -float(predicted_error_delta_m)
+            if predicted_error_delta_m is not None
+            and np.isfinite(predicted_error_delta_m)
+            else -1.0e12
+        )
+        trust_probability = (
+            -1.0
+            if diagnostics.trust_probability is None
+            or not np.isfinite(diagnostics.trust_probability)
+            else float(diagnostics.trust_probability)
+        )
+        source_score = 1.0 if selected_source == "posterior_mean" else 0.0
+        rank_score = 0.0 if selected_rank is None else -float(selected_rank)
+        return (
+            1.0 if result.applied else 0.0,
+            1.0 if diagnostics.feedback_allowed else 0.0,
+            1.0 if diagnostics.trust_allowed is True else 0.0,
+            predicted_error_score,
+            trust_probability,
+            float(diagnostics.gain_alpha_applied),
+            float(selected_probability),
+            source_score,
+            rank_score,
+        )
+
+    def _evaluate_single_update(
         self,
         sequence_update: SequenceMatchUpdateResult,
         ins: ErrorStateINS,
@@ -1128,6 +1240,7 @@ class SequenceFeedbackController:
         current_time_s: float,
         live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
         previous_live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
+        _commit_runtime_state: bool = True,
     ) -> SequenceFeedbackResult:
         """
         Evaluate whether delayed sequence feedback should be applied and, if so,
@@ -1236,6 +1349,12 @@ class SequenceFeedbackController:
         trust_probability: Optional[float] = None
         trust_allowed: Optional[bool] = None
         trust_rejection_reason: Optional[str] = None
+        committee_member_count = 0
+        committee_member_trust_probabilities: tuple[float, ...] = ()
+        committee_member_predicted_error_delta_m: tuple[float, ...] = ()
+        committee_member_gain_alpha: tuple[float, ...] = ()
+        committee_members_passing: Optional[int] = None
+        committee_rejection_reason: Optional[str] = None
         predicted_error_delta_m: Optional[float] = None
         gain_alpha_applied = (
             1.0
@@ -1244,7 +1363,7 @@ class SequenceFeedbackController:
         )
         trust_covariance_scale = 1.0
         if self.spec.trust_gate_source in {"trust_model", "both"}:
-            if self._trust_model is None:
+            if self._trust_model is None and self._trust_committee is None:
                 trust_allowed = False
                 trust_rejection_reason = "trust_model_missing"
             else:
@@ -1254,58 +1373,98 @@ class SequenceFeedbackController:
                     current_time_s=current_time_s,
                     previous_live_ins_state=previous_live_ins_state,
                 )
-                trust_probability = float(
-                    self._trust_model.predict_trust_probability(
+                if self._trust_committee is not None:
+                    committee_prediction = self._trust_committee.predict(
                         feature_vector,
                         mode=self.spec.mode,
-                    )[0]
-                )
-                predicted_error_delta_m = float(
-                    self._trust_model.predict_error_delta_m(
-                        feature_vector,
-                        mode=self.spec.mode,
-                    )[0]
-                )
-                if self.spec.apply_trust_gain_alpha and self.spec.fixed_gain_alpha_override is None:
-                    gain_alpha_applied = float(
-                        self._trust_model.predict_gain_alpha(
+                        min_trust_probability=self.spec.min_trust_probability,
+                        max_predicted_error_delta_m=self.spec.max_predicted_error_delta_m,
+                        alpha_min=self.spec.trust_gain_alpha_min,
+                        alpha_max=self.spec.trust_gain_alpha_max,
+                        covariance_scale_min=self.spec.trust_covariance_scale_min,
+                        covariance_scale_max=self.spec.trust_covariance_scale_max,
+                    )
+                    trust_probability = float(committee_prediction.trust_probability)
+                    predicted_error_delta_m = float(
+                        committee_prediction.predicted_error_delta_m
+                    )
+                    trust_covariance_scale = float(committee_prediction.covariance_scale)
+                    trust_allowed = bool(committee_prediction.trust_allowed)
+                    committee_member_count = int(len(committee_prediction.member_trust_probabilities))
+                    committee_member_trust_probabilities = tuple(
+                        float(x)
+                        for x in committee_prediction.member_trust_probabilities
+                    )
+                    committee_member_predicted_error_delta_m = tuple(
+                        float(x)
+                        for x in committee_prediction.member_predicted_error_delta_m
+                    )
+                    committee_member_gain_alpha = tuple(
+                        float(x)
+                        for x in committee_prediction.member_gain_alpha
+                    )
+                    committee_members_passing = int(
+                        committee_prediction.members_passing
+                    )
+                    committee_rejection_reason = committee_prediction.rejection_reason
+                    if self.spec.apply_trust_gain_alpha and self.spec.fixed_gain_alpha_override is None:
+                        gain_alpha_applied = float(committee_prediction.gain_alpha)
+                    if not trust_allowed:
+                        trust_rejection_reason = committee_prediction.rejection_reason
+                else:
+                    assert self._trust_model is not None
+                    trust_probability = float(
+                        self._trust_model.predict_trust_probability(
                             feature_vector,
                             mode=self.spec.mode,
-                            alpha_min=self.spec.trust_gain_alpha_min,
-                            alpha_max=self.spec.trust_gain_alpha_max,
                         )[0]
                     )
-                trust_covariance_scale = float(
-                    self._trust_model.predict_covariance_scale(
-                        feature_vector,
-                        mode=self.spec.mode,
-                        scale_min=self.spec.trust_covariance_scale_min,
-                        scale_max=self.spec.trust_covariance_scale_max,
-                    )[0]
-                )
-                trust_allowed = bool(
-                    np.isfinite(trust_probability)
-                    and trust_probability >= self.spec.min_trust_probability
-                )
-                if not trust_allowed:
-                    trust_rejection_reason = (
-                        f"trust_probability={trust_probability:.3f} < "
-                        f"min={self.spec.min_trust_probability:.3f}"
+                    predicted_error_delta_m = float(
+                        self._trust_model.predict_error_delta_m(
+                            feature_vector,
+                            mode=self.spec.mode,
+                        )[0]
                     )
-                elif (
-                    self.spec.max_predicted_error_delta_m is not None
-                    and predicted_error_delta_m is not None
-                ):
+                    if self.spec.apply_trust_gain_alpha and self.spec.fixed_gain_alpha_override is None:
+                        gain_alpha_applied = float(
+                            self._trust_model.predict_gain_alpha(
+                                feature_vector,
+                                mode=self.spec.mode,
+                                alpha_min=self.spec.trust_gain_alpha_min,
+                                alpha_max=self.spec.trust_gain_alpha_max,
+                            )[0]
+                        )
+                    trust_covariance_scale = float(
+                        self._trust_model.predict_covariance_scale(
+                            feature_vector,
+                            mode=self.spec.mode,
+                            scale_min=self.spec.trust_covariance_scale_min,
+                            scale_max=self.spec.trust_covariance_scale_max,
+                        )[0]
+                    )
                     trust_allowed = bool(
-                        np.isfinite(predicted_error_delta_m)
-                        and predicted_error_delta_m
-                        <= float(self.spec.max_predicted_error_delta_m)
+                        np.isfinite(trust_probability)
+                        and trust_probability >= self.spec.min_trust_probability
                     )
                     if not trust_allowed:
                         trust_rejection_reason = (
-                            f"predicted_error_delta_m={predicted_error_delta_m:.3f} > "
-                            f"max={float(self.spec.max_predicted_error_delta_m):.3f}"
+                            f"trust_probability={trust_probability:.3f} < "
+                            f"min={self.spec.min_trust_probability:.3f}"
                         )
+                    elif (
+                        self.spec.max_predicted_error_delta_m is not None
+                        and predicted_error_delta_m is not None
+                    ):
+                        trust_allowed = bool(
+                            np.isfinite(predicted_error_delta_m)
+                            and predicted_error_delta_m
+                            <= float(self.spec.max_predicted_error_delta_m)
+                        )
+                        if not trust_allowed:
+                            trust_rejection_reason = (
+                                f"predicted_error_delta_m={predicted_error_delta_m:.3f} > "
+                                f"max={float(self.spec.max_predicted_error_delta_m):.3f}"
+                            )
 
         gain_alpha_applied = float(
             np.clip(
@@ -1383,6 +1542,11 @@ class SequenceFeedbackController:
         diagnostics = SequenceFeedbackDiagnostics(
             mode=self.spec.mode,
             measurement_geometry=self.spec.measurement_geometry,
+            candidate_selection_mode=str(self.spec.candidate_selection_mode),
+            candidate_selection_selected_source="posterior_mean",
+            candidate_selection_selected_rank=None,
+            candidate_selection_selected_probability=float(peak_prob),
+            candidate_selection_considered=1,
             age_s=age_s,
             window_size_used=int(sequence_update.window_size_used),
             delayed_by_steps=int(sequence_update.delayed_by_steps),
@@ -1414,6 +1578,12 @@ class SequenceFeedbackController:
             trust_probability=trust_probability,
             trust_allowed=trust_allowed,
             trust_rejection_reason=trust_rejection_reason,
+            committee_member_count=int(committee_member_count),
+            committee_member_trust_probabilities=committee_member_trust_probabilities,
+            committee_member_predicted_error_delta_m=committee_member_predicted_error_delta_m,
+            committee_member_gain_alpha=committee_member_gain_alpha,
+            committee_members_passing=committee_members_passing,
+            committee_rejection_reason=committee_rejection_reason,
             gain_alpha_applied=float(gain_alpha_applied),
             trust_covariance_scale=float(trust_covariance_scale),
             predicted_error_delta_m=predicted_error_delta_m,
@@ -1463,13 +1633,94 @@ class SequenceFeedbackController:
             measurement,
             nis_threshold=self.spec.nis_threshold,
         )
-        if fusion_result.accepted:
+        if fusion_result.accepted and _commit_runtime_state:
             self._applied_update_count += 1
             self._last_applied_time_s = float(current_time_s)
         return SequenceFeedbackResult(
             diagnostics=diagnostics,
             fusion_result=fusion_result,
         )
+
+    def evaluate(
+        self,
+        sequence_update: SequenceMatchUpdateResult,
+        ins: ErrorStateINS,
+        *,
+        current_time_s: float,
+        live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
+        previous_live_ins_state: Optional[ErrorStateINS | ErrorStateINSState] = None,
+    ) -> SequenceFeedbackResult:
+        """
+        Evaluate whether delayed sequence feedback should be applied and, if so,
+        inject a conservative horizontal pseudo-position measurement.
+        """
+        if (
+            self.spec.candidate_selection_mode != "topk_trust_rerank"
+            or len(sequence_update.candidate_hypotheses) == 0
+        ):
+            return self._evaluate_single_update(
+                sequence_update,
+                ins,
+                current_time_s=current_time_s,
+                live_ins_state=live_ins_state,
+                previous_live_ins_state=previous_live_ins_state,
+                _commit_runtime_state=True,
+            )
+
+        selected_update = sequence_update
+        selected_source = "posterior_mean"
+        selected_rank: Optional[int] = None
+        selected_probability = float(sequence_update.marginal_peak_probability)
+        selected_result: Optional[SequenceFeedbackResult] = None
+        selected_key: Optional[tuple[float, ...]] = None
+        candidate_updates = self._candidate_updates_for_selection(sequence_update)
+        for candidate_update, source, rank, probability in candidate_updates:
+            temp_ins = ErrorStateINS(ins.state.copy())
+            candidate_result = self._evaluate_single_update(
+                candidate_update,
+                temp_ins,
+                current_time_s=current_time_s,
+                live_ins_state=live_ins_state,
+                previous_live_ins_state=previous_live_ins_state,
+                _commit_runtime_state=False,
+            )
+            candidate_key = self._candidate_selection_key(
+                candidate_result,
+                selected_source=source,
+                selected_rank=rank,
+                selected_probability=float(probability),
+            )
+            if selected_key is None or candidate_key > selected_key:
+                selected_key = candidate_key
+                selected_result = candidate_result
+                selected_update = candidate_update
+                selected_source = source
+                selected_rank = rank
+                selected_probability = float(probability)
+
+        final_result = self._evaluate_single_update(
+            selected_update,
+            ins,
+            current_time_s=current_time_s,
+            live_ins_state=live_ins_state,
+            previous_live_ins_state=previous_live_ins_state,
+            _commit_runtime_state=True,
+        )
+        final_result.diagnostics.candidate_selection_selected_source = (
+            selected_source
+        )
+        final_result.diagnostics.candidate_selection_selected_rank = selected_rank
+        final_result.diagnostics.candidate_selection_selected_probability = float(
+            selected_probability
+        )
+        final_result.diagnostics.candidate_selection_considered = int(
+            len(candidate_updates)
+        )
+        if selected_result is not None and not final_result.diagnostics.feedback_allowed:
+            final_result.diagnostics.candidate_selection_selected_source = (
+                selected_source
+            )
+        return final_result
 
 
 class SequenceLagSmootherController:
@@ -1648,6 +1899,13 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
     summary = {
         "mode": d.mode,
         "measurement_geometry": d.measurement_geometry,
+        "candidate_selection_mode": d.candidate_selection_mode,
+        "candidate_selection_selected_source": d.candidate_selection_selected_source,
+        "candidate_selection_selected_rank": d.candidate_selection_selected_rank,
+        "candidate_selection_selected_probability": (
+            d.candidate_selection_selected_probability
+        ),
+        "candidate_selection_considered": d.candidate_selection_considered,
         "feedback_allowed": d.feedback_allowed,
         "applied": result.applied,
         "rejection_reason": d.rejection_reason,
@@ -1657,6 +1915,16 @@ def summarize_sequence_feedback(result: SequenceFeedbackResult) -> dict:
         "trust_probability": d.trust_probability,
         "trust_allowed": d.trust_allowed,
         "trust_rejection_reason": d.trust_rejection_reason,
+        "committee_member_count": d.committee_member_count,
+        "committee_member_trust_probabilities": list(
+            d.committee_member_trust_probabilities
+        ),
+        "committee_member_predicted_error_delta_m": list(
+            d.committee_member_predicted_error_delta_m
+        ),
+        "committee_member_gain_alpha": list(d.committee_member_gain_alpha),
+        "committee_members_passing": d.committee_members_passing,
+        "committee_rejection_reason": d.committee_rejection_reason,
         "gain_alpha_applied": d.gain_alpha_applied,
         "trust_covariance_scale": d.trust_covariance_scale,
         "predicted_error_delta_m": d.predicted_error_delta_m,

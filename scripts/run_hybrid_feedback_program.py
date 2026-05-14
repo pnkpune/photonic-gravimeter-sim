@@ -72,6 +72,8 @@ HYBRID_BENCHMARK_LABELS = (
     "sequence_replay_gain025",
     "sequence_replay_gain050",
     "sequence_replay_learned_gain",
+    "sequence_replay_committee_gain",
+    "sequence_replay_committee_topk_gain",
 )
 
 
@@ -220,32 +222,52 @@ def evaluate_target_acceptance(
         raise KeyError(
             f"Target {target.name!r} is missing the sequence_replay_learned_gain row."
         )
+    committee_label = (
+        "sequence_replay_committee_topk_gain"
+        if "sequence_replay_committee_topk_gain" in label_summary
+        else "sequence_replay_committee_gain"
+    )
+    if committee_label not in label_summary:
+        raise KeyError(
+            f"Target {target.name!r} is missing the {committee_label} row."
+        )
 
     live = label_summary["live_ins"]
     learned = label_summary["sequence_replay_learned_gain"]
+    committee = label_summary[committee_label]
     live_rmse = live["median_horizontal_rmse_m"]
     live_cep95 = live["median_cep95_m"]
     learned_rmse = learned["median_horizontal_rmse_m"]
     learned_cep95 = learned["median_cep95_m"]
+    committee_rmse = committee["median_horizontal_rmse_m"]
+    committee_cep95 = committee["median_cep95_m"]
 
     beats_live = bool(
         live_rmse is not None
         and live_cep95 is not None
-        and learned_rmse is not None
+        and committee_rmse is not None
+        and committee_cep95 is not None
+        and committee_rmse < live_rmse
+        and committee_cep95 < live_cep95
+    )
+    beats_single_model_learned = bool(
+        learned_rmse is not None
         and learned_cep95 is not None
-        and learned_rmse < live_rmse
-        and learned_cep95 < live_cep95
+        and committee_rmse is not None
+        and committee_cep95 is not None
+        and committee_rmse < learned_rmse
+        and committee_cep95 < learned_cep95
     )
     within_live_5pct = bool(
         live_rmse is not None
-        and learned_rmse is not None
-        and learned_rmse <= 1.05 * live_rmse
+        and committee_rmse is not None
+        and committee_rmse <= 1.05 * live_rmse
     )
-    zero_hmi = bool(learned["hmi_zero_all_rows"])
-    applied_nonzero = int(learned["total_sequence_applied_updates"]) > 0
+    zero_hmi = bool(committee["hmi_zero_all_rows"])
+    applied_nonzero = int(committee["total_sequence_applied_updates"]) > 0
 
     if target.acceptance_mode == "beat_live":
-        accepted = bool(beats_live and zero_hmi and applied_nonzero)
+        accepted = bool(beats_single_model_learned and zero_hmi and applied_nonzero)
     elif target.acceptance_mode == "nonregress_live_5pct":
         accepted = bool(within_live_5pct and zero_hmi)
     else:
@@ -257,16 +279,22 @@ def evaluate_target_acceptance(
         "target_name": target.name,
         "acceptance_mode": target.acceptance_mode,
         "accepted": accepted,
+        "beats_single_model_learned": beats_single_model_learned,
         "beats_live": beats_live,
         "within_live_5pct": within_live_5pct,
         "zero_hmi_all_rows": zero_hmi,
         "applied_updates_nonzero": applied_nonzero,
         "live_ins_median_horizontal_rmse_m": live_rmse,
         "live_ins_median_cep95_m": live_cep95,
+        "single_model_learned_gain_median_horizontal_rmse_m": learned_rmse,
+        "single_model_learned_gain_median_cep95_m": learned_cep95,
+        "committee_label": committee_label,
+        "committee_gain_median_horizontal_rmse_m": committee_rmse,
+        "committee_gain_median_cep95_m": committee_cep95,
         "learned_gain_median_horizontal_rmse_m": learned_rmse,
         "learned_gain_median_cep95_m": learned_cep95,
-        "learned_gain_total_sequence_applied_updates": int(
-            learned["total_sequence_applied_updates"]
+        "committee_gain_total_sequence_applied_updates": int(
+            committee["total_sequence_applied_updates"]
         ),
     }
 
@@ -308,22 +336,24 @@ def _write_markdown_report(
         f"- accepted: `{summary['accepted']}`",
         f"- primary targets passed: `{summary['primary_targets_passed']}`",
         f"- external target passed: `{summary['external_target_passed']}`",
-        f"- learned gain beats trust-only average: `{summary['learned_gain_beats_trust_only_average']}`",
-        f"- learned gain beats fixed-gain scout average: `{summary['learned_gain_beats_fixed_gain_average']}`",
+        f"- committee gain beats learned-gain average: `{summary['committee_gain_beats_learned_gain_average']}`",
+        f"- committee gain beats fixed-gain scout average: `{summary['committee_gain_beats_fixed_gain_average']}`",
+        f"- committee top-k beats committee gain average: `{summary.get('committee_topk_beats_committee_gain_average', False)}`",
         f"- recommended runtime label: `{summary['recommended_runtime_label']}`",
         f"- learned-gain cooldown [s]: `{summary['sequence_feedback_learned_gain_cooldown_s']}`",
         f"- learned-gain max applied updates: `{summary['sequence_feedback_learned_gain_max_applied_updates']}`",
         "",
         "## Acceptance Table",
         "",
-        "| Target | Mode | Accepted | Beat Live INS | Within 5% of Live INS | Zero HMI | Applied Updates > 0 |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Target | Mode | Accepted | Beat Learned Gain | Beat Live INS | Within 5% of Live INS | Zero HMI | Applied Updates > 0 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for acceptance in target_acceptance:
         lines.append(
             f"| `{acceptance['target_name']}` | "
             f"`{acceptance['acceptance_mode']}` | "
             f"`{acceptance['accepted']}` | "
+            f"`{acceptance['beats_single_model_learned']}` | "
             f"`{acceptance['beats_live']}` | "
             f"`{acceptance['within_live_5pct']}` | "
             f"`{acceptance['zero_hmi_all_rows']}` | "
@@ -343,10 +373,10 @@ def _write_markdown_report(
         label_summary = scenario["label_summary"]
         for label in (
             "live_ins",
-            "sequence_replay_trust_only",
             "sequence_replay_gain025",
-            "sequence_replay_gain050",
             "sequence_replay_learned_gain",
+            "sequence_replay_committee_gain",
+            "sequence_replay_committee_topk_gain",
         ):
             if label not in label_summary:
                 continue
@@ -369,7 +399,9 @@ def _write_markdown_report(
             "",
             f"- feedback corpus: `{summary['feedback_corpus_path']}`",
             f"- feedback event cache: `{summary['event_cache_dir']}`",
+            f"- hard-negative manifest: `{summary['hard_negative_manifest_path']}`",
             f"- trust model: `{summary['trust_model_output_path']}`",
+            f"- trust committee manifest: `{summary['trust_committee_manifest_path']}`",
             f"- trust model summary: `{summary['trust_model_summary_path']}`",
             f"- trust model CV summary: `{summary['trust_model_cv_summary_path']}`",
             "",
@@ -403,6 +435,7 @@ def _run_benchmark_one_seed(
     seed: int,
     output_dir: Path,
     trust_model_path: Path,
+    trust_committee_manifest_path: Path | None,
     min_trust_probability: float,
     max_predicted_error_delta_m: float | None,
     min_projected_std_m: float | None,
@@ -437,6 +470,13 @@ def _run_benchmark_one_seed(
         "--sequence-feedback-trust-gain-alpha-max",
         str(float(trust_gain_alpha_max)),
     ]
+    if trust_committee_manifest_path is not None:
+        cmd.extend(
+            [
+                "--sequence-feedback-trust-committee-manifest-path",
+                str(trust_committee_manifest_path),
+            ]
+        )
     if learned_gain_cooldown_s > 0.0:
         cmd.extend(
             [
@@ -504,6 +544,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--trust-model-output-path",
         default=None,
         help="Optional output NPZ path for the trust model.",
+    )
+    parser.add_argument(
+        "--trust-committee-manifest-output-path",
+        default=None,
+        help="Optional JSON output path for the trust-model committee manifest.",
+    )
+    parser.add_argument(
+        "--hard-negative-manifest",
+        default=None,
+        help="Optional JSON manifest of primary failure region/seed pairs.",
     )
     parser.add_argument(
         "--summary-path",
@@ -574,6 +624,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gain-alpha-reference", type=float, default=0.25)
     parser.add_argument("--gain-alpha-prediction-scale", type=float, default=0.35)
     parser.add_argument("--gain-alpha-safe-max", type=float, default=0.50)
+    parser.add_argument(
+        "--primary-failure-negative-weight",
+        type=float,
+        default=4.0,
+    )
+    parser.add_argument(
+        "--committee-seeds",
+        nargs="+",
+        type=int,
+        default=[42, 123, 777],
+        help="Drop-seed committee members trained alongside the single trust model.",
+    )
     parser.add_argument(
         "--covariance-scale-reference-error-m",
         type=float,
@@ -686,6 +748,11 @@ def main() -> int:
         if args.trust_model_output_path is None
         else _resolve_path(args.trust_model_output_path)
     )
+    trust_committee_manifest_output_path = (
+        output_dir / "sequence_feedback_trust_model_committee_manifest.json"
+        if args.trust_committee_manifest_output_path is None
+        else _resolve_path(args.trust_committee_manifest_output_path)
+    )
     summary_path = (
         output_dir / "hybrid_feedback_program_summary.json"
         if args.summary_path is None
@@ -696,6 +763,25 @@ def main() -> int:
         if args.report_path is None
         else _resolve_path(args.report_path)
     )
+    hard_negative_manifest_path = (
+        output_dir / "primary_failure_manifest.json"
+        if args.hard_negative_manifest is None
+        else _resolve_path(args.hard_negative_manifest)
+    )
+
+    if args.hard_negative_manifest is None:
+        hard_negative_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        hard_negative_manifest_path.write_text(
+            json.dumps(
+                {
+                    "norwegian_margin_maritime": [42, 123, 777],
+                    "helgeland_offshore": [42, 123, 777],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     if not args.skip_corpus_build:
         cmd = [
@@ -740,6 +826,10 @@ def main() -> int:
             str(int(args.max_iter)),
             "--trust-threshold",
             str(float(args.trust_threshold)),
+            "--hard-negative-manifest",
+            str(hard_negative_manifest_path),
+            "--primary-failure-negative-weight",
+            str(float(args.primary_failure_negative_weight)),
             "--gain-alpha-l2",
             str(float(args.gain_alpha_l2)),
             "--gain-alpha-reference",
@@ -748,6 +838,10 @@ def main() -> int:
             str(float(args.gain_alpha_prediction_scale)),
             "--gain-alpha-safe-max",
             str(float(args.gain_alpha_safe_max)),
+            "--committee-seeds",
+            *[str(int(seed)) for seed in args.committee_seeds],
+            "--committee-manifest-output-path",
+            str(trust_committee_manifest_output_path),
             "--covariance-scale-reference-error-m",
             str(float(args.covariance_scale_reference_error_m)),
         ]
@@ -766,6 +860,11 @@ def main() -> int:
                     seed=int(seed),
                     output_dir=output_dir / "benchmarks",
                     trust_model_path=trust_model_output_path,
+                    trust_committee_manifest_path=(
+                        trust_committee_manifest_output_path
+                        if trust_committee_manifest_output_path.exists()
+                        else None
+                    ),
                     min_trust_probability=float(
                         args.sequence_feedback_min_trust_probability
                     ),
@@ -828,9 +927,13 @@ def main() -> int:
         benchmark_summaries,
         label="sequence_replay_learned_gain",
     )
-    trust_only_primary_average_rmse = _primary_average_rmse(
+    committee_gain_primary_average_rmse = _primary_average_rmse(
         benchmark_summaries,
-        label="sequence_replay_trust_only",
+        label="sequence_replay_committee_gain",
+    )
+    committee_topk_primary_average_rmse = _primary_average_rmse(
+        benchmark_summaries,
+        label="sequence_replay_committee_topk_gain",
     )
     gain025_primary_average_rmse = _primary_average_rmse(
         benchmark_summaries,
@@ -853,19 +956,51 @@ def main() -> int:
         if not fixed_baseline_average_candidates
         else float(min(fixed_baseline_average_candidates))
     )
-    learned_gain_beats_trust_only_average = bool(
+    committee_gain_beats_learned_gain_average = bool(
         learned_gain_primary_average_rmse is not None
-        and trust_only_primary_average_rmse is not None
-        and learned_gain_primary_average_rmse < trust_only_primary_average_rmse
+        and committee_gain_primary_average_rmse is not None
+        and committee_gain_primary_average_rmse < learned_gain_primary_average_rmse
     )
-    learned_gain_beats_fixed_gain_average = bool(
-        learned_gain_primary_average_rmse is not None
+    committee_gain_beats_fixed_gain_average = bool(
+        committee_gain_primary_average_rmse is not None
         and best_fixed_primary_average_rmse is not None
-        and learned_gain_primary_average_rmse < best_fixed_primary_average_rmse
+        and committee_gain_primary_average_rmse < best_fixed_primary_average_rmse
     )
-    recommended_runtime_label = "sequence_replay_learned_gain"
-    if not learned_gain_beats_fixed_gain_average:
-        if gain025_primary_average_rmse is not None and (
+    committee_topk_beats_committee_gain_average = bool(
+        committee_topk_primary_average_rmse is not None
+        and committee_gain_primary_average_rmse is not None
+        and committee_topk_primary_average_rmse < committee_gain_primary_average_rmse
+    )
+    selected_committee_runtime_label = (
+        "sequence_replay_committee_topk_gain"
+        if committee_topk_beats_committee_gain_average
+        else "sequence_replay_committee_gain"
+    )
+    selected_committee_primary_average_rmse = (
+        committee_topk_primary_average_rmse
+        if selected_committee_runtime_label == "sequence_replay_committee_topk_gain"
+        else committee_gain_primary_average_rmse
+    )
+    selected_committee_beats_learned_gain_average = bool(
+        learned_gain_primary_average_rmse is not None
+        and selected_committee_primary_average_rmse is not None
+        and selected_committee_primary_average_rmse < learned_gain_primary_average_rmse
+    )
+    selected_committee_beats_fixed_gain_average = bool(
+        selected_committee_primary_average_rmse is not None
+        and best_fixed_primary_average_rmse is not None
+        and selected_committee_primary_average_rmse < best_fixed_primary_average_rmse
+    )
+    recommended_runtime_label = selected_committee_runtime_label
+    if not selected_committee_beats_fixed_gain_average:
+        if selected_committee_beats_learned_gain_average:
+            recommended_runtime_label = selected_committee_runtime_label
+        elif learned_gain_primary_average_rmse is not None and (
+            best_fixed_primary_average_rmse is None
+            or learned_gain_primary_average_rmse <= best_fixed_primary_average_rmse
+        ):
+            recommended_runtime_label = "sequence_replay_learned_gain"
+        elif gain025_primary_average_rmse is not None and (
             gain050_primary_average_rmse is None
             or gain025_primary_average_rmse <= gain050_primary_average_rmse
         ):
@@ -884,13 +1019,22 @@ def main() -> int:
         "output_dir": _relative_to_root(output_dir),
         "feedback_corpus_path": _relative_to_root(feedback_corpus_path),
         "event_cache_dir": _relative_to_root(event_cache_dir),
+        "hard_negative_manifest_path": _relative_to_root(hard_negative_manifest_path),
         "trust_model_output_path": _relative_to_root(trust_model_output_path),
+        "trust_committee_manifest_path": _relative_to_root(
+            trust_committee_manifest_output_path
+        ),
         "trust_model_summary_path": _relative_to_root(trust_model_summary_path),
         "trust_model_cv_summary_path": _relative_to_root(trust_model_cv_summary_path),
         "benchmark_summaries": benchmark_summaries,
         "target_acceptance": target_acceptance,
         "learned_gain_primary_average_rmse_m": learned_gain_primary_average_rmse,
-        "trust_only_primary_average_rmse_m": trust_only_primary_average_rmse,
+        "committee_gain_primary_average_rmse_m": committee_gain_primary_average_rmse,
+        "committee_topk_primary_average_rmse_m": committee_topk_primary_average_rmse,
+        "selected_committee_runtime_label": selected_committee_runtime_label,
+        "selected_committee_primary_average_rmse_m": (
+            selected_committee_primary_average_rmse
+        ),
         "gain025_primary_average_rmse_m": gain025_primary_average_rmse,
         "gain050_primary_average_rmse_m": gain050_primary_average_rmse,
         "best_fixed_primary_average_rmse_m": best_fixed_primary_average_rmse,
@@ -902,8 +1046,17 @@ def main() -> int:
             if args.sequence_feedback_learned_gain_max_applied_updates is None
             else int(args.sequence_feedback_learned_gain_max_applied_updates)
         ),
-        "learned_gain_beats_trust_only_average": learned_gain_beats_trust_only_average,
-        "learned_gain_beats_fixed_gain_average": learned_gain_beats_fixed_gain_average,
+        "committee_gain_beats_learned_gain_average": committee_gain_beats_learned_gain_average,
+        "committee_gain_beats_fixed_gain_average": committee_gain_beats_fixed_gain_average,
+        "committee_topk_beats_committee_gain_average": (
+            committee_topk_beats_committee_gain_average
+        ),
+        "selected_committee_beats_learned_gain_average": (
+            selected_committee_beats_learned_gain_average
+        ),
+        "selected_committee_beats_fixed_gain_average": (
+            selected_committee_beats_fixed_gain_average
+        ),
         "recommended_runtime_label": recommended_runtime_label,
         "primary_targets_passed": bool(
             primary_targets and all(bool(row["accepted"]) for row in primary_targets)
@@ -918,7 +1071,7 @@ def main() -> int:
                 not external_targets
                 or all(bool(row["accepted"]) for row in external_targets)
             )
-            and learned_gain_beats_fixed_gain_average
+            and selected_committee_beats_learned_gain_average
         ),
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)

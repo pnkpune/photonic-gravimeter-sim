@@ -242,6 +242,10 @@ def test_sequence_matcher_emits_deterministic_anchor_estimates() -> None:
     assert any(abs(float(mid_result.time_s) - t) < 1.0e-12 for t in anchor_times)
     assert all(anchor.covariance_ned_m2.shape == (3, 3) for anchor in mid_result.anchor_estimates)
     assert all(anchor.global_index >= 0 for anchor in mid_result.anchor_estimates)
+    assert len(mid_result.candidate_hypotheses) == 3
+    probs = [float(candidate.marginal_probability) for candidate in mid_result.candidate_hypotheses]
+    assert probs == sorted(probs, reverse=True)
+    assert all(candidate.rank >= 0 for candidate in mid_result.candidate_hypotheses)
 
 
 def test_sequence_matcher_respects_external_search_center_offset() -> None:

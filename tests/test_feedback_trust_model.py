@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from gravnav.estimators.error_state_ins import (
@@ -11,17 +13,21 @@ from gravnav.estimators.error_state_ins import (
 from gravnav.estimators.feedback_policy import SequenceFeedbackController, SequenceFeedbackSpec
 from gravnav.estimators.gravity_sequence_match import (
     SequenceAmbiguityDiagnostics,
+    SequenceCandidateHypothesis,
     SequenceMatchEstimate,
     SequenceMatchUpdateResult,
 )
 from gravnav.ml.feedback_trust import (
     SEQUENCE_FEEDBACK_FEATURE_NAMES,
+    _primary_failure_negative_mask,
     SequenceFeedbackEventCorpus,
+    SequenceFeedbackTrustCommittee,
     SequenceFeedbackTrustModel,
     SequenceFeedbackTrustModelSpec,
     cross_validate_sequence_feedback_trust_model,
     extract_sequence_feedback_features,
     fit_sequence_feedback_trust_model,
+    load_sequence_feedback_trust_committee,
 )
 
 
@@ -101,6 +107,34 @@ def _make_sequence_update() -> SequenceMatchUpdateResult:
         viterbi_offset_ned_m=np.array([10.0, -8.0, 0.0], dtype=np.float64),
         posterior_mean_offset_ned_m=np.array([8.0, -4.0, 0.0], dtype=np.float64),
         ambiguity_diagnostics=ambiguity,
+        candidate_hypotheses=(
+            SequenceCandidateHypothesis(
+                rank=0,
+                candidate_index=11,
+                marginal_probability=0.44,
+                probability_gap_to_best=0.0,
+                lat_rad=np.deg2rad(63.00015),
+                lon_rad=np.deg2rad(10.00005),
+                height_m=0.0,
+                offset_ned_m=np.array([4.0, -2.0, 0.0], dtype=np.float64),
+                predicted_disturbance_mps2=1.1e-5,
+                predicted_bathymetry_m=101.0,
+                predicted_magnetic_total_nt=45010.0,
+            ),
+            SequenceCandidateHypothesis(
+                rank=1,
+                candidate_index=7,
+                marginal_probability=0.31,
+                probability_gap_to_best=0.13,
+                lat_rad=np.deg2rad(63.00005),
+                lon_rad=np.deg2rad(10.00015),
+                height_m=0.0,
+                offset_ned_m=np.array([2.0, -1.0, 0.0], dtype=np.float64),
+                predicted_disturbance_mps2=9.0e-6,
+                predicted_bathymetry_m=99.0,
+                predicted_magnetic_total_nt=44990.0,
+            ),
+        ),
         publishability_probability=0.72,
         support_expansion_probability=0.33,
         learned_covariance_scale=0.9,
@@ -184,6 +218,67 @@ def test_sequence_feedback_controller_uses_trust_gate_and_covariance_scale(
     assert result.diagnostics.predicted_error_delta_m is not None
 
 
+def test_sequence_feedback_controller_reranks_topk_candidates(tmp_path) -> None:
+    correction_norm_idx = SEQUENCE_FEEDBACK_FEATURE_NAMES.index("correction_norm_m")
+    model = SequenceFeedbackTrustModel(
+        spec=SequenceFeedbackTrustModelSpec(),
+        feature_mean=np.zeros(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        feature_std=np.ones(len(SEQUENCE_FEEDBACK_FEATURE_NAMES), dtype=np.float64),
+        useful_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        useful_bias=np.array([3.0, -3.0], dtype=np.float64),
+        error_delta_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        error_delta_bias=np.array([-2.0, 2.0], dtype=np.float64),
+        gain_alpha_weights=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        gain_alpha_bias=np.ones(2, dtype=np.float64),
+        metadata={},
+    )
+    model.useful_weights[0, correction_norm_idx] = -0.5
+    model.error_delta_weights[0, correction_norm_idx] = 0.5
+    model_path = tmp_path / "trust_model_topk.npz"
+    model.save_npz(model_path)
+
+    spec = SequenceFeedbackSpec(
+        enabled=True,
+        mode="lag_replay",
+        measurement_geometry="directional_horizontal",
+        min_window_size=1,
+        min_peak_probability=0.0,
+        min_horizontal_eigenvalue_ratio=1.0,
+        max_horizontal_std_m=1.0e6,
+        max_correction_norm_m=1.0e6,
+        covariance_inflation=4.0,
+        nis_threshold=None,
+        trust_model_export_path=str(model_path),
+        trust_gate_source="both",
+        min_trust_probability=0.5,
+        max_predicted_error_delta_m=0.0,
+        candidate_selection_mode="topk_trust_rerank",
+    )
+    ctrl = SequenceFeedbackController(spec)
+    update = _make_sequence_update()
+    delayed_state = _make_state(time_s=50.0)
+    current_state = _make_state(time_s=53.0)
+    previous_state = _make_state(time_s=52.0, north_speed_mps=1.0, east_speed_mps=0.2)
+
+    result = ctrl.evaluate(
+        update,
+        ErrorStateINS(delayed_state.copy()),
+        current_time_s=53.0,
+        live_ins_state=current_state,
+        previous_live_ins_state=previous_state,
+    )
+
+    assert result.applied is True
+    assert result.diagnostics.candidate_selection_mode == "topk_trust_rerank"
+    assert result.diagnostics.candidate_selection_selected_source == "candidate_hypothesis"
+    assert result.diagnostics.candidate_selection_selected_rank == 1
+    assert result.diagnostics.candidate_selection_considered == 3
+    assert np.allclose(
+        result.diagnostics.horizontal_offset_ned_m,
+        np.array([2.0, -1.0], dtype=np.float64),
+    )
+
+
 def test_fit_and_cross_validate_sequence_feedback_trust_model() -> None:
     feature_dim = len(SEQUENCE_FEEDBACK_FEATURE_NAMES)
     features = np.zeros((6, feature_dim), dtype=np.float64)
@@ -198,6 +293,7 @@ def test_fit_and_cross_validate_sequence_feedback_trust_model() -> None:
         region_names=region_names,
         region_index=region_index,
         event_region_names=("region_a",) * 3 + ("region_b",) * 3,
+        event_seed=np.array([42, 42, 42, 123, 123, 123], dtype=np.int64),
         current_time_s=np.arange(6, dtype=np.float64),
         update_time_s=np.arange(6, dtype=np.float64),
         current_step_index=np.arange(6, dtype=np.int64),
@@ -235,6 +331,226 @@ def test_fit_and_cross_validate_sequence_feedback_trust_model() -> None:
     assert "median_brier_score" in cv["aggregate"]["lag_replay"]
     assert "median_gain_alpha_rmse" in cv["aggregate"]["lag_replay"]
     assert "median_median_applied_alpha" in cv["aggregate"]["lag_replay"]
+
+
+def test_sequence_feedback_event_corpus_roundtrip_preserves_event_seed(tmp_path) -> None:
+    corpus = SequenceFeedbackEventCorpus(
+        feature_names=SEQUENCE_FEEDBACK_FEATURE_NAMES,
+        features=np.zeros((2, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        region_names=("region_a",),
+        region_index=np.array([0, 0], dtype=np.int64),
+        event_region_names=("region_a", "region_a"),
+        event_seed=np.array([42, 123], dtype=np.int64),
+        current_time_s=np.array([1.0, 2.0], dtype=np.float64),
+        update_time_s=np.array([0.5, 1.5], dtype=np.float64),
+        current_step_index=np.array([1, 2], dtype=np.int64),
+        target_step_index=np.array([0, 1], dtype=np.int64),
+        lag_replay_applied=np.array([True, False], dtype=bool),
+        lag_replay_improves_error=np.array([True, False], dtype=bool),
+        lag_replay_hmi_safe=np.array([True, True], dtype=bool),
+        lag_replay_useful_and_safe=np.array([True, False], dtype=bool),
+        lag_replay_error_delta_m=np.array([-5.0, 2.0], dtype=np.float64),
+        lag_replay_best_gain_alpha=np.array([0.25, 0.0], dtype=np.float64),
+        bias_transfer_applied=np.array([False, False], dtype=bool),
+        bias_transfer_improves_error=np.array([False, False], dtype=bool),
+        bias_transfer_hmi_safe=np.array([True, True], dtype=bool),
+        bias_transfer_useful_and_safe=np.array([False, False], dtype=bool),
+        bias_transfer_error_delta_m=np.array([1.0, 1.5], dtype=np.float64),
+        bias_transfer_best_gain_alpha=np.array([0.0, 0.0], dtype=np.float64),
+        metadata={"hello": "world"},
+    )
+    path = tmp_path / "feedback_corpus.npz"
+    corpus.save_npz(path)
+    loaded = SequenceFeedbackEventCorpus.from_npz(path)
+    assert np.array_equal(loaded.event_seed, np.array([42, 123], dtype=np.int64))
+
+
+def test_primary_failure_negative_mask_only_marks_flagged_pairs() -> None:
+    corpus = SequenceFeedbackEventCorpus(
+        feature_names=SEQUENCE_FEEDBACK_FEATURE_NAMES,
+        features=np.zeros((4, len(SEQUENCE_FEEDBACK_FEATURE_NAMES)), dtype=np.float64),
+        region_names=("norwegian_margin_maritime", "helgeland_offshore"),
+        region_index=np.array([0, 0, 1, 1], dtype=np.int64),
+        event_region_names=(
+            "norwegian_margin_maritime",
+            "norwegian_margin_maritime",
+            "helgeland_offshore",
+            "helgeland_offshore",
+        ),
+        event_seed=np.array([42, 555, 42, 777], dtype=np.int64),
+        current_time_s=np.arange(4, dtype=np.float64),
+        update_time_s=np.arange(4, dtype=np.float64),
+        current_step_index=np.arange(4, dtype=np.int64),
+        target_step_index=np.arange(4, dtype=np.int64),
+        lag_replay_applied=np.ones(4, dtype=bool),
+        lag_replay_improves_error=np.zeros(4, dtype=bool),
+        lag_replay_hmi_safe=np.ones(4, dtype=bool),
+        lag_replay_useful_and_safe=np.zeros(4, dtype=bool),
+        lag_replay_error_delta_m=np.ones(4, dtype=np.float64),
+        lag_replay_best_gain_alpha=np.zeros(4, dtype=np.float64),
+        bias_transfer_applied=np.zeros(4, dtype=bool),
+        bias_transfer_improves_error=np.zeros(4, dtype=bool),
+        bias_transfer_hmi_safe=np.ones(4, dtype=bool),
+        bias_transfer_useful_and_safe=np.zeros(4, dtype=bool),
+        bias_transfer_error_delta_m=np.ones(4, dtype=np.float64),
+        bias_transfer_best_gain_alpha=np.zeros(4, dtype=np.float64),
+        metadata={},
+    )
+    mask = _primary_failure_negative_mask(
+        corpus,
+        {
+            "norwegian_margin_maritime": [42, 123, 777],
+            "helgeland_offshore": [42, 123, 777],
+        },
+    )
+    assert np.array_equal(mask, np.array([True, False, True, True], dtype=bool))
+
+
+def test_load_committee_manifest_and_aggregate_conservative_unanimity(tmp_path) -> None:
+    feature_dim = len(SEQUENCE_FEEDBACK_FEATURE_NAMES)
+    zeros = np.zeros((2, feature_dim), dtype=np.float64)
+    model_specs = [
+        ("drop_seed_42", np.array([3.0, -3.0]), np.array([-10.0, 5.0]), np.array([0.24, 0.8])),
+        ("drop_seed_123", np.array([2.0, -3.0]), np.array([-5.0, 5.0]), np.array([0.20, 0.7])),
+        ("drop_seed_777", np.array([3.0, -3.0]), np.array([1.0, 5.0]), np.array([0.30, 0.9])),
+    ]
+    members = []
+    for idx, (name, useful_bias, error_bias, gain_bias) in enumerate(model_specs):
+        model = SequenceFeedbackTrustModel(
+            spec=SequenceFeedbackTrustModelSpec(),
+            feature_mean=np.zeros(feature_dim, dtype=np.float64),
+            feature_std=np.ones(feature_dim, dtype=np.float64),
+            useful_weights=zeros.copy(),
+            useful_bias=useful_bias.astype(np.float64),
+            error_delta_weights=zeros.copy(),
+            error_delta_bias=error_bias.astype(np.float64),
+            gain_alpha_weights=zeros.copy(),
+            gain_alpha_bias=gain_bias.astype(np.float64),
+            metadata={},
+        )
+        model_path = tmp_path / f"{name}.npz"
+        model.save_npz(model_path)
+        members.append(
+            {
+                "name": name,
+                "drop_seed": [42, 123, 777][idx],
+                "model_path": model_path.name,
+            }
+        )
+    manifest_path = tmp_path / "committee_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "aggregator": "conservative_unanimity_v1",
+                "members": members,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    committee = load_sequence_feedback_trust_committee(manifest_path)
+    assert isinstance(committee, SequenceFeedbackTrustCommittee)
+    assert len(committee.members) == 3
+
+    prediction = committee.predict(
+        np.zeros((1, feature_dim), dtype=np.float64),
+        mode="lag_replay",
+        min_trust_probability=0.7,
+        max_predicted_error_delta_m=0.0,
+        alpha_min=0.0,
+        alpha_max=1.0,
+        covariance_scale_min=0.75,
+        covariance_scale_max=2.0,
+    )
+    assert prediction.trust_allowed is False
+    assert prediction.members_passing == 2
+    assert prediction.trust_probability == min(prediction.member_trust_probabilities)
+    assert prediction.predicted_error_delta_m == max(
+        prediction.member_predicted_error_delta_m
+    )
+    assert prediction.gain_alpha == min(prediction.member_gain_alpha)
+    assert prediction.rejection_reason is not None
+
+
+def test_sequence_feedback_controller_uses_committee_manifest(tmp_path) -> None:
+    feature_dim = len(SEQUENCE_FEEDBACK_FEATURE_NAMES)
+    zeros = np.zeros((2, feature_dim), dtype=np.float64)
+    members = []
+    for idx, (name, trust_bias, error_bias, gain_bias) in enumerate(
+        [
+            ("drop_seed_42", np.array([3.0, -3.0]), np.array([-10.0, 5.0]), np.array([0.24, 0.8])),
+            ("drop_seed_123", np.array([2.5, -3.0]), np.array([-8.0, 5.0]), np.array([0.22, 0.7])),
+            ("drop_seed_777", np.array([2.2, -3.0]), np.array([-6.0, 5.0]), np.array([0.20, 0.6])),
+        ]
+    ):
+        model = SequenceFeedbackTrustModel(
+            spec=SequenceFeedbackTrustModelSpec(),
+            feature_mean=np.zeros(feature_dim, dtype=np.float64),
+            feature_std=np.ones(feature_dim, dtype=np.float64),
+            useful_weights=zeros.copy(),
+            useful_bias=trust_bias.astype(np.float64),
+            error_delta_weights=zeros.copy(),
+            error_delta_bias=error_bias.astype(np.float64),
+            gain_alpha_weights=zeros.copy(),
+            gain_alpha_bias=gain_bias.astype(np.float64),
+            metadata={},
+        )
+        model_path = tmp_path / f"{name}.npz"
+        model.save_npz(model_path)
+        members.append(
+            {
+                "name": name,
+                "drop_seed": [42, 123, 777][idx],
+                "model_path": model_path.name,
+            }
+        )
+    manifest_path = tmp_path / "committee_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {"aggregator": "conservative_unanimity_v1", "members": members},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    spec = SequenceFeedbackSpec(
+        enabled=True,
+        mode="lag_replay",
+        measurement_geometry="directional_horizontal",
+        min_window_size=1,
+        min_peak_probability=0.0,
+        min_horizontal_eigenvalue_ratio=1.0,
+        max_horizontal_std_m=1.0e6,
+        max_correction_norm_m=1.0e6,
+        covariance_inflation=4.0,
+        nis_threshold=None,
+        trust_committee_manifest_path=str(manifest_path),
+        trust_gate_source="both",
+        min_trust_probability=0.5,
+        max_predicted_error_delta_m=0.0,
+        apply_trust_gain_alpha=True,
+        trust_gain_alpha_min=0.1,
+        trust_gain_alpha_max=0.9,
+    )
+    ctrl = SequenceFeedbackController(spec)
+    result = ctrl.evaluate(
+        _make_sequence_update(),
+        ErrorStateINS(_make_state(time_s=50.0).copy()),
+        current_time_s=53.0,
+        live_ins_state=_make_state(time_s=53.0),
+        previous_live_ins_state=_make_state(
+            time_s=52.0, north_speed_mps=1.0, east_speed_mps=0.2
+        ),
+    )
+
+    assert result.applied is True
+    assert result.diagnostics.committee_member_count == 3
+    assert result.diagnostics.committee_members_passing == 3
+    assert len(result.diagnostics.committee_member_trust_probabilities) == 3
+    assert len(result.diagnostics.committee_member_predicted_error_delta_m) == 3
+    assert len(result.diagnostics.committee_member_gain_alpha) == 3
 
 
 def test_sequence_feedback_controller_rejects_positive_predicted_error_delta(

@@ -391,6 +391,11 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         if not str(args.sequence_feedback_trust_model_path).strip()
         else str(_resolve_path(args.sequence_feedback_trust_model_path))
     )
+    map_match.sequence_feedback_spec.trust_committee_manifest_path = (
+        None
+        if not str(args.sequence_feedback_trust_committee_manifest_path).strip()
+        else str(_resolve_path(args.sequence_feedback_trust_committee_manifest_path))
+    )
     map_match.sequence_feedback_spec.trust_gate_source = str(
         args.sequence_feedback_trust_gate_source
     )
@@ -424,6 +429,9 @@ def _build_runner_config(args: argparse.Namespace) -> SimulationRunnerConfig:
         None
         if args.sequence_feedback_fixed_gain_alpha_override is None
         else float(args.sequence_feedback_fixed_gain_alpha_override)
+    )
+    map_match.sequence_feedback_spec.candidate_selection_mode = str(
+        args.sequence_feedback_candidate_selection_mode
     )
     map_match.sequence_feedback_spec.learned_gain_cooldown_s = float(
         args.sequence_feedback_learned_gain_cooldown_s
@@ -898,6 +906,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional exported trust-model NPZ used for sequence feedback gating.",
     )
     parser.add_argument(
+        "--sequence-feedback-trust-committee-manifest-path",
+        default="",
+        help="Optional committee manifest JSON used for conservative sequence feedback gating.",
+    )
+    parser.add_argument(
         "--sequence-feedback-trust-gate-source",
         choices=("heuristic", "trust_model", "both"),
         default="heuristic",
@@ -960,6 +973,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional fixed feedback gain alpha applied to accepted sequence updates. "
             "When set it overrides trust-derived gain prediction."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-feedback-candidate-selection-mode",
+        choices=("posterior_mean", "topk_trust_rerank"),
+        default="posterior_mean",
+        help=(
+            "How sequence feedback chooses the delayed correction hypothesis. "
+            "`posterior_mean` keeps the current single-update path; "
+            "`topk_trust_rerank` reranks the exported top-k discrete hypotheses "
+            "plus the posterior mean using the active trust/gain evaluator."
         ),
     )
     parser.add_argument(
@@ -1392,6 +1416,15 @@ def main() -> int:
                 "sequence_feedback_apply_trust_gain_alpha": bool(
                     args.sequence_feedback_apply_trust_gain_alpha
                 ),
+                "sequence_feedback_trust_committee_manifest_path": (
+                    None
+                    if not str(args.sequence_feedback_trust_committee_manifest_path).strip()
+                    else str(
+                        _resolve_path(
+                            args.sequence_feedback_trust_committee_manifest_path
+                        )
+                    )
+                ),
                 "sequence_feedback_trust_gain_alpha_min": float(
                     args.sequence_feedback_trust_gain_alpha_min
                 ),
@@ -1402,6 +1435,9 @@ def main() -> int:
                     None
                     if args.sequence_feedback_fixed_gain_alpha_override is None
                     else float(args.sequence_feedback_fixed_gain_alpha_override)
+                ),
+                "sequence_feedback_candidate_selection_mode": str(
+                    args.sequence_feedback_candidate_selection_mode
                 ),
                 "sequence_feedback_learned_gain_cooldown_s": float(
                     args.sequence_feedback_learned_gain_cooldown_s
